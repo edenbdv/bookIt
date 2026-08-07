@@ -54,6 +54,7 @@ services:
         condition: service_healthy
     volumes:
       - .:/code
+      - /code/.venv
 
 volumes:
   pgdata:
