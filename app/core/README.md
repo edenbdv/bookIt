@@ -25,3 +25,13 @@ If every pooled connection is checked out when a new request arrives, the pool e
 `Settings` (a Pydantic `BaseSettings`) reads config from `.env`, validated and typed, with defaults so the app still boots if `.env` is missing a key or doesn't exist. Every module reads config through `get_settings()` rather than parsing `os.environ` itself — one typed source of truth instead of scattered, typo-prone lookups.
 
 `get_settings()` is wrapped in `@lru_cache`. Since it takes no arguments, there's only ever one possible cache entry — so after the first call, every caller across the app gets back the exact same `Settings` object instead of a fresh one. That's a singleton, achieved as a side effect of memoization rather than a dedicated singleton class. It's a singleton *by convention*: nothing stops calling `Settings()` directly elsewhere and getting an uncached instance — the guarantee only holds as long as the codebase always goes through `get_settings()`.
+
+## `/health` and Docker's healthcheck — two different things, wired together
+
+`router.py`'s `GET /health` is application code: it runs `SELECT 1` against Postgres (via `db.py`'s shared engine) and `PING` against Redis (via `redis_client.py`'s shared client), and returns `200` if both succeed, `503` if either fails.
+
+Docker's `healthcheck:` (in `docker-compose.yml`) is a *separate*, generic mechanism — it is not specific to HTTP or to any endpoint named `/health`. It just runs whatever command you configure, on an interval, inside the container, and checks the exit code (`0` = healthy, non-zero = unhealthy). The infra services prove this: `db`'s healthcheck runs `pg_isready`, `redis`'s runs `redis-cli ping`, `rabbitmq`'s runs `rabbitmq-diagnostics -q ping` — each a native CLI tool for that service, nothing to do with HTTP.
+
+For `app`, the healthcheck command happens to call our own `/health` endpoint (via Python's `urllib`, since the slim base image has no `curl`/`wget`), because that's the most meaningful way to check *this* service — but that's a choice we made, not something Docker required or auto-discovered.
+
+**Why this matters beyond just having a status icon:** `depends_on: condition: service_healthy` is what actually reads these healthcheck results — it's why the `app` service in `docker-compose.yml` waits for `db`/`redis`/`rabbitmq` to report healthy before starting at all, rather than starting immediately and racing to connect to infra that isn't ready yet.
