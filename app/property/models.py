@@ -9,6 +9,7 @@ from app.core.models import Base
 
 if TYPE_CHECKING:
     from app.auth.models import User
+    from app.reservation.models import Reservation
 
 
 class Property(Base):
@@ -34,3 +35,5 @@ class Property(Base):
 
     # in-Python only, no column: derived from host_id, mirrors User.properties
     host: Mapped["User"] = relationship(back_populates="properties")
+    # in-Python only, no column: mirrors Reservation.property
+    reservations: Mapped[list["Reservation"]] = relationship(back_populates="property")

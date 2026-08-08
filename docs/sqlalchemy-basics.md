@@ -212,6 +212,10 @@ class Property(Base):
 
 **`name="max_guests_positive"`** isn't cosmetic — it's the constraint's identifier in Postgres. Alembic uses it to generate `ALTER TABLE ... DROP CONSTRAINT max_guests_positive` if the rule is ever changed or removed, and it's what shows up in the error when a bad row gets rejected (`violates check constraint "max_guests_positive"`) — far more useful than an anonymous, auto-generated name.
 
+**What `CheckConstraint` *can't* do: rules spanning two tables.** Every example above checks a column against a fixed value or another column *on the same row* — Postgres can evaluate those with nothing but the row being written. But `docs/er-diagram.md` also specifies: a reservation's `guest_count` must not exceed `property.max_guests`. That's a comparison across two different tables (`reservations.guest_count` vs. `properties.max_guests`), and a `CHECK` constraint has no way to reach into a different table — it only ever sees the one row being inserted or updated.
+
+Rules like that move to the **service layer** instead (`app/reservation/service.py`): fetch the `Property`, compare `guest_count` against `property.max_guests` in Python, reject if it's over, *before* the `Reservation` is even constructed. The trade-off is real: unlike a `CheckConstraint`, this rule is only enforced by code paths that go through that service function — a different writer (raw SQL, a bug, another service) could still insert a `Reservation` that violates it. It's the same "app-level vs. DB-level" boundary as the point above, just landing on the other side of it for a reason: the database genuinely cannot express this one.
+
 ## 7. `TYPE_CHECKING` and string literals — how `User` and `Property` reference each other without crashing
 
 ```python
