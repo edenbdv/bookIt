@@ -1,11 +1,15 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.models import Base
+
+if TYPE_CHECKING:
+    from app.property.models import Property
 
 
 # permission tier only — hosting/booking are actions, not roles
@@ -24,3 +28,6 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(default=UserRole.USER)
     # server-side default: DB's clock is the source of truth, not the app's
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # in-Python only, no column: mirrors Property.host so both sides stay in sync
+    properties: Mapped[list["Property"]] = relationship(back_populates="host")

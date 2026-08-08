@@ -88,6 +88,48 @@ id = mapped_column(UUID(as_uuid=True), primary_key=True)  # Job B only: fully se
 
 The version we actually write fuses these: the annotation *is* the source of the SQL type, so `mapped_column()` doesn't need to repeat it.
 
+**You can skip `mapped_column()` entirely when there's nothing to configure.** Plenty of fields in this codebase have no `= mapped_column(...)` at all:
+
+```python
+# app/property/models.py
+title: Mapped[str]
+description: Mapped[str]
+country: Mapped[str]
+```
+
+SQLAlchemy's declarative system scans every attribute for the `Mapped[...]` wrapper specifically (not just any type hint — a bare `title: str` with no `Mapped[]` and no assignment stays an inert type hint, not a column). When it finds `Mapped[X]` with nothing assigned, it implicitly does `= mapped_column()` for you — a plain, `NOT NULL` column of the SQL type matched from `X`, no PK/FK/index/default. So `title: Mapped[str]` is exactly equivalent to `title: Mapped[str] = mapped_column()`; the explicit call is just redundant when there's no config to pass.
+
+You only need to write `mapped_column(...)` out when a field needs something a plain column can't express — a primary key, a foreign key, `unique=`/`index=`, a `default=`/`server_default=`, an explicit SQL type, or nullability (`Mapped[X | None]`). Every field in `User` and `Property` that calls `mapped_column()` explicitly is doing so for exactly one of those reasons (see `id`'s `primary_key=`, `email`'s `unique=`/`index=`, `host_id`'s `ForeignKey(...)`, `created_at`'s `server_default=`, etc.) — the ones that don't need any of that just skip it.
+
+**`index=True` vs `unique=True` — two independent things, often paired:**
+
+```python
+email: Mapped[str] = mapped_column(unique=True, index=True)
+```
+
+- **`index=True`** builds an actual Postgres index — a separate structure that makes `WHERE email = ...` fast (roughly O(log n) row lookup instead of scanning every row). Login does exactly this query on every request, so `email` needs it. `city` on `Property` has the same reasoning (see its comment: filtered on directly in availability search).
+- **`unique=True`** is a *constraint*, not a speed feature — Postgres rejects an `INSERT`/`UPDATE` that would create a duplicate value. It's about correctness (no two users share an email), not query speed.
+
+They're often set together, but you can have either alone — `city` is `index=True` with no `unique=True` (many properties share a city, but lookups on it should still be fast).
+
+**A single-column `index=True` on two different columns does *not* create one combined index.** `email: mapped_column(index=True)` and, hypothetically, `role: mapped_column(index=True)` would give you two separate single-column indexes — useful for `WHERE email = ...` or `WHERE role = ...` alone, but not for `WHERE email = ... AND role = ...` together.
+
+**To index multiple columns *together* (a composite/paired index), use `Index(...)` in `__table_args__` instead** — same tuple that already holds `CheckConstraint` in `Property`:
+
+```python
+from sqlalchemy import Index
+
+class Property(Base):
+    __tablename__ = "properties"
+    __table_args__ = (
+        CheckConstraint("max_guests > 0", name="max_guests_positive"),
+        CheckConstraint("price_per_night_cents >= 0", name="price_non_negative"),
+        Index("ix_properties_city_country", "city", "country"),
+    )
+```
+
+This builds one index spanning both columns, which Postgres can use far more efficiently than two separate single-column indexes when a query filters on both together (e.g. `WHERE city = ... AND country = ...`). Column order matters — a composite index on `(city, country)` speeds up queries that filter by `city` alone or by `city AND country` together, but doesn't help a query that filters by `country` alone (this is the "leftmost prefix" rule: Postgres can only use the index starting from its first column). Not needed yet in this codebase — worth reaching for once a query actually filters on a combination of columns together, not before.
+
 **One more construct you'll see once models reference each other — `relationship()`:**
 
 ```python
@@ -96,19 +138,150 @@ reservations: Mapped[list["Reservation"]] = relationship(back_populates="propert
 
 This is different in kind from `mapped_column()` — it configures **no column at all**. There's no `reservations` field in the `properties` table. It's a pure Python convenience: SQLAlchemy uses the foreign key that already exists on `Reservation` to compute this list on demand, so you can write `some_property.reservations` in code without writing the join yourself.
 
+## 5. `relationship()` and `back_populates` — the bidirectional link
+
+Take the actual pair already in this codebase:
+
+```python
+# app/property/models.py
+host_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+host: Mapped["User"] = relationship(back_populates="properties")
+```
+
+```python
+# app/auth/models.py
+properties: Mapped[list["Property"]] = relationship(back_populates="host")
+```
+
+Two attributes exist on `Property` that look related — `host_id` and `host` — but only one of them is a real column:
+
+| | `host_id` | `host` |
+|---|---|---|
+| What it is | A real column — `mapped_column(ForeignKey(...))` | Not a column — `relationship(...)` |
+| Value | A raw UUID | A full `User` object |
+| Where it comes from | Sent in the `INSERT`, stored in Postgres | Computed by SQLAlchemy from `host_id`, on demand |
+| Cost to read | Free — already in memory | May cost a round-trip (see below) |
+| Use it to | Filter/compare (`.where(Property.host_id == id)`) | Read the user's data (`property.host.email`) |
+
+**Why `host` can cost a round-trip:** by default, `relationship()` is lazy-loaded. The first time you access `some_property.host`, if that `User` isn't already sitting in the `Session`, SQLAlchemy sends a `SELECT` right then to fetch it. Reading `some_property.host_id` never does this — the UUID is already in memory, no query needed.
+
+**What `back_populates` buys you:** each `relationship()` call names the matching attribute on the *other* class — `Property.host` says "my other half is `User.properties`," and `User.properties` says "mine is `Property.host`." SQLAlchemy uses that pairing to keep both sides in sync **in memory, with no extra query**:
+
+```python
+some_property.host = some_user
+# some_user.properties now includes some_property too — pure bookkeeping, no SELECT.
+```
+
+Leave `back_populates` off one side and you'd have two relationships that don't know about each other — setting one wouldn't update the other.
+
+**Why this actually matters (it's not about writing less code):** you still write `relationship()` on both classes either way — `back_populates` doesn't save you a declaration. What it prevents is your **in-memory objects disagreeing with each other**. Without it:
+
+```python
+some_property.host = some_user
+# some_user.properties does NOT include some_property — it's a separate,
+# unrelated attribute that nobody updated.
+```
+
+If some other code in the same request then reads `some_user.properties` — before anything is flushed or committed — it gets a stale answer missing the property you just attached. You'd have to remember to update both sides by hand every time (`some_property.host = some_user` *and* `some_user.properties.append(some_property)`), and forgetting the second one is an easy, quiet bug. The database itself was never at risk either way — only `host_id` actually gets written to Postgres — this is purely about keeping the two Python-side views of one relationship consistent while you're working with them in memory.
+
+**Where the join condition comes from:** neither `relationship()` call above specifies one explicitly. At mapper configuration time (app startup), SQLAlchemy scans the `properties` and `users` tables for a `ForeignKey` connecting them, finds `host_id` is the only one, and uses `properties.host_id = users.id` as the join for both directions — `Property.host` walks it one way, `User.properties` walks it the other. The FK is the single source of truth; `relationship()` just rides on top of it. This resolution happens once and is cached — it's not redone on every `.host` access, only the actual `SELECT` (when needed) is a per-access round-trip.
+
+**Should you spell out the FK explicitly anyway?**
+
+```python
+host: Mapped["User"] = relationship(foreign_keys=[host_id], back_populates="properties")
+```
+
+Not required here — with exactly one FK between the two tables, there's nothing to disambiguate, so the implicit version above (no `foreign_keys=`) is what this codebase uses. `foreign_keys=` only becomes *necessary* the moment there's more than one FK between the same two tables — e.g. if `Property` ever gained a second column like `last_edited_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))`. At that point SQLAlchemy can no longer guess which column a given `relationship()` means, and raises `AmbiguousForeignKeysError` at startup until you tell it explicitly which FK each relationship should use. It's a loud, immediate failure (not a silent bug), so it's fine to add `foreign_keys=` only when that day comes rather than defensively up front.
+
+## 6. `CheckConstraint` — rules Postgres enforces, not just your app
+
+```python
+class Property(Base):
+    __table_args__ = (
+        CheckConstraint("max_guests > 0", name="max_guests_positive"),
+        CheckConstraint("price_per_night_cents >= 0", name="price_non_negative"),
+    )
+```
+
+`CheckConstraint` takes a raw SQL boolean expression and makes Postgres reject any `INSERT`/`UPDATE` that would violate it — **at the database level**, not in Python.
+
+**Why this matters beyond a FastAPI/Pydantic validator:** a request-body validator only runs for traffic that goes through your API. It does nothing for a raw SQL script, a one-off data fix, a different service writing to the same database, or an app-level bug that skips validation. `CheckConstraint` is checked no matter who or what writes the row — the same reasoning as why `created_at` uses `server_default` instead of a Python-side default (see the client-side vs. server-side defaults section below): the database is the one thing every writer has to go through.
+
+`__table_args__` is where table-level configuration lives — anything that isn't really one column's concern alone. This is the same tuple a composite `Index(...)` would go in (see the `Mapped`/`mapped_column` section above).
+
+**`name="max_guests_positive"`** isn't cosmetic — it's the constraint's identifier in Postgres. Alembic uses it to generate `ALTER TABLE ... DROP CONSTRAINT max_guests_positive` if the rule is ever changed or removed, and it's what shows up in the error when a bad row gets rejected (`violates check constraint "max_guests_positive"`) — far more useful than an anonymous, auto-generated name.
+
+## 7. `TYPE_CHECKING` and string literals — how `User` and `Property` reference each other without crashing
+
+```python
+# app/property/models.py
+if TYPE_CHECKING:
+    from app.auth.models import User
+...
+host: Mapped["User"] = relationship(back_populates="properties")
+```
+
+```python
+# app/auth/models.py
+if TYPE_CHECKING:
+    from app.property.models import Property
+...
+properties: Mapped[list["Property"]] = relationship(back_populates="host")
+```
+
+**The problem this avoids:** `Property` needs `User` for its `host` relationship's type hint, and `User` needs `Property` for its `properties` relationship's type hint. If both files did a normal top-level import (`from app.property.models import Property` / `from app.auth.models import User`), you'd get a circular import: loading `auth/models.py` triggers loading `property/models.py`, which tries to load `auth/models.py` again — except that module is still mid-way through executing (it hasn't finished defining `User` yet), so the second import fails.
+
+**Two pieces solve it together:**
+
+1. **`if TYPE_CHECKING:`** — `TYPE_CHECKING` is a constant that's always `False` while your program actually runs. The import inside that block never executes at runtime — Python skips it entirely. It exists only for static type checkers (mypy, pyright, your editor), which *do* set `TYPE_CHECKING = True` while analyzing the file, so they can resolve `User`/`Property` and give you real autocomplete and type errors. Zero runtime cost, zero circular-import risk.
+
+2. **The quotes**, in `Mapped["User"]` and `Mapped[list["Property"]]` — these are string literals, not references to the actual classes. Python doesn't evaluate a string at class-definition time, so it doesn't matter that `User`/`Property` were never actually imported at runtime. SQLAlchemy resolves these strings later — once every model module has finished loading, it looks up `"User"` and `"Property"` by name in `Base`'s shared registry (the same `Base.metadata` registry from earlier) and swaps in the real classes. This is another reason having exactly **one shared `Base`** matters: the string lookup only succeeds because both classes registered themselves in the same place.
+
+Without the quotes, `Mapped[User]` would try to evaluate `User` immediately while the class body runs — and fail, since `User` was never actually imported outside the `TYPE_CHECKING` block.
+
+## 8. Nullable columns and the soft-delete pattern
+
+```python
+deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+```
+
+**`| None` in the annotation is what makes the column nullable.** SQLAlchemy reads the annotation to decide `NULL` vs. `NOT NULL`, the same way it reads `str`/`uuid.UUID`/etc. to decide the SQL type. Every other field in `User` and `Property` omits `| None`, so they default to `NOT NULL`; `deleted_at` is the deliberate exception.
+
+**Why `deleted_at` exists instead of actually deleting the row (`DELETE FROM properties ...`):** a `Property` with existing reservations can't just vanish — the field's own comment says as much (*"Never hard-delete a property with reservation history"*). Two concrete reasons:
+
+- **Referential integrity** — once `Reservation` rows exist, they'll hold a foreign key pointing at this `Property`. Actually deleting the row either fails outright (Postgres refuses to leave a dangling FK) or, worse, cascades into deleting reservation history that needs to be kept.
+- **History has to stay queryable** — a past guest's receipt, a host's earnings history, an admin's audit trail all need the property to still exist and be readable, even after it's no longer bookable.
+
+**The pattern:** "deleting" a property means setting `deleted_at = now()`, not removing the row. It stays in the table forever. Every query that means "currently listed properties" has to explicitly filter `WHERE deleted_at IS NULL`; anything that means "this property, historically" queries by `id` with no such filter.
+
+## 9. `str, enum.Enum` — how a Python enum becomes a real database column
+
+```python
+class UserRole(str, enum.Enum):
+    USER = "user"
+    ADMIN = "admin"
+
+role: Mapped[UserRole] = mapped_column(default=UserRole.USER)
+```
+
+**Why `UserRole` inherits from both `str` and `enum.Enum`:** inheriting from `enum.Enum` alone gives a normal Python enum — `UserRole.USER` — but it wouldn't behave like a string anywhere one is expected (JSON serialization in a FastAPI response, string comparisons, etc.). Adding `str` as a second base makes every member *also* a real string: `UserRole.USER == "user"` is `True`, and it serializes to `"user"` directly instead of an object repr. This is a common pattern specifically because API responses need to serialize cleanly.
+
+**What SQLAlchemy does with it as a column type:** given `Mapped[UserRole]`, SQLAlchemy generates a Postgres native `ENUM` type restricted to exactly the declared members (`'user'`, `'admin'`) — not a plain `VARCHAR` that merely happens to hold those strings. That means **Postgres itself rejects an `INSERT` with any other value**, the same database-level enforcement reasoning as `CheckConstraint` above — it doesn't matter whether the write went through your app's validation or not; the database won't allow `role = 'superadmin'` to exist unless the enum type itself is altered first (its own migration).
+
 ---
 
 # Part B — talking to the database
 
 Once models exist, this is how you actually read and write rows.
 
-## 5. Round-trip
+## 10. Round-trip
 
 The same pattern as `fetch()`: send a request, wait, get a response. That wait is real — even on `localhost` it's not instant.
 
 Every SQL statement — `INSERT`, `SELECT`, anything — is one round-trip: Python sends it to Postgres over the network, waits, gets a reply back. If you do 50 inserts one at a time, that's 50 round-trips, 50 waits. This is *why* ORMs try to batch things up instead of sending one statement per line of code — which is exactly what `Session` does (next section).
 
-## 6. Transactions and isolation
+## 11. Transactions and isolation
 
 A **transaction** is a group of changes that either **all** happen or **none** happen — no in-between state. You open one, do some work, then either `commit` (make it permanent) or `rollback` (throw it all away, as if none of it happened).
 
@@ -118,7 +291,7 @@ The guarantee that matters here is **isolation**: while a transaction is open, o
 
 **Why this might feel new if you're used to a local DB:** many simple tools run in **autocommit mode** — every statement commits itself immediately, with no explicit transaction ever left open. It's not that transactions didn't exist; the tool just never gave you a reason to notice one was open.
 
-## 7. You probably already have multiple connections open
+## 12. You probably already have multiple connections open
 
 A natural question: does this "other connections can't see it yet" thing actually come up, or is it theoretical?
 
@@ -126,7 +299,7 @@ It's already true on your own machine, right now. **DBeaver** holds a connection
 
 At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve. It's also *why* connection pooling exists (see `core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time. Teams also often share a staging database for integration testing, though giving each developer their own local database (like we've done with Docker) avoids stepping on each other while coding.
 
-## 8. `Session` — the staging area
+## 13. `Session` — the staging area
 
 `Session` is SQLAlchemy's middleman between your Python objects and Postgres. Think of it like a shopping cart, or a form you haven't submitted yet: things can sit in it, tracked, without anything being sent over the network.
 
@@ -137,7 +310,7 @@ session.add(user)
 
 **Nothing has touched Postgres yet.** `add()` just tells the `Session`: "track this object, I intend to save it eventually." It's pure Python bookkeeping, zero round-trips.
 
-## 9. `flush()` — hit submit
+## 14. `flush()` — hit submit
 
 ```python
 await session.flush()
@@ -147,7 +320,7 @@ await session.flush()
 
 But it's still not final. Think of it like a server accepting your form and giving you a reference number, without yet officially processing it where everyone else can see it. In database terms: your changes exist inside an open **transaction** — visible to you, invisible to every other connection to the database.
 
-## 10. `commit()` — final confirmation
+## 15. `commit()` — final confirmation
 
 ```python
 await session.commit()
@@ -155,7 +328,7 @@ await session.commit()
 
 This is what makes the change **permanent and visible to everyone else** — other connections, other requests, other people querying the same database now see it. Until this point, you could still back out entirely.
 
-## 11. `rollback()` — the undo button
+## 16. `rollback()` — the undo button
 
 ```python
 await session.rollback()
@@ -163,7 +336,7 @@ await session.rollback()
 
 If anything goes wrong before `commit()`, this discards everything pending in the transaction — as if none of it happened. This is the actual safety net that makes transactions useful: you can do several related changes (e.g. create a `Reservation` *and* a `Payment`), and if the second one fails, `rollback()` guarantees the first one never actually happened either. Nothing half-done gets left behind.
 
-## 12. Client-side vs. server-side defaults
+## 17. Client-side vs. server-side defaults
 
 Ties directly into `id` vs. `created_at` in `app/auth/models.py`:
 
@@ -184,7 +357,7 @@ created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_def
 | Best for | `id` — need it before persisting, want it in tests without a real DB, want it portable across DB engines | `created_at` — want the database's clock as the single source of truth, no matter what tool inserted the row |
 | Cost | Doesn't apply if some other tool bypasses the ORM (raw SQL, another service) | Costs a round-trip to find out the value |
 
-## 13. Worked example, line by line
+## 18. Worked example, line by line
 
 ```python
 user = User(email="a@b.com", hashed_password="...")
@@ -204,7 +377,7 @@ await session.commit()
 # Transaction finalized. Permanent. Every other connection can now see this row.
 ```
 
-## 14. Migrations and transactions — same mechanism, different purpose
+## 19. Migrations and transactions — same mechanism, different purpose
 
 A natural question after Part A (structure) and Part B (transactions): are these related, or two separate topics?
 
@@ -228,6 +401,17 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `Mapped[T]` | Left side — the Python-facing type of an attribute |
 | `mapped_column(...)` | Right side — the actual database column's configuration |
 | `relationship(...)` | Not a column — a computed, in-Python convenience built from an existing foreign key |
+| `back_populates=` | Names the matching `relationship()` attribute on the other class, keeping both sides in sync in memory |
+| FK column vs. `relationship` | `host_id` = raw UUID, free to read, use for filtering; `host` = full object, may cost a round-trip, use for reading data |
+| `index=True` | Builds a Postgres index — fast lookups on that column |
+| `unique=True` | A constraint — Postgres rejects duplicate values (not about speed) |
+| Composite `Index(...)` | Put in `__table_args__` to index multiple columns *together*; `index=True` on each column separately does not do this |
+| `CheckConstraint` | A SQL rule enforced by Postgres on every write, regardless of what wrote it — not just app-level validation |
+| `TYPE_CHECKING` | `False` at runtime, `True` for type checkers only — lets you import a type for hints without a real (circular) import |
+| `Mapped["ClassName"]` (quoted) | A string forward reference — SQLAlchemy resolves it later via `Base`'s shared registry, so the class doesn't need to be imported at runtime |
+| `Mapped[X \| None]` | Makes the column nullable; omit `\| None` and it's `NOT NULL` |
+| Soft delete | Set a `deleted_at` timestamp instead of removing the row — keeps FK history (e.g. reservations) intact |
+| `class X(str, enum.Enum)` | Enum members that are also real strings (clean JSON serialization) and map to a Postgres native `ENUM` column |
 | Round-trip | Send a message to Postgres, wait, get a reply — like `fetch()` |
 | Transaction | A group of changes that all happen or none happen; isolated from other connections until committed |
 | Isolation | Other connections can't see your changes until you `commit` |
