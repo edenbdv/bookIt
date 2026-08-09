@@ -11,6 +11,7 @@ from app.core.models import Base
 if TYPE_CHECKING:
     from app.property.models import Property
     from app.reservation.models import Reservation
+    from app.review.models import Review
 
 
 # permission tier only — hosting/booking are actions, not roles
@@ -40,3 +41,6 @@ class User(Base):
     properties: Mapped[list["Property"]] = relationship(back_populates="host")
     # in-Python only, no column: mirrors Reservation.guest (booking, not hosting)
     reservations: Mapped[list["Reservation"]] = relationship(back_populates="guest")
+    # in-Python only, no column: mirrors Review.author (guest reviewing a
+    # property, or host reviewing a guest — same table, either direction)
+    reviews: Mapped[list["Review"]] = relationship(back_populates="author")

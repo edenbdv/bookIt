@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from app.auth.models import User
     from app.payment.models import Payment
     from app.property.models import Property
+    from app.review.models import Review
 
 
 class ReservationStatus(str, enum.Enum):
@@ -52,3 +53,5 @@ class Reservation(Base):
     guest: Mapped["User"] = relationship(back_populates="reservations")
     # in-Python only, no column: mirrors Payment.reservation
     payments: Mapped[list["Payment"]] = relationship(back_populates="reservation")
+    # in-Python only, no column: mirrors Review.reservation
+    reviews: Mapped[list["Review"]] = relationship(back_populates="reservation")
