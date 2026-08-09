@@ -266,12 +266,87 @@ class UserRole(str, enum.Enum):
     USER = "user"
     ADMIN = "admin"
 
-role: Mapped[UserRole] = mapped_column(default=UserRole.USER)
+role: Mapped[UserRole] = mapped_column(
+    Enum(UserRole, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+    default=UserRole.USER,
+)
 ```
 
 **Why `UserRole` inherits from both `str` and `enum.Enum`:** inheriting from `enum.Enum` alone gives a normal Python enum — `UserRole.USER` — but it wouldn't behave like a string anywhere one is expected (JSON serialization in a FastAPI response, string comparisons, etc.). Adding `str` as a second base makes every member *also* a real string: `UserRole.USER == "user"` is `True`, and it serializes to `"user"` directly instead of an object repr. This is a common pattern specifically because API responses need to serialize cleanly.
 
-**What SQLAlchemy does with it as a column type:** given `Mapped[UserRole]`, SQLAlchemy generates a Postgres native `ENUM` type restricted to exactly the declared members (`'user'`, `'admin'`) — not a plain `VARCHAR` that merely happens to hold those strings. That means **Postgres itself rejects an `INSERT` with any other value**, the same database-level enforcement reasoning as `CheckConstraint` above — it doesn't matter whether the write went through your app's validation or not; the database won't allow `role = 'superadmin'` to exist unless the enum type itself is altered first (its own migration).
+**What SQLAlchemy does with it as a column type:** given `Mapped[UserRole]`, SQLAlchemy generates a Postgres native `ENUM` type restricted to exactly the declared members — not a plain `VARCHAR` that merely happens to hold those strings. That means **Postgres itself rejects an `INSERT` with any other value**, the same database-level enforcement reasoning as `CheckConstraint` above — it doesn't matter whether the write went through your app's validation or not; the database won't allow `role = 'superadmin'` to exist unless the enum type itself is altered first (its own migration).
+
+**The gotcha `values_callable=` fixes — a real bug caught by actually running this against Postgres:** by default, SQLAlchemy's `Enum` type stores the Python enum's **member name**, not its `.value`. Without `values_callable=`, `role: Mapped[UserRole] = mapped_column(default=UserRole.USER)` looks completely reasonable and passes every type check — but the column Postgres actually creates only accepts `'USER'`/`'ADMIN'` (uppercase), never `'user'`/`'admin'`, even though `UserRole` inherits from `str` specifically to *be* the lowercase value everywhere else in Python. You can see the mismatch directly:
+
+```python
+[e.value for e in UserRole]        # -> ['user', 'admin']       (what Python code compares against)
+User.__table__.c.role.type.enums   # -> ['USER', 'ADMIN']       (what Postgres actually stores, by default)
+```
+
+This stays invisible as long as everything only ever goes through the ORM (SQLAlchemy converts consistently in both directions, so the app never notices). It breaks the moment anything assumes the lowercase value directly — a hand-written SQL query, an external tool or analytics dashboard reading the table, a data migration, or (concretely, in this codebase) `Payment`'s partial unique index below, whose `postgresql_where=text("kind = 'charge' ...")` failed outright at table-creation time because `'charge'` isn't a value the column would actually accept. `values_callable=lambda enum_cls: [e.value for e in enum_cls]` tells SQLAlchemy to use `.value` instead of the member name, so the database matches what `docs/er-diagram.md` documents and what the rest of the app already assumes.
+
+## 10. Index vs. constraint in Postgres, then `Payment`'s partial unique index — proven live
+
+**Postgres doesn't have two separate implementations of uniqueness — a "constraint" version and an "index" version. There's one mechanism, and a `UNIQUE` constraint is just one way of asking for it.** Take the most ordinary case, a plain `UniqueConstraint` with nothing fancy about it:
+
+```python
+class Demo(Base):
+    __table_args__ = (UniqueConstraint("x", name="uq_demo_x"),)
+```
+
+Ask Postgres what it actually built to enforce that:
+
+```sql
+-- what pg_indexes reports for this table:
+uq_demo_x -> CREATE UNIQUE INDEX uq_demo_x ON public.demo_unique_test USING btree (x)
+```
+
+Postgres silently created a **unique index** to enforce it — that's not an implementation detail specific to this codebase or SQLAlchemy, it's how Postgres itself works. Every `UNIQUE` constraint (and every primary key) is backed by a unique index under the hood, whether you write it as `UniqueConstraint` or as `Index(..., unique=True)` directly.
+
+That reframes what a "unique index" is: not a lesser, hackier path to uniqueness bolted onto a search structure, but **the exact same enforcement mechanism a `UNIQUE` constraint would use anyway** — declared directly instead of through constraint syntax.
+
+**So why ever declare it as an index instead of a constraint, if they're the same thing underneath?** Because Postgres's `UNIQUE` constraint syntax has no `WHERE` clause at all — trying one is a straight syntax error:
+
+```sql
+ALTER TABLE demo_unique_test ADD CONSTRAINT uq_partial UNIQUE (x) WHERE (x > 0)
+-- ERROR:  syntax error at or near "WHERE"
+```
+
+A **partial unique index** — `CREATE UNIQUE INDEX ... WHERE ...`, which is `Index(..., unique=True, postgresql_where=...)` in SQLAlchemy — is the *only* way Postgres lets you express "unique, but only among rows matching this condition." It isn't a workaround reaching past the constraint system; it's the one form flexible enough to say this, because indexes and constraints are the same underlying feature and only the index syntax happens to expose `WHERE`.
+
+**Where this shows up for real: `Payment`'s partial unique index.**
+
+```python
+class Payment(Base):
+    __table_args__ = (
+        Index(
+            "ix_payments_one_succeeded_charge_per_reservation",
+            "reservation_id",
+            unique=True,
+            postgresql_where=text("kind = 'charge' AND status = 'succeeded'"),
+        ),
+    )
+```
+
+The rule: **a reservation can never have more than one successful charge.** This is worth walking through end to end because — unlike everything above — it isn't checking one row in isolation; it's a rule about *how many* rows with certain values can coexist.
+
+**Why not just check-then-insert in the service layer?** *"Query for an existing succeeded charge; if there isn't one, insert."* has a race window: two concurrent requests (a double-click, a retried webhook, a duplicate delivery from the payment provider) can both run that check, both see nothing yet, and both proceed to insert — the guest gets charged twice. This is the identical shape of problem as the reservation double-booking rule in `docs/er-diagram.md` (its `EXCLUDE USING gist` constraint): an app-level check-then-write can't be atomic across two separate requests, but a database constraint is, because Postgres evaluates it as part of the write itself.
+
+**Why not a lock instead (e.g. `SELECT ... FOR UPDATE`)?** That would also close the race — but only if *every* code path that ever inserts a `Payment` remembers to take the lock first. Miss it once, in a webhook handler or a future endpoint or a one-off script, and the protection silently vanishes. It would also mean holding a database lock open across an external payment-provider network call, which risks blocking other operations on that reservation for as long as that call takes. A unique index has neither problem: Postgres enforces it unconditionally on every write, and the check itself is instantaneous. (For the fuller "why" — what a race condition actually is, why an in-process lock can't coordinate across multiple app processes, and why the database is the one thing they all genuinely share — see [`docs/concurrency-basics.md`](concurrency-basics.md).)
+
+**Why partial (`postgresql_where=...`) rather than a plain `unique=True` on `reservation_id`:** a plain unique index would allow only one `Payment` row per reservation, ever — but this table needs several: a declined charge attempt (kept for history), a retried charge that then succeeds, and later a refund. Scoping the index to `kind = 'charge' AND status = 'succeeded'` means only *those* rows must be unique per reservation; failed attempts, pending attempts, and refunds are all unrestricted.
+
+**Proof, not just theory:** creating the real table locally and inserting rows in this order —
+
+1. `kind=charge, status=failed` → succeeds (a declined card)
+2. `kind=charge, status=succeeded` → succeeds (the retry that works)
+3. `kind=charge, status=succeeded` (again, same reservation) → **rejected**:
+   ```
+   UniqueViolationError: duplicate key value violates unique constraint
+   "ix_payments_one_succeeded_charge_per_reservation"
+   ```
+
+Step 3 was rejected by Postgres itself, with no application code checking anything — the same real, write-time enforcement as any other `UNIQUE` constraint, just declared as an index because that's the only form that can be partial.
 
 ---
 
@@ -279,13 +354,13 @@ role: Mapped[UserRole] = mapped_column(default=UserRole.USER)
 
 Once models exist, this is how you actually read and write rows.
 
-## 10. Round-trip
+## 11. Round-trip
 
 The same pattern as `fetch()`: send a request, wait, get a response. That wait is real — even on `localhost` it's not instant.
 
 Every SQL statement — `INSERT`, `SELECT`, anything — is one round-trip: Python sends it to Postgres over the network, waits, gets a reply back. If you do 50 inserts one at a time, that's 50 round-trips, 50 waits. This is *why* ORMs try to batch things up instead of sending one statement per line of code — which is exactly what `Session` does (next section).
 
-## 11. Transactions and isolation
+## 12. Transactions and isolation
 
 A **transaction** is a group of changes that either **all** happen or **none** happen — no in-between state. You open one, do some work, then either `commit` (make it permanent) or `rollback` (throw it all away, as if none of it happened).
 
@@ -295,7 +370,7 @@ The guarantee that matters here is **isolation**: while a transaction is open, o
 
 **Why this might feel new if you're used to a local DB:** many simple tools run in **autocommit mode** — every statement commits itself immediately, with no explicit transaction ever left open. It's not that transactions didn't exist; the tool just never gave you a reason to notice one was open.
 
-## 12. You probably already have multiple connections open
+## 13. You probably already have multiple connections open
 
 A natural question: does this "other connections can't see it yet" thing actually come up, or is it theoretical?
 
@@ -303,7 +378,7 @@ It's already true on your own machine, right now. **DBeaver** holds a connection
 
 At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve. It's also *why* connection pooling exists (see `core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time. Teams also often share a staging database for integration testing, though giving each developer their own local database (like we've done with Docker) avoids stepping on each other while coding.
 
-## 13. `Session` — the staging area
+## 14. `Session` — the staging area
 
 `Session` is SQLAlchemy's middleman between your Python objects and Postgres. Think of it like a shopping cart, or a form you haven't submitted yet: things can sit in it, tracked, without anything being sent over the network.
 
@@ -314,7 +389,31 @@ session.add(user)
 
 **Nothing has touched Postgres yet.** `add()` just tells the `Session`: "track this object, I intend to save it eventually." It's pure Python bookkeeping, zero round-trips.
 
-## 14. `flush()` — hit submit
+## 15. `session.execute(select(...))` — actually querying data
+
+Everything in section 14 is about writing. Reading is a separate call: `Session.execute()`, given a `select(...)` construct, is what runs an actual query and returns rows — the SQLAlchemy 2.0 replacement for the older `session.query(...)` API.
+
+```python
+from sqlalchemy import select
+
+result = await session.execute(
+    select(Payment).where(Payment.reservation_id == reservation_id)
+)
+```
+
+Same "build it, then run it" split as everywhere else in the ORM: `select(Payment).where(...)` is a pure-Python query object — no round-trip yet, same as `mapped_column()` config not touching the DB until something actually executes it. `session.execute(...)` is what sends it to Postgres and is the round-trip.
+
+**The `Result` you get back isn't the rows themselves — you extract them, and how depends on what you expect:**
+
+| Method | Use when | Behavior |
+|---|---|---|
+| `.scalars().all()` | Zero or more rows expected | Returns a list of matched objects (empty list if none) |
+| `.scalar_one_or_none()` | Zero or exactly one row expected | Returns the object, or `None`; raises if more than one matched |
+| `.scalar_one()` | Exactly one row must exist | Returns the object; raises if zero *or* more than one matched |
+
+This is why the `charge_reservation` example in [`docs/concurrency-basics.md`](concurrency-basics.md) uses `.scalar_one()` for the locked `Reservation` (it must already exist — a missing row there is a bug, not a valid outcome) but `.scalar_one_or_none()` for the existing-succeeded-charge check (not finding one is the normal, expected case).
+
+## 16. `flush()` — hit submit
 
 ```python
 await session.flush()
@@ -324,7 +423,7 @@ await session.flush()
 
 But it's still not final. Think of it like a server accepting your form and giving you a reference number, without yet officially processing it where everyone else can see it. In database terms: your changes exist inside an open **transaction** — visible to you, invisible to every other connection to the database.
 
-## 15. `commit()` — final confirmation
+## 17. `commit()` — final confirmation
 
 ```python
 await session.commit()
@@ -332,7 +431,7 @@ await session.commit()
 
 This is what makes the change **permanent and visible to everyone else** — other connections, other requests, other people querying the same database now see it. Until this point, you could still back out entirely.
 
-## 16. `rollback()` — the undo button
+## 18. `rollback()` — the undo button
 
 ```python
 await session.rollback()
@@ -340,7 +439,7 @@ await session.rollback()
 
 If anything goes wrong before `commit()`, this discards everything pending in the transaction — as if none of it happened. This is the actual safety net that makes transactions useful: you can do several related changes (e.g. create a `Reservation` *and* a `Payment`), and if the second one fails, `rollback()` guarantees the first one never actually happened either. Nothing half-done gets left behind.
 
-## 17. Client-side vs. server-side defaults
+## 19. Client-side vs. server-side defaults
 
 Ties directly into `id` vs. `created_at` in `app/auth/models.py`:
 
@@ -361,7 +460,7 @@ created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_def
 | Best for | `id` — need it before persisting, want it in tests without a real DB, want it portable across DB engines | `created_at` — want the database's clock as the single source of truth, no matter what tool inserted the row |
 | Cost | Doesn't apply if some other tool bypasses the ORM (raw SQL, another service) | Costs a round-trip to find out the value |
 
-## 18. Worked example, line by line
+## 20. Worked example, line by line
 
 ```python
 user = User(email="a@b.com", hashed_password="...")
@@ -381,7 +480,7 @@ await session.commit()
 # Transaction finalized. Permanent. Every other connection can now see this row.
 ```
 
-## 19. Migrations and transactions — same mechanism, different purpose
+## 21. Migrations and transactions — same mechanism, different purpose
 
 A natural question after Part A (structure) and Part B (transactions): are these related, or two separate topics?
 
@@ -416,12 +515,17 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `Mapped[X \| None]` | Makes the column nullable; omit `\| None` and it's `NOT NULL` |
 | Soft delete | Set a `deleted_at` timestamp instead of removing the row — keeps FK history (e.g. reservations) intact |
 | `class X(str, enum.Enum)` | Enum members that are also real strings (clean JSON serialization) and map to a Postgres native `ENUM` column |
+| `values_callable=` | Makes `Enum(...)` store the member's `.value` (e.g. `"user"`) instead of SQLAlchemy's default of its `.name` (`"USER"`) |
+| `UniqueConstraint` in Postgres | Not a separate mechanism from an index — Postgres backs every `UNIQUE` constraint with a unique index under the hood |
+| Partial unique index | `Index(..., unique=True, postgresql_where=...)` — enforces uniqueness only among matching rows; the *only* way to do this, since `UNIQUE` constraint syntax has no `WHERE` |
 | Round-trip | Send a message to Postgres, wait, get a reply — like `fetch()` |
 | Transaction | A group of changes that all happen or none happen; isolated from other connections until committed |
 | Isolation | Other connections can't see your changes until you `commit` |
 | DML | Data Manipulation Language — `INSERT`/`UPDATE`/`DELETE`, changes to rows |
 | DDL | Data Definition Language — `CREATE`/`ALTER TABLE`, changes to structure; what migrations are made of |
 | `Session` | In-memory staging area for pending changes |
+| `session.execute(select(...))` | Runs a query, returns a `Result` — the 2.0-style replacement for `session.query(...)` |
+| `.scalar_one()` / `.scalar_one_or_none()` / `.scalars().all()` | Extract rows from a `Result`: exactly one (raise if not), one-or-none, or a list |
 | `.add(obj)` | Stage an object — no network call |
 | `.flush()` | Send pending changes to Postgres — first round-trip, still not permanent |
 | `.commit()` | Make it permanent and visible to everyone else |

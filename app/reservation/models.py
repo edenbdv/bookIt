@@ -3,20 +3,21 @@ import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, func
+from sqlalchemy import CheckConstraint, Date, DateTime, Enum, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.models import Base
 
 if TYPE_CHECKING:
     from app.auth.models import User
+    from app.payment.models import Payment
     from app.property.models import Property
 
 
 class ReservationStatus(str, enum.Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
-    CANCELLED = "cancelled"
+    CANCELLED = "cancelled"  # a reservation can be cancelled by the guest or by the host (Epic 8's saga/idempotency work needs that history)
     COMPLETED = "completed"
 
 
@@ -37,10 +38,17 @@ class Reservation(Base):
     # snapshot at booking time, not derived from property.price_per_night_cents —
     # a later price change must not alter what a guest already agreed to
     total_cents: Mapped[int]
-    status: Mapped[ReservationStatus] = mapped_column(default=ReservationStatus.PENDING)
+    # values_callable: store the enum's string value, not its member name — see
+    # the same note on User.role
+    status: Mapped[ReservationStatus] = mapped_column(
+        Enum(ReservationStatus, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=ReservationStatus.PENDING,
+    )
     # null once confirmed; used by Epic 6's expiry job to clear abandoned pending holds
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     property: Mapped["Property"] = relationship(back_populates="reservations")
     guest: Mapped["User"] = relationship(back_populates="reservations")
+    # in-Python only, no column: mirrors Payment.reservation
+    payments: Mapped[list["Payment"]] = relationship(back_populates="reservation")
