@@ -1,0 +1,148 @@
+# Concurrency & architecture basics
+
+Why several modeling choices in this codebase (like [`Payment`'s partial unique index](sqlalchemy-basics.md#10-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live)) favor a database-level rule over app-level coordination. This is general backend architecture, not SQLAlchemy-specific — it applies regardless of ORM, framework, or language.
+
+## 1. "Handling concurrent requests" means interleaving, not serializing
+
+A request handler that's waiting on I/O (a DB query, an HTTP call) hits an `await` and hands control back to the event loop instead of sitting idle — that's what lets one process serve many requests at once on limited hardware. But it also means two requests' steps can genuinely interleave: every `await` is a point where the runtime might switch to a different request's code before coming back to yours. "The framework handles concurrent requests well" and "two requests' code can run in an interleaved order" are the same fact, described from two angles — not a contradiction.
+
+**Concrete example — two requests trying to charge the same reservation, no protection in place:**
+
+| Time | Request A | Request B |
+|---|---|---|
+| t1 | `SELECT ... WHERE status='succeeded'` → none found | |
+| t2 | | `SELECT ... WHERE status='succeeded'` → none found |
+| t3 | `INSERT Payment(status='succeeded')` → succeeds | |
+| t4 | | `INSERT Payment(status='succeeded')` → **also succeeds — nothing stopped it** |
+
+Neither request did anything wrong in isolation — B's check at t2 was true *at the time*. The bug is that "check, then act" isn't one atomic step; anything can happen in between. This shape of bug is usually called **TOCTOU** (time-of-check to time-of-use), or a **race condition**.
+
+## 2. Stateless app tier, stateful data tier
+
+Application processes are typically **stateless and disposable** — any one of them can be killed, restarted, or duplicated without coordinating with the others, because none of them hold anything that matters long-term in memory. The **database is the one shared source of truth** that everyone agrees on.
+
+**Why this matters for locks:** a lock implemented in Python (`asyncio.Lock`, `threading.Lock`) only coordinates code running *inside the same process's memory*. Two different processes have completely separate memory — neither can see the other's variables, objects, or locks, even running on the same machine. So an in-process lock only prevents the race in section 1 if both requests happen to land on the exact same process. It provides zero protection the moment there's more than one.
+
+**Is that a real risk here, or a hypothetical?** Worth being precise rather than assuming: [`Dockerfile`](../Dockerfile) currently runs a single `uvicorn` process with `--reload` (a dev convenience, no `--workers` flag) — so *today*, in this repo's dev config, it's genuinely one process. But that's a dev-only setting, not a guarantee. Production deployments of essentially any web service — monolith or microservice — commonly run multiple worker processes per container, multiple container replicas behind a load balancer, or both, purely for throughput and availability (one instance dying shouldn't take the whole app down). Code that's only correct "as long as there's exactly one process" breaks the moment that standard, ordinary scaling step happens. Correctness shouldn't depend on staying at the dev default.
+
+## 3. What "shared" means for the database — not shared memory
+
+Multiple processes reaching the same Postgres don't share memory. Each one opens its own **network connection** (TCP) to a separate, independently running program (see [`app/core/README.md`](../app/core/README.md) for how connection pooling manages this per-process). "Shared" here means "the same external service, reachable by anyone with the connection string" — the same way many different browsers can all reach one REST API without sharing memory with each other or with the API server. [`sqlalchemy-basics.md`](sqlalchemy-basics.md)'s "you probably already have multiple connections open" section makes this concrete: your FastAPI app, DBeaver, and a `psql` terminal are already three separate processes/connections talking to the one Postgres, right now, on your own machine.
+
+This is exactly why the database is the one place a rule can be enforced *no matter how many processes are running your code* — it's the only thing every process actually shares.
+
+## 4. Truly simultaneous conflicting writes: Postgres serializes them automatically, for free
+
+Section 1's race relied on both requests' `SELECT` running *before* either `INSERT` — a gap in time. A sharper question: what if two requests try to insert the exact same unique key at the *literal same instant*? Does Postgres actually do both at once?
+
+**No — for that specific conflict, it doesn't.** Here's the real sequence, for two transactions (A and B) both inserting `kind='charge', status='succeeded'` for the same `reservation_id`:
+
+1. A's `INSERT` starts, writes its row, and starts adding the corresponding unique-index entry.
+2. B's `INSERT` starts moments later, trying to add an index entry with the *same key*.
+3. Postgres sees the conflict at the index — but A hasn't committed yet, so it isn't settled whether A's row will actually end up existing. So **B's `INSERT` blocks and genuinely waits**, mid-statement, until A's transaction resolves.
+4. If A commits: B resumes, sees a real, committed conflicting entry, and fails with `UniqueViolationError` — the exact error from the live test in [`sqlalchemy-basics.md`](sqlalchemy-basics.md#10-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live).
+   If A rolls back instead: B resumes and succeeds — the conflict vanished along with A's aborted row.
+
+So the two inserts aren't executed in parallel — B is made to wait its turn, automatically, as an inherent part of how a unique index maintains itself under concurrent writers. Nobody's code requested this waiting; it isn't `FOR UPDATE`, and it isn't a bug — it's just what "checking a unique index correctly under concurrency" requires.
+
+**This serialization is scoped only to the actual conflict, not the whole database.** A transaction inserting a payment for reservation X and another inserting an unrelated payment for reservation Y at the same instant share no key, so neither blocks on the other — both proceed with real parallelism across Postgres's separate backend processes. Postgres doesn't go single-threaded just because *something* concurrent is happening; only two writers racing for the *same* contested key ever get serialized this way.
+
+## 5. `SELECT ... FOR UPDATE` — a lock the database itself enforces
+
+```sql
+BEGIN;
+SELECT * FROM reservations WHERE id = X FOR UPDATE;   -- locks this row
+-- ... check something, then INSERT/UPDATE related rows ...
+COMMIT;   -- lock released
+```
+
+Unlike an in-process Python lock, this **is** enforced by Postgres itself, so it does coordinate correctly across every process and replica — no shared-memory problem here. If a second transaction tries to take the same lock while the first still holds it, Postgres makes it *wait* until the first commits or rolls back, so the second transaction's later `SELECT` sees the post-write state instead of a stale one.
+
+**What this would actually look like in this codebase**, had `Payment`'s "at most one succeeded charge per reservation" rule been enforced this way instead of with the partial unique index — illustrative only, this is *not* what the codebase does:
+
+```python
+# app/payment/service.py -- the manual-lock alternative we did NOT choose
+
+from sqlalchemy import select
+
+async def charge_reservation(session, reservation_id, amount_cents: int) -> Payment:
+    # 1. Lock the reservation row for the rest of this transaction. Any other
+    #    request trying to charge the SAME reservation blocks here until this
+    #    transaction commits or rolls back.
+    reservation = (
+        await session.execute(
+            select(Reservation).where(Reservation.id == reservation_id).with_for_update()
+        )
+    ).scalar_one()
+
+    # 2. Safe to check now -- no other transaction can be mid-way through the
+    #    same check-then-insert for this reservation while we hold the lock.
+    existing = (
+        await session.execute(
+            select(Payment).where(
+                Payment.reservation_id == reservation_id,
+                Payment.kind == PaymentKind.CHARGE,
+                Payment.status == PaymentStatus.SUCCEEDED,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise ValueError("reservation already has a successful charge")
+
+    # 3. Call the payment provider -- while STILL holding the lock from step 1;
+    #    releasing it earlier would reopen the exact race we're preventing.
+    result = await payment_provider.charge(amount_cents)
+
+    session.add(Payment(
+        reservation_id=reservation_id,
+        kind=PaymentKind.CHARGE,
+        amount_cents=amount_cents,
+        status=PaymentStatus.SUCCEEDED if result.success else PaymentStatus.FAILED,
+    ))
+    await session.commit()   # lock released here
+```
+
+`.with_for_update()` is SQLAlchemy's way of adding `FOR UPDATE` to a `SELECT`. Two things to notice in this version, made concrete instead of abstract:
+
+- **The lock is held from step 1 all the way through `commit()` in step 3** — spanning the entire `payment_provider.charge()` network call. That's the "holding it across an external call" cost stated plainly: any other request trying to touch this reservation (even just to look at it with its own `FOR UPDATE`) queues up and waits for however long the payment provider takes to respond.
+- **Every single place that ever creates a `Payment`** — a retry job, a refund endpoint, a webhook handler for asynchronous provider callbacks, some future admin tool — has to reimplement this exact lock-then-check-then-insert sequence, in this order, correctly. Forget `.with_for_update()` in just one of them, and that one path has silently reintroduced the original race, indistinguishable from the paths that got it right.
+
+Compare that to what the codebase actually has: [`app/payment/models.py`](../app/payment/models.py)'s `Index(..., unique=True, postgresql_where=...)`. Zero code in `service.py` to get right or forget — the rule is enforced the instant *any* row is written, including by code that doesn't know this rule exists.
+
+**So why isn't `FOR UPDATE` the default answer, if it genuinely works across processes?** Two real costs, illustrated above:
+
+- **It only works if every code path that touches the locked resource remembers to take the lock, in the right order, inside a transaction.** A webhook handler, a retry job, a future endpoint, a one-off data-fix script — miss it once anywhere, and the protection silently stops applying to that path, while looking identical to the paths that do it correctly.
+- **Holding it across an external call is expensive and risky.** If a charge attempt needs a network round-trip to a payment provider, holding a row lock open for that entire duration blocks every other operation on that row (cancellation, another read) for as long as the external call takes — which can be seconds, or much longer if the provider is slow.
+
+## 6. Why a database constraint is preferred for correctness-critical invariants
+
+**Both of these are enforced by Postgres, not Python — that's not the axis they differ on.** `FOR UPDATE` really does block a second transaction, exactly as advertised; there's no sense in which the *blocking itself* is weaker or less real than what a constraint does. The difference is **who is responsible for making the protection apply to a given write, and when that decision gets made:**
+
+| | `FOR UPDATE` | Constraint / unique index |
+|---|---|---|
+| Who executes the actual block? | Postgres | Postgres |
+| When is "protect this" decided? | Per query, in application code — a developer must write `.with_for_update()` on that specific `SELECT` | Once, in the schema — declared on the table, not on any particular query |
+| Applies to a write only if... | ...that write's code path happens to include the lock | Always — there's no opt-in, because there's nothing to opt into |
+| Depends on every writer remembering to use it? | **Yes** — one code path that skips the lock isn't protected, and nothing indicates it | **No** — Postgres checks every write unconditionally, no matter what wrote it |
+| Cost | Holds a lock open, potentially across slow external calls | An instant check at insert/update time |
+| Failure mode if forgotten | Silent — nothing indicates the protection is missing | N/A — nothing can bypass it |
+
+A constraint isn't "safer" because it invokes some stronger enforcement than a lock does — both are just Postgres. It's safer because it's declared **once, on the table**, instead of being something a developer has to actively choose to invoke correctly on every single query that touches the data, forever. This is the same reasoning behind [`CheckConstraint`](sqlalchemy-basics.md#6-checkconstraint--rules-postgres-enforces-not-just-your-app) in this codebase: enforcement that doesn't depend on which code wrote the row is strictly more robust than enforcement that does.
+
+## 7. Is this actually how real systems are built?
+
+Yes — "stateless app tier, stateful data tier" is a standard, load-bearing pattern in backend engineering, not something specific to this project. It's the default assumption behind Kubernetes deployments, load-balanced container fleets, and serverless functions: application instances are cheap, interchangeable, and disposable; the database (or a dedicated coordination service, for things that truly need one) is the one thing treated as authoritative. The corollary is equally standard: **don't rely on in-process state for correctness that must hold system-wide** — it silently stops working the moment there's more than one process, which happens almost immediately in real deployments, often invisibly (a second worker, a second replica added for capacity, without anyone touching the "business logic").
+
+---
+
+## Cheat sheet
+
+| Term | One-line meaning |
+|---|---|
+| Race condition / TOCTOU | Two requests both read a "not yet done" state before either writes, so both proceed |
+| Interleaving | What "handling concurrent requests" actually does — runs requests' code in overlapping order, not one-at-a-time |
+| Stateless app tier | App processes hold nothing essential in memory; any one is disposable/replaceable |
+| Stateful data tier | The database is the one thing every process/replica actually shares |
+| In-process lock | Only coordinates code in the same process's memory — invisible to any other process |
+| `SELECT ... FOR UPDATE` | A row-level lock Postgres itself enforces — works across processes, but only if every writer remembers to use it |
+| DB constraint / unique index | Enforced by Postgres on every write, regardless of which code path wrote it — no discipline required |
