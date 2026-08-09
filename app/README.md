@@ -21,7 +21,9 @@ BookIt is a short-term rental platform — see [docs/er-diagram.md](../docs/er-d
 - **service.py** — business logic, calls repositories, independent of HTTP
 - **router.py** — FastAPI `APIRouter`, thin — parses requests, calls `service.py`, returns responses
 
-All files are currently empty placeholders; they get filled in as their corresponding Jira epics are implemented.
+**Exception: `notification/` has no `models.py`.** Every other module owns a table in [docs/er-diagram.md](../docs/er-diagram.md); `notification/` doesn't — it reacts to events from other modules (a reservation confirmed, a payment failed) rather than storing anything of its own, so there's no model to define. If it ever needs its own persisted state (e.g. tracking which notifications were already sent, for idempotency), add `models.py` back then — don't keep an empty file around just for shape consistency.
+
+The remaining `schemas.py`/`service.py`/`router.py` files are currently empty placeholders; they get filled in as their corresponding Jira epics are implemented.
 
 ## Why organize by domain, not by layer
 
