@@ -1,6 +1,6 @@
 # Alembic basics
 
-Theory only — nothing in this file has been run yet. Read/ask questions first; the actual setup happens after.
+Written as theory before touching anything; updated in place as the actual BOOK-23 setup happens, so it stays a real reference afterward instead of going stale.
 
 ## 1. The problem this solves: `create_all()` has no memory
 
@@ -55,6 +55,16 @@ Alembic connects to the database, inspects what's actually there right now, comp
 - It never touches actual *data* — only structure.
 
 So the workflow is always: generate → **read the file** → adjust if needed → apply.
+
+**What this command actually touches on disk — and, just as importantly, what it doesn't.** Running it for real (`create initial tables`) produced exactly one new file:
+
+```
+alembic/versions/e518a83a5b04_create_initial_tables.py
+```
+
+The name is `<revision id>_<slugified message>.py` — `e518a83a5b04` is a short, randomly-generated hex ID identifying this specific migration (what `down_revision` in the *next* migration will point back to, per section 2's chain), and `create_initial_tables` is just the `-m "..."` message, lowercased and underscored, purely for human readability when scanning the `versions/` folder.
+
+**`env.py` is *not* touched by this command, ever.** `--autogenerate` *reads* `env.py` every time (that's how it knows which database to connect to and what `target_metadata` to diff against — the setup from section 3), but it never writes back into it. Every future schema change means running `alembic revision --autogenerate -m "..."` again, which creates another brand-new file in `versions/` — `env.py` only needs editing again if *how Alembic connects or what it targets* changes, which is rare, not part of the normal day-to-day migration workflow.
 
 ## 5. `upgrade` / `downgrade` — applying and reversing
 

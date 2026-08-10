@@ -1,6 +1,11 @@
 import asyncio
 from logging.config import fileConfig
 
+# imported for its side effect: patches autogenerate to detect Postgres ENUM
+# create/alter/drop correctly (plain autogenerate creates enum types but
+# never drops them -- see migration e518a83a5b04's downgrade() for the
+# manual fix this would have made unnecessary).
+import alembic_postgresql_enum  # noqa: F401
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config

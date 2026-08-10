@@ -14,6 +14,7 @@ dependencies = [
     "asyncpg>=0.30",
     "redis>=5.2",
     "alembic>=1.19.1",
+    "alembic-postgresql-enum>=1.10.0",
 ]
 
 [tool.uv]
