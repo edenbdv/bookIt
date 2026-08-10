@@ -1,0 +1,97 @@
+# Alembic basics
+
+Theory only — nothing in this file has been run yet. Read/ask questions first; the actual setup happens after.
+
+## 1. The problem this solves: `create_all()` has no memory
+
+Every demo script in this session so far has used:
+
+```python
+await conn.run_sync(Base.metadata.create_all)
+```
+
+That works, but it's all-or-nothing and has no history. It looks at your models *right now* and creates whatever tables don't exist yet — it has no concept of "yesterday the `payments` table didn't have a `status` column, today it does, please add just that column." If you change a model after tables already exist with real data in them, `create_all()` won't alter anything (it only creates missing tables, never modifies existing ones) — you'd be stuck hand-writing `ALTER TABLE` statements yourself, on every environment (your machine, a teammate's machine, staging, production) separately, hoping you didn't forget one.
+
+**Alembic's job**: track schema changes as an ordered sequence of versioned scripts, so "make the database match what the models say" becomes a repeatable, reviewable process instead of manual, one-off SQL typed by hand into each environment.
+
+## 2. What a migration actually is
+
+A migration is a Python file with two functions:
+
+```python
+def upgrade():
+    op.create_table("users", ...)
+
+def downgrade():
+    op.drop_table("users")
+```
+
+`upgrade()` applies the change; `downgrade()` undoes it. Alembic creates one extra table in your database, `alembic_version`, holding a single row: the ID of the last migration that was applied. That's how it knows, for any given database, exactly which changes it has and hasn't seen yet — the same way git's `HEAD` tracks which commit you're currently on.
+
+Migrations form a **chain**, not an unordered pile: each one records its own revision ID and the ID of the migration before it (`down_revision`). Running `alembic upgrade head` walks that chain from wherever the database currently is, applying every migration in order, up to the latest ("head"). This is conceptually identical to a git commit history — each commit (migration) points at its parent, and "checking out head" means applying everything between where you are and the tip.
+
+## 3. Two config files, two different jobs
+
+- **`alembic.ini`** — mostly static settings: logging format, file naming, and (by default) a hardcoded `sqlalchemy.url`. We won't use that hardcoded URL — see section 5.
+- **`env.py`** — an actual Python script Alembic runs every time, which decides two things: **which database to connect to**, and **what the "correct" schema looks like** (called `target_metadata`, normally set to `Base.metadata` — the same registry from `sqlalchemy-basics.md` sections 2–3).
+
+This is the file we'll need to edit for two things specific to this project:
+1. Import every model module (`app.auth.models`, `app.property.models`, etc.) so they're actually registered on `Base.metadata` before Alembic looks at it — this is the exact gap `core/models.py`'s own docstring flags: *"A model only reaches the catalog if its module is imported... Alembic needs somewhere that imports all of them (see BOOK-23)."*
+2. Read the database URL from `get_settings().database_url` (the app's real config) instead of `alembic.ini`'s hardcoded string — so migrations always target whatever database the app itself is actually configured to use.
+
+## 4. `autogenerate` — Alembic writes the migration for you, but isn't magic
+
+Instead of hand-writing `op.create_table(...)` for every column, you run:
+
+```bash
+alembic revision --autogenerate -m "create initial tables"
+```
+
+Alembic connects to the database, inspects what's actually there right now, compares it against `target_metadata` (your models), and writes a migration script for the *difference*. Against a completely empty database, that difference is "everything" — so the first migration ends up creating all five tables.
+
+**Why "review it, don't just trust it" matters here**, same principle as reviewing any generated code: autogenerate is good at detecting new/dropped tables and columns, but it can't read your mind about *intent*. A few known blind spots:
+- Renaming a column looks identical to "drop old column, add new column" — autogenerate will generate a destructive drop+add instead of a rename unless you edit the script yourself.
+- Some constraint/index changes need manual nudging depending on how they're declared.
+- It never touches actual *data* — only structure.
+
+So the workflow is always: generate → **read the file** → adjust if needed → apply.
+
+## 5. `upgrade` / `downgrade` — applying and reversing
+
+```bash
+alembic upgrade head       # apply every migration not yet applied, in order
+alembic downgrade -1       # undo just the most recent migration
+alembic downgrade base     # undo everything, back to an empty schema
+```
+
+**Reversibility isn't automatic or guaranteed** — `downgrade()` has to actually be correct, whether autogenerated or hand-written. For structural changes like "create a table" / "add a column," the reverse (`drop_table` / `drop_column`) is unambiguous and autogenerate gets it right. But some changes are fundamentally lossy: downgrading a migration that dropped a column can recreate the *column*, but not the data that used to be in it. BOOK-23's acceptance criteria ("`alembic downgrade` verified") is specifically about proving the *structural* reversibility works end-to-end on this initial migration, not a general guarantee for all future ones.
+
+## 6. Why this project needs the *async* template specifically
+
+[`app/core/config.py`](../app/core/config.py)'s `database_url` is `postgresql+asyncpg://...` — `asyncpg` is an **async-only** driver, it has no synchronous interface at all. Alembic's default project scaffold (`alembic init alembic`) assumes a normal synchronous SQLAlchemy engine and calls things like `connection.execute(...)` directly — that flatly doesn't work with an async-only driver.
+
+Alembic ships a separate scaffold for this (`alembic init -t async ...`) that wraps the whole migration run in `asyncio.run(...)` and uses `await connection.run_sync(do_run_migrations)` — meaning: open an async connection (using `asyncpg`), then hand control briefly to a synchronous function that does the actual migration logic Alembic already knows how to do, then hand control back. This is the same `run_sync` bridge already explained in `sqlalchemy-basics.md` for `Base.metadata.create_all` in every demo script this session — same underlying reason (a sync-style API being driven from inside an async context), just Alembic's version of it.
+
+## 7. The actual plan for BOOK-23, once you're ready
+
+1. Install Alembic, initialize it with the **async** template.
+2. Edit `env.py`: import every model module (satisfies the "somewhere that imports all of them" gap), set `target_metadata = Base.metadata`, and pull the DB URL from `get_settings()`.
+3. Generate migration 1 from the current models — creates all 5 tables. **Read the generated file together before running it.**
+4. Run `alembic upgrade head` against the real dockerized Postgres, confirm the tables match, then run `alembic downgrade base` to confirm it reverses cleanly, then `upgrade head` again.
+5. Generate a **second**, smaller migration: add the index on `properties(city)` — done as its own separate step specifically to practice a real incremental change, since almost all future schema work will be one small migration at a time, not a single big one. (This means migration 1 needs to be generated *before* `city`'s `index=True` is picked up, so there's a genuine difference left for migration 2 to capture — happy to talk through exactly how when we get there.)
+
+---
+
+## Cheat sheet
+
+| Term | One-line meaning |
+|---|---|
+| Migration | A Python file with `upgrade()`/`downgrade()` — one versioned schema change |
+| `alembic_version` table | Alembic's own table; stores which migration a given database is currently at |
+| Revision chain | Each migration points at its parent (`down_revision`) — an ordered history, like git commits |
+| `alembic.ini` | Static config (logging, file naming) |
+| `env.py` | The script that decides which DB to connect to and what the "correct" schema (`target_metadata`) is |
+| `--autogenerate` | Diffs your models against the live DB and writes a migration for the difference — always review before applying |
+| `alembic upgrade head` | Apply every not-yet-applied migration, in order |
+| `alembic downgrade base` | Reverse every migration, back to empty |
+| Async template (`-t async`) | Alembic's scaffold for async-only drivers (like `asyncpg`) — bridges via `connection.run_sync(...)` |
