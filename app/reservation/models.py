@@ -4,6 +4,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import CheckConstraint, Date, DateTime, Enum, ForeignKey, func
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.models import Base
@@ -24,11 +25,6 @@ class ReservationStatus(str, enum.Enum):
 
 class Reservation(Base):
     __tablename__ = "reservations"
-    __table_args__ = (
-        CheckConstraint("check_out > check_in", name="check_out_after_check_in"),
-        CheckConstraint("guest_count > 0", name="guest_count_positive"),
-        # overlap prevention (EXCLUDE USING gist on property_id + daterange) is BOOK-24
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     property_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("properties.id"))
@@ -48,6 +44,25 @@ class Reservation(Base):
     # null once confirmed; used by Epic 6's expiry job to clear abandoned pending holds
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("check_out > check_in", name="check_out_after_check_in"),
+        CheckConstraint("guest_count > 0", name="guest_count_positive"),
+        # DB-level double-booking prevention, not app-level checking — an app-level
+        # "is it free?" query can't stop two concurrent requests from both passing
+        # the check before either writes; only a DB constraint can (see
+        # docs/exclude-constraint-basics.md and docs/concurrency-basics.md).
+        # '[)' half-open range: check_out day itself isn't occupied, so a same-day
+        # turnover (one guest's checkout = another's check-in) is not an overlap.
+        # Cancelled reservations are excluded entirely, freeing their dates.
+        ExcludeConstraint(
+            (property_id, "="),
+            (func.daterange(check_in, check_out, "[)"), "&&"),
+            using="gist",
+            where=(status != "cancelled"),
+            name="no_overlapping_reservations",
+        ),
+    )
 
     property: Mapped["Property"] = relationship(back_populates="reservations")
     guest: Mapped["User"] = relationship(back_populates="reservations")
