@@ -138,7 +138,24 @@ reservations: Mapped[list["Reservation"]] = relationship(back_populates="propert
 
 This is different in kind from `mapped_column()` — it configures **no column at all**. There's no `reservations` field in the `properties` table. It's a pure Python convenience: SQLAlchemy uses the foreign key that already exists on `Reservation` to compute this list on demand, so you can write `some_property.reservations` in code without writing the join yourself.
 
-## 5. `relationship()` and `back_populates` — the bidirectional link
+## 5. Where `Property(id=..., title=...)`'s constructor actually comes from
+
+None of these model classes define an `__init__`. Yet `Property(title="Cabin", city="Haifa")` works, and so does passing any other mapped attribute as a keyword argument — including `id`, which is never explicitly listed as a parameter anywhere. Proof it isn't hand-written:
+
+```python
+Property.__init__.__module__   # -> 'sqlalchemy.orm.instrumentation', not 'app.property.models'
+```
+
+SQLAlchemy auto-generates a constructor for every declarative mapped class, with signature `(self, **kwargs)`. It checks each keyword against the class's actual mapped attributes and assigns matching ones directly to the new instance — `Property(id=some_uuid)` sets `.id` immediately, in plain Python, no database involved. Anything that isn't a real column or relationship is rejected outright:
+
+```python
+Property(not_a_real_column="x")
+# TypeError: 'not_a_real_column' is an invalid keyword argument for Property
+```
+
+This is also why passing a fixed, hardcoded `id=` (instead of relying on `default=uuid.uuid4`) works at all — the auto-generated constructor doesn't care whether a value came from a default or was supplied explicitly; either way, it's just an assignment.
+
+## 6. `relationship()` and `back_populates` — the bidirectional link
 
 Take the actual pair already in this codebase:
 
@@ -194,7 +211,7 @@ host: Mapped["User"] = relationship(foreign_keys=[host_id], back_populates="prop
 
 Not required here — with exactly one FK between the two tables, there's nothing to disambiguate, so the implicit version above (no `foreign_keys=`) is what this codebase uses. `foreign_keys=` only becomes *necessary* the moment there's more than one FK between the same two tables — e.g. if `Property` ever gained a second column like `last_edited_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))`. At that point SQLAlchemy can no longer guess which column a given `relationship()` means, and raises `AmbiguousForeignKeysError` at startup until you tell it explicitly which FK each relationship should use. It's a loud, immediate failure (not a silent bug), so it's fine to add `foreign_keys=` only when that day comes rather than defensively up front.
 
-## 6. `CheckConstraint` — rules Postgres enforces, not just your app
+## 7. `CheckConstraint` — rules Postgres enforces, not just your app
 
 ```python
 class Property(Base):
@@ -216,7 +233,7 @@ class Property(Base):
 
 Rules like that move to the **service layer** instead (`app/reservation/service.py`): fetch the `Property`, compare `guest_count` against `property.max_guests` in Python, reject if it's over, *before* the `Reservation` is even constructed. The trade-off is real: unlike a `CheckConstraint`, this rule is only enforced by code paths that go through that service function — a different writer (raw SQL, a bug, another service) could still insert a `Reservation` that violates it. It's the same "app-level vs. DB-level" boundary as the point above, just landing on the other side of it for a reason: the database genuinely cannot express this one.
 
-## 7. `TYPE_CHECKING` and string literals — how `User` and `Property` reference each other without crashing
+## 8. `TYPE_CHECKING` and string literals — how `User` and `Property` reference each other without crashing
 
 ```python
 # app/property/models.py
@@ -244,7 +261,7 @@ properties: Mapped[list["Property"]] = relationship(back_populates="host")
 
 Without the quotes, `Mapped[User]` would try to evaluate `User` immediately while the class body runs — and fail, since `User` was never actually imported outside the `TYPE_CHECKING` block.
 
-## 8. Nullable columns and the soft-delete pattern
+## 9. Nullable columns and the soft-delete pattern
 
 ```python
 deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -259,7 +276,7 @@ deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 **The pattern:** "deleting" a property means setting `deleted_at = now()`, not removing the row. It stays in the table forever. Every query that means "currently listed properties" has to explicitly filter `WHERE deleted_at IS NULL`; anything that means "this property, historically" queries by `id` with no such filter.
 
-## 9. `str, enum.Enum` — how a Python enum becomes a real database column
+## 10. `str, enum.Enum` — how a Python enum becomes a real database column
 
 ```python
 class UserRole(str, enum.Enum):
@@ -285,7 +302,7 @@ User.__table__.c.role.type.enums   # -> ['USER', 'ADMIN']       (what Postgres a
 
 This stays invisible as long as everything only ever goes through the ORM (SQLAlchemy converts consistently in both directions, so the app never notices). It breaks the moment anything assumes the lowercase value directly — a hand-written SQL query, an external tool or analytics dashboard reading the table, a data migration, or (concretely, in this codebase) `Payment`'s partial unique index below, whose `postgresql_where=text("kind = 'charge' ...")` failed outright at table-creation time because `'charge'` isn't a value the column would actually accept. `values_callable=lambda enum_cls: [e.value for e in enum_cls]` tells SQLAlchemy to use `.value` instead of the member name, so the database matches what `docs/er-diagram.md` documents and what the rest of the app already assumes.
 
-## 10. Index vs. constraint in Postgres, then `Payment`'s partial unique index — proven live
+## 11. Index vs. constraint in Postgres, then `Payment`'s partial unique index — proven live
 
 **Postgres doesn't have two separate implementations of uniqueness — a "constraint" version and an "index" version. There's one mechanism, and a `UNIQUE` constraint is just one way of asking for it.** Take the most ordinary case, a plain `UniqueConstraint` with nothing fancy about it:
 
@@ -354,31 +371,9 @@ Step 3 was rejected by Postgres itself, with no application code checking anythi
 
 Once models exist, this is how you actually read and write rows.
 
-## 11. Round-trip
+**Prerequisite:** this assumes you already know what a round-trip, a transaction, and isolation are, and that `COMMIT`/`ROLLBACK` are plain SQL, not ORM-specific — see [`sql-basics.md`](sql-basics.md) if not. Everything below is specifically about SQLAlchemy's `Session` API.
 
-The same pattern as `fetch()`: send a request, wait, get a response. That wait is real — even on `localhost` it's not instant.
-
-Every SQL statement — `INSERT`, `SELECT`, anything — is one round-trip: Python sends it to Postgres over the network, waits, gets a reply back. If you do 50 inserts one at a time, that's 50 round-trips, 50 waits. This is *why* ORMs try to batch things up instead of sending one statement per line of code — which is exactly what `Session` does (next section).
-
-## 12. Transactions and isolation
-
-A **transaction** is a group of changes that either **all** happen or **none** happen — no in-between state. You open one, do some work, then either `commit` (make it permanent) or `rollback` (throw it all away, as if none of it happened).
-
-The guarantee that matters here is **isolation**: while a transaction is open, only *your* connection can see the changes it's making. Every other connection querying the database still sees the old state, as if nothing happened yet.
-
-**Why that's the point, not a limitation:** say your code inserts a `Reservation`, then inserts its `Payment`, as two separate statements. If someone else queried the database in between those two statements, would you want them to see a reservation that exists with no payment? That's a broken, half-finished state. The transaction hides that "in progress" work entirely — nobody sees it until `commit`, when it all becomes visible **at once**. If the `Payment` insert fails, `rollback()` erases the `Reservation` too, so nobody ever sees the half-done version.
-
-**Why this might feel new if you're used to a local DB:** many simple tools run in **autocommit mode** — every statement commits itself immediately, with no explicit transaction ever left open. It's not that transactions didn't exist; the tool just never gave you a reason to notice one was open.
-
-## 13. You probably already have multiple connections open
-
-A natural question: does this "other connections can't see it yet" thing actually come up, or is it theoretical?
-
-It's already true on your own machine, right now. **DBeaver** holds a connection to Postgres. **The FastAPI app** holds a separate connection to the same Postgres. That's already two connections, from one person, at once — neither sees the other's uncommitted work. Open a `psql` terminal too and that's three.
-
-At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve. It's also *why* connection pooling exists (see `core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time. Teams also often share a staging database for integration testing, though giving each developer their own local database (like we've done with Docker) avoids stepping on each other while coding.
-
-## 14. `Session` — the staging area
+## 12. `Session` — the staging area
 
 `Session` is SQLAlchemy's middleman between your Python objects and Postgres. Think of it like a shopping cart, or a form you haven't submitted yet: things can sit in it, tracked, without anything being sent over the network.
 
@@ -389,9 +384,9 @@ session.add(user)
 
 **Nothing has touched Postgres yet.** `add()` just tells the `Session`: "track this object, I intend to save it eventually." It's pure Python bookkeeping, zero round-trips.
 
-## 15. `session.execute(select(...))` — actually querying data
+## 13. `session.execute(select(...))` — actually querying data
 
-Everything in section 14 is about writing. Reading is a separate call: `Session.execute()`, given a `select(...)` construct, is what runs an actual query and returns rows — the SQLAlchemy 2.0 replacement for the older `session.query(...)` API.
+Everything in section 12 is about writing. Reading is a separate call: `Session.execute()`, given a `select(...)` construct, is what runs an actual query and returns rows — the SQLAlchemy 2.0 replacement for the older `session.query(...)` API.
 
 ```python
 from sqlalchemy import select
@@ -413,7 +408,7 @@ Same "build it, then run it" split as everywhere else in the ORM: `select(Paymen
 
 This is why the `charge_reservation` example in [`docs/concurrency-basics.md`](concurrency-basics.md) uses `.scalar_one()` for the locked `Reservation` (it must already exist — a missing row there is a bug, not a valid outcome) but `.scalar_one_or_none()` for the existing-succeeded-charge check (not finding one is the normal, expected case).
 
-## 16. `flush()` — hit submit
+## 14. `flush()` — hit submit
 
 ```python
 await session.flush()
@@ -423,7 +418,33 @@ await session.flush()
 
 But it's still not final. Think of it like a server accepting your form and giving you a reference number, without yet officially processing it where everyone else can see it. In database terms: your changes exist inside an open **transaction** — visible to you, invisible to every other connection to the database.
 
-## 17. `commit()` — final confirmation
+**So when do you actually need to call it?** Less often than it might seem — several things that look like they'd require a round-trip don't.
+
+**Not needed for:**
+- **Reading `.id` (or any client-side value) in Python** — an explicit `id=...` kwarg or `default=uuid.uuid4` sets the attribute the instant the object is constructed, purely in memory (see section 5). No round-trip involved.
+- **Getting insert order right** — SQLAlchemy sorts pending inserts by real foreign-key dependency at flush time regardless of `add()` order (section 15) — a single flush/commit at the very end handles this correctly on its own, no need to flush per-entity just for sequencing.
+- **Avoiding duplicate objects within one run** — `Session.get(model, id)` checks the session's own **identity map** (an in-memory cache of everything already added or loaded into this session) *before* it ever queries the database. An object added earlier in the same session is found there directly, unflushed or not.
+
+**Actually needed for:**
+1. **Server-computed values** — `created_at` (via `server_default=func.now()`, section 18) only becomes a real Python value after an actual round-trip; nothing client-side can produce it.
+2. **Cross-process visibility** — the identity-map shortcut above only helps *within* one running process. Re-running [`app/core/seed.py`](../app/core/seed.py) starts a **fresh process with an empty identity map**, so its `session.get()` calls genuinely have to query Postgres — which only finds a prior run's rows if that earlier run actually flushed/committed them.
+3. **Precise, immediate error attribution** — flushing per-entity means a constraint violation surfaces right when that specific object is written, clearly tied to it — rather than surfacing as one large batched error at the very end, covering many pending objects at once, that's harder to trace back to which row actually caused it.
+
+## 15. Insert order isn't `add()` order — it's foreign-key order
+
+```python
+prop = Property(id=uuid.uuid4(), host_id=host_id, ...)
+host = User(id=host_id, ...)
+session.add(prop)   # child added first
+session.add(host)   # parent added second
+await session.commit()   # still succeeds
+```
+
+This commits successfully even though the child (`Property`, which references `host_id`) was added *before* its parent (`User`) — proven live by actually running it. If `INSERT` statements were sent in `add()` order, this would fail with a foreign-key violation, since `host_id` wouldn't exist yet when `Property`'s row was written.
+
+**What actually determines the order:** during `flush()`, SQLAlchemy's Unit of Work looks at the real `ForeignKey` constraints declared in the table metadata (`Base.metadata`, from section 3) — `Property.host_id` has `ForeignKey("users.id")` — and builds a dependency graph from that: "a `Property` row depends on its `User` row existing first." It then runs a **topological sort** over that graph to decide the actual `INSERT` sequence. The ordering comes from the schema's real foreign-key structure, not from the order any Python code happened to run in — which is exactly what lets [`app/core/seed.py`](../app/core/seed.py) freely mix related rows together without manually sequencing every `add()` call by hand.
+
+## 16. `commit()` — final confirmation
 
 ```python
 await session.commit()
@@ -431,7 +452,7 @@ await session.commit()
 
 This is what makes the change **permanent and visible to everyone else** — other connections, other requests, other people querying the same database now see it. Until this point, you could still back out entirely.
 
-## 18. `rollback()` — the undo button
+## 17. `rollback()` — the undo button
 
 ```python
 await session.rollback()
@@ -439,7 +460,13 @@ await session.rollback()
 
 If anything goes wrong before `commit()`, this discards everything pending in the transaction — as if none of it happened. This is the actual safety net that makes transactions useful: you can do several related changes (e.g. create a `Reservation` *and* a `Payment`), and if the second one fails, `rollback()` guarantees the first one never actually happened either. Nothing half-done gets left behind.
 
-## 19. Client-side vs. server-side defaults
+**Worth being precise about: these four commands aren't all the same kind of thing.**
+
+`commit()`/`rollback()` are universal SQL — `COMMIT`/`ROLLBACK` are actual SQL statements, part of the SQL standard, present in every relational database and every raw SQL client. Typing `COMMIT;` directly into `psql` does the exact same thing as `session.commit()` — SQLAlchemy's version is a thin wrapper around that same universal mechanism, not something it invented.
+
+`add()`/`flush()` are different: they're specific to the architectural pattern SQLAlchemy uses, called **Unit of Work**. Raw SQL has no "staging" concept at all — you just write `INSERT INTO ...` and it happens; there's no separate add-then-flush step in SQL itself. SQLAlchemy explicitly modeled its `Session` on **Hibernate** (Java's dominant ORM), which has the identical shape — even the same method name, `session.flush()`. But this pattern isn't universal across ORMs: Django's default ORM writes immediately on `.save()` (no separate staging step), and Active Record-style ORMs (Rails, Laravel's Eloquent) work the same way. So `add()`/`flush()` reflect a specific design choice SQLAlchemy shares with some ORMs (notably Hibernate) but not all of them — unlike `commit()`/`rollback()`, which would exist no matter what tool you were using.
+
+## 18. Client-side vs. server-side defaults
 
 Ties directly into `id` vs. `created_at` in `app/auth/models.py`:
 
@@ -460,7 +487,7 @@ created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_def
 | Best for | `id` — need it before persisting, want it in tests without a real DB, want it portable across DB engines | `created_at` — want the database's clock as the single source of truth, no matter what tool inserted the row |
 | Cost | Doesn't apply if some other tool bypasses the ORM (raw SQL, another service) | Costs a round-trip to find out the value |
 
-## 20. Worked example, line by line
+## 19. Worked example, line by line
 
 ```python
 user = User(email="a@b.com", hashed_password="...")
@@ -480,7 +507,7 @@ await session.commit()
 # Transaction finalized. Permanent. Every other connection can now see this row.
 ```
 
-## 21. Migrations and transactions — same mechanism, different purpose
+## 20. Migrations and transactions — same mechanism, different purpose
 
 A natural question after Part A (structure) and Part B (transactions): are these related, or two separate topics?
 
@@ -503,6 +530,9 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `metadata` | The catalog of every table your models define; what Alembic reads to generate migrations |
 | `Mapped[T]` | Left side — the Python-facing type of an attribute |
 | `mapped_column(...)` | Right side — the actual database column's configuration |
+| Model `__init__` | Auto-generated by SQLAlchemy (`sqlalchemy.orm.instrumentation`), not hand-written — accepts any mapped attribute as a kwarg, rejects anything else |
+| Insert order | Determined by real `ForeignKey` dependencies at flush time (topological sort), not by `session.add()` order |
+| Identity map | The session's in-memory cache of added/loaded objects — `session.get()` checks it before querying the DB; doesn't survive across processes |
 | `relationship(...)` | Not a column — a computed, in-Python convenience built from an existing foreign key |
 | `back_populates=` | Names the matching `relationship()` attribute on the other class, keeping both sides in sync in memory |
 | FK column vs. `relationship` | `host_id` = raw UUID, free to read, use for filtering; `host` = full object, may cost a round-trip, use for reading data |
@@ -518,9 +548,6 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `values_callable=` | Makes `Enum(...)` store the member's `.value` (e.g. `"user"`) instead of SQLAlchemy's default of its `.name` (`"USER"`) |
 | `UniqueConstraint` in Postgres | Not a separate mechanism from an index — Postgres backs every `UNIQUE` constraint with a unique index under the hood |
 | Partial unique index | `Index(..., unique=True, postgresql_where=...)` — enforces uniqueness only among matching rows; the *only* way to do this, since `UNIQUE` constraint syntax has no `WHERE` |
-| Round-trip | Send a message to Postgres, wait, get a reply — like `fetch()` |
-| Transaction | A group of changes that all happen or none happen; isolated from other connections until committed |
-| Isolation | Other connections can't see your changes until you `commit` |
 | DML | Data Manipulation Language — `INSERT`/`UPDATE`/`DELETE`, changes to rows |
 | DDL | Data Definition Language — `CREATE`/`ALTER TABLE`, changes to structure; what migrations are made of |
 | `Session` | In-memory staging area for pending changes |

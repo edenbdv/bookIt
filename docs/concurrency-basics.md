@@ -1,6 +1,6 @@
 # Concurrency & architecture basics
 
-Why several modeling choices in this codebase (like [`Payment`'s partial unique index](sqlalchemy-basics.md#10-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live)) favor a database-level rule over app-level coordination. This is general backend architecture, not SQLAlchemy-specific — it applies regardless of ORM, framework, or language.
+Why several modeling choices in this codebase (like [`Payment`'s partial unique index](sqlalchemy-basics.md#11-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live)) favor a database-level rule over app-level coordination. This is general backend architecture, not SQLAlchemy-specific — it applies regardless of ORM, framework, or language.
 
 ## 1. "Handling concurrent requests" means interleaving, not serializing
 
@@ -40,7 +40,7 @@ Section 1's race relied on both requests' `SELECT` running *before* either `INSE
 1. A's `INSERT` starts, writes its row, and starts adding the corresponding unique-index entry.
 2. B's `INSERT` starts moments later, trying to add an index entry with the *same key*.
 3. Postgres sees the conflict at the index — but A hasn't committed yet, so it isn't settled whether A's row will actually end up existing. So **B's `INSERT` blocks and genuinely waits**, mid-statement, until A's transaction resolves.
-4. If A commits: B resumes, sees a real, committed conflicting entry, and fails with `UniqueViolationError` — the exact error from the live test in [`sqlalchemy-basics.md`](sqlalchemy-basics.md#10-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live).
+4. If A commits: B resumes, sees a real, committed conflicting entry, and fails with `UniqueViolationError` — the exact error from the live test in [`sqlalchemy-basics.md`](sqlalchemy-basics.md#11-index-vs-constraint-in-postgres-then-payments-partial-unique-index--proven-live).
    If A rolls back instead: B resumes and succeeds — the conflict vanished along with A's aborted row.
 
 So the two inserts aren't executed in parallel — B is made to wait its turn, automatically, as an inherent part of how a unique index maintains itself under concurrent writers. Nobody's code requested this waiting; it isn't `FOR UPDATE`, and it isn't a bug — it's just what "checking a unique index correctly under concurrency" requires.
@@ -127,7 +127,7 @@ Compare that to what the codebase actually has: [`app/payment/models.py`](../app
 | Cost | Holds a lock open, potentially across slow external calls | An instant check at insert/update time |
 | Failure mode if forgotten | Silent — nothing indicates the protection is missing | N/A — nothing can bypass it |
 
-A constraint isn't "safer" because it invokes some stronger enforcement than a lock does — both are just Postgres. It's safer because it's declared **once, on the table**, instead of being something a developer has to actively choose to invoke correctly on every single query that touches the data, forever. This is the same reasoning behind [`CheckConstraint`](sqlalchemy-basics.md#6-checkconstraint--rules-postgres-enforces-not-just-your-app) in this codebase: enforcement that doesn't depend on which code wrote the row is strictly more robust than enforcement that does.
+A constraint isn't "safer" because it invokes some stronger enforcement than a lock does — both are just Postgres. It's safer because it's declared **once, on the table**, instead of being something a developer has to actively choose to invoke correctly on every single query that touches the data, forever. This is the same reasoning behind [`CheckConstraint`](sqlalchemy-basics.md#7-checkconstraint--rules-postgres-enforces-not-just-your-app) in this codebase: enforcement that doesn't depend on which code wrote the row is strictly more robust than enforcement that does.
 
 ## 7. Is this actually how real systems are built?
 

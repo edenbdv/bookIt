@@ -18,6 +18,18 @@ A booking platform backend built as a Python/FastAPI modular monolith. See [app/
 
 That's it — you don't need to install Python packages globally, and you don't need to install Postgres/Redis/RabbitMQ natively at all. Everything else is `uv` (app + deps) and `docker compose` (infra), covered below.
 
+## Seed data for local development
+
+After a fresh `alembic upgrade head` (schema exists but every table is empty), run:
+
+```bash
+uv run python -m app.core.seed
+```
+
+This inserts a small set of realistic sample data — hosts, guests, properties, reservations (including one cancelled, so the `EXCLUDE` constraint's `WHERE status <> 'cancelled'` behavior is visible), payments, and reviews — so there's something to look at in DBeaver or call through the API without inserting rows by hand.
+
+Safe to run again at any time — every seeded row has a fixed, hardcoded id, so re-running finds the existing rows and skips them instead of creating duplicates.
+
 ## Who runs what, and how
 
 **The infrastructure (Postgres, Redis, RabbitMQ) always runs in Docker, in both workflows below — that never changes.** No native install of any of them, ever.
