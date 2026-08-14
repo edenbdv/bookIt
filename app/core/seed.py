@@ -13,8 +13,8 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User, UserRole
-from app.core.db import get_engine
 from app.core.models import Base
+from app.core.unit_of_work import UnitOfWork
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus
@@ -55,13 +55,14 @@ async def get_or_create[ModelT: Base](
     return obj
 
 
-async def seed(session: AsyncSession) -> None:
+async def seed(uow: UnitOfWork) -> None:
     """2 hosts, 2 guests, 2 properties, 3 reservations (2 confirmed + 1
     cancelled -- makes EXCLUDE's WHERE status <> 'cancelled' visible in real
     data), a charge+refund payment pair for the cancelled one (a realistic
     lifecycle, not just a missing charge), and reviews in both directions:
     guest reviewing the property, host reviewing the guest.
     """
+    session = uow.session
     host_alice = await get_or_create(
         session,
         User,
@@ -221,11 +222,8 @@ async def seed(session: AsyncSession) -> None:
 
 
 async def main() -> None:
-    engine = get_engine()
-    async with AsyncSession(engine) as session:
-        await seed(session)
-        await session.commit()
-    await engine.dispose()
+    async with UnitOfWork() as uow:
+        await seed(uow)
     print("Seed data ready.")
 
 
