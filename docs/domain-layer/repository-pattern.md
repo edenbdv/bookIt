@@ -43,6 +43,8 @@ This is the same "package by feature, not by layer" reasoning [`app/README.md`](
 
 That's a different thing from `BaseRepository` (`app/core/repository.py`). It's not "one repository for every domain" — it's a shared *base class* holding only what's identical across all of them (`get_by_id`, `list`, `add`, `delete`), so `PropertyRepository`/`ReservationRepository`/etc. don't each retype the same four methods. It carries zero domain knowledge — only "the model has an `id`" — so it belongs in `core/` the same way `Base` (`core/models.py`) and `get_db()` (`core/db.py`) do: generic infrastructure every module already depends on, not a new kind of coupling *between* modules. `property/` still doesn't know `reservation/` exists.
 
+**Bare shell now, methods added later — this isn't unusual.** Every module that owns a model (`UserRepository`, `ReservationRepository`, `PaymentRepository`, `ReviewRepository`, alongside `PropertyRepository`) already exists as a bare `BaseRepository[Model]` subclass with no domain-specific methods yet — those get added only once that module's `service.py` actually needs a specific query. This mirrors how other stacks do it: Spring Data JPA scaffolds `interface FooRepository extends JpaRepository<Foo, UUID> {}` the moment `Foo` is an entity, empty at first; EF Core's generic repository pattern and Django's model manager (`Foo.objects`) work the same way. The scaffolding is cheap and defined upfront; the real query logic is added lazily, per caller.
+
 ## 4. Why bother — what this actually buys, concretely
 
 **Testability.** Right now, testing anything in `service.py` means testing against a real Postgres, because the query logic is inline — there's nothing to substitute. With a repository, a unit test can construct the service with a fake in-memory repository (a plain Python object implementing the same methods over a dict/list) and check the business logic in isolation — no DB, no Docker, fast. This is what the roadmap's Epic 10 ("Testing strategy & CI/CD") leans on for "unit tests for business logic (mocked repos)."
@@ -80,7 +82,7 @@ A repository's job ends at "read/write this module's rows." It says nothing abou
 1. ✅ `get_db()` in `core/db.py` (section 6) — the session dependency every repository needs.
 2. ✅ `BaseRepository[ModelT]` in `core/repository.py` (section 3) — `get_by_id`, `list`, `add`, `delete`.
 3. ✅ `PropertyRepository` in `app/property/repository.py`, inheriting the base, adding `list_by_city` for BOOK-29.
-4. Remaining: repeat the same shape (`BaseRepository[Model]` + module-specific methods) for `auth/`, `reservation/`, `payment/`, `review/` as their epics reach the point of needing queries — not required to pre-build all five now.
+4. ✅ `UserRepository`, `ReservationRepository`, `PaymentRepository`, `ReviewRepository` — bare `BaseRepository[Model]` shells (`app/auth/repository.py`, `app/reservation/repository.py`, `app/payment/repository.py`, `app/review/repository.py`), matching the AC's "one repository class per module that owns a model." Module-specific methods (beyond the inherited four) still only get added once that module's epic actually needs a query — the epics aren't organized per-module (checked: none of the 13 epics is "the Review epic"), so waiting for one to "naturally" prompt each repository isn't reliable.
 5. No behavior changes to verify yet — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
 
 ---
