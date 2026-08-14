@@ -4,7 +4,38 @@ Split out of `repository-pattern.md` while working on BOOK-26: none of this is a
 
 **Prerequisite:** assumes you've read [`sqlalchemy-basics.md`](sqlalchemy-basics.md) for what a `Session` is and tracks.
 
-## 1. `Depends(...)` + `yield` — this part is FastAPI's, not Python's
+## 1. The chain: settings → engine → session factory → session
+
+`get_db()` isn't built from one thing — it's the last link in a chain of four, each one built from the one before it:
+
+| # | Function | Produces | What that thing *is* |
+|---|---|---|---|
+| 1 | `get_settings()` | a `Settings` object | just config — the database URL string, nothing more |
+| 2 | `get_engine()` | an `AsyncEngine` | the connection **pool** — a standing set of open connections to Postgres |
+| 3 | `get_session_factory()` | an `async_sessionmaker` | a **cookie-cutter** — configured to stamp out `Session` objects bound to that engine. Not a session itself. |
+| 4 | `get_session_factory()()` (calling the cutter) | an `AsyncSession` | one **actual session** — does the real work: runs queries, borrows a connection from the pool |
+
+The cookie-cutter framing is the part worth holding onto: making the cutter doesn't make any cookies. You make the cutter **once** and keep reusing it; you press it down **fresh, every time**, to get a new cookie.
+
+That's exactly why `get_engine()` and `get_session_factory()` in [`core/db.py`](../../app/core/db.py) are both wrapped in `@lru_cache` (build once, reuse forever) while *calling* the factory is never cached:
+
+```python
+@lru_cache
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_engine(), expire_on_commit=False)
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with get_session_factory()() as session:
+        #        ^^^^^^^^^^^^^^^^^^^^  ^^
+        #        get the (cached) cutter
+        #                             press it → one brand-new Session
+        yield session
+```
+
+If the *session* were cached instead of the *factory*, every request would share the same `Session` — the one thing this whole setup exists to avoid. Caching stops at the cutter; the cookie itself is always made fresh, per request.
+
+## 2. `Depends(...)` + `yield` — this part is FastAPI's, not Python's
 
 Plain Python's `yield` only knows how to pause and resume a generator — it has no concept of an HTTP request. The behavior that matters here — "run this up to `yield`, hand the yielded value to a route, wait for the *entire request* to finish, then resume the function" — is entirely **FastAPI's own dependency-injection system**, not something `yield` does on its own.
 
@@ -15,15 +46,15 @@ Concretely, FastAPI treats a `Depends(...)` target differently depending on whet
 
 FastAPI's own docs call this "dependencies with yield." It's built on top of Python's generator mechanics the same way `async with` is built on top of Python's generic context-manager protocol — Python supplies the pause/resume primitive; FastAPI is the layer that decided "a paused generator is the right shape for setup-then-cleanup-after-a-request."
 
-## 2. Why it's still called `get_db` when it yields a `Session`, not a connection
+## 3. Why it's still called `get_db` when it yields a `Session`, not a connection
 
 The name is convention, not a literal description of the return type. `get_db`, `get_session`, `get_async_session` are all names used interchangeably for this exact pattern across FastAPI+SQLAlchemy codebases. What actually comes out of `yield` is an `AsyncSession` — SQLAlchemy's object representing "everything one request needs to talk to the database" (see [`sqlalchemy-basics.md`](sqlalchemy-basics.md) for what a `Session` tracks). "Get the db [access this request needs]" is the intent behind the name; `Session` is the concrete type that fulfills it. Nothing in FastAPI or SQLAlchemy requires the name `get_db` specifically — `get_session` would be equally correct.
 
-## 3. Where the closing actually happens — and whether that's the same as closing a connection
+## 4. Where the closing actually happens — and whether that's the same as closing a connection
 
 ```python
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with _session_factory() as session:
+    async with get_session_factory()() as session:
         yield session
     # nothing written here — but this is where closing happens
 ```
@@ -42,7 +73,7 @@ Written out longhand without `async with`, it's equivalent to:
 
 ```python
 async def get_db():
-    session = _session_factory()
+    session = get_session_factory()()
     try:
         yield session
     finally:
@@ -67,6 +98,9 @@ So "closing the session" really means "I'm done borrowing a connection for this 
 
 | Term | One-line meaning |
 |---|---|
+| `AsyncEngine` (`get_engine()`) | The connection pool — built once, `@lru_cache`d, shared forever |
+| `async_sessionmaker` (`get_session_factory()`) | The "cookie-cutter" — a session *builder* bound to the engine, also built once and cached |
+| Calling the factory (`get_session_factory()()`) | Pressing the cutter — produces one brand-new `Session`, **never** cached, fresh every request |
 | `yield` (plain Python) | Pauses a function, hands back a value, keeps local state alive until resumed — has no idea what an HTTP request is |
 | "Dependencies with yield" (FastAPI) | FastAPI's own feature: run up to `yield`, inject the value, wait for the request to finish, then resume — not something `yield` does by itself |
 | `get_db()` naming | Convention, not a type description — it yields a `Session`, not a raw connection; `get_session` would be equally valid |

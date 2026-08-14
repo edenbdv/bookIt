@@ -12,36 +12,36 @@ That's not wrong, exactly, but it fuses two different concerns into one function
 
 ## 2. What a repository actually is
 
-One class per module, holding the query methods for that module's models — named for what's being asked, not how it's fetched:
+One class per module, holding the query methods for that module's models — named for what's being asked, not how it's fetched. The truly generic CRUD (`get_by_id`, `list`, `add`, `delete`) lives once in `BaseRepository` ([`core/repository.py`](../../app/core/repository.py) — see section 3); each module's repository inherits that and adds only what's actually specific to it:
 
 ```python
 # app/property/repository.py
-from uuid import UUID
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.repository import BaseRepository
 from app.property.models import Property
 
-class PropertyRepository:
-    def __init__(self, session: AsyncSession):
-        self.session = session
-
-    async def get_by_id(self, property_id: UUID) -> Property | None:
-        return await self.session.get(Property, property_id)
+class PropertyRepository(BaseRepository[Property]):
+    model = Property
 
     async def list_by_city(self, city: str, limit: int, offset: int) -> list[Property]:
-        stmt = select(Property).where(Property.city == city).limit(limit).offset(offset)
+        stmt = (
+            select(Property)
+            .where(Property.city == city)
+            .order_by(Property.price_per_night_cents.asc(), Property.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
         result = await self.session.scalars(stmt)
         return list(result)
-
-    def add(self, property: Property) -> None:
-        self.session.add(property)
 ```
 
-`service.py` calls `PropertyRepository(session).get_by_id(...)` and never imports `select` itself. Every SQLAlchemy-specific decision for that module's models — which columns to filter on, how pagination is expressed, which relationships get eager-loaded — lives in exactly one file.
+`get_by_id` and `add` aren't redefined here — they're inherited. `service.py` calls `PropertyRepository(session).get_by_id(...)` and never imports `select` itself. Every SQLAlchemy-specific decision for that module's models — which columns to filter on, how pagination is expressed, which relationships get eager-loaded — lives in exactly one file.
 
-## 3. Why per-module, not one shared repository
+## 3. Why per-module, not one shared repository — and where `BaseRepository` fits
 
 This is the same "package by feature, not by layer" reasoning [`app/README.md`](../../app/README.md) already makes for `models.py`/`schemas.py`/`service.py`/`router.py`: a `PropertyRepository` belongs in `app/property/`, a `ReservationRepository` in `app/reservation/`, and so on — not a single `app/repositories.py` holding every domain's queries mixed together. Same motivation both times: each domain's code stays in one place, and extracting a module later (Epic 11) doesn't mean untangling a shared file first.
+
+That's a different thing from `BaseRepository` (`app/core/repository.py`). It's not "one repository for every domain" — it's a shared *base class* holding only what's identical across all of them (`get_by_id`, `list`, `add`, `delete`), so `PropertyRepository`/`ReservationRepository`/etc. don't each retype the same four methods. It carries zero domain knowledge — only "the model has an `id`" — so it belongs in `core/` the same way `Base` (`core/models.py`) and `get_db()` (`core/db.py`) do: generic infrastructure every module already depends on, not a new kind of coupling *between* modules. `property/` still doesn't know `reservation/` exists.
 
 ## 4. Why bother — what this actually buys, concretely
 
@@ -51,23 +51,17 @@ This is the same "package by feature, not by layer" reasoning [`app/README.md`](
 
 ## 5. Where it does *not* help — not a database-swapping abstraction
 
-A repository is not an excuse to hide SQLAlchemy behind a generic `save()`/`find(**filters)` interface on the theory that Postgres might get swapped out later — it won't, and pretending otherwise just adds indirection nobody benefits from. Methods stay specific to what the module's service code actually needs (`list_by_city`, not a generic filter-kwargs dispatcher). If a query is only ever used once, it's fine for it to look exactly like that one call site — don't invent generality no caller asked for.
+This is about each module's *own* methods, not `BaseRepository`'s four generic ones (those are deliberately generic — see section 3). Beyond that floor, a repository is not an excuse to hide SQLAlchemy behind a generic `find(**filters)` dispatcher on the theory that Postgres might get swapped out later — it won't, and pretending otherwise just adds indirection nobody benefits from. Domain-specific methods stay specific to what the module's service code actually needs (`list_by_city`, not a generic filter-kwargs dispatcher). If a query is only ever used once, it's fine for it to look exactly like that one call site — don't invent generality no caller asked for.
 
 ## 6. The missing piece first: there's no session to inject yet
 
 Every repository method above takes `session: AsyncSession` — but nothing in this codebase currently constructs one. [`core/db.py`](../../app/core/db.py) only has `get_engine()`, an `lru_cache`d `AsyncEngine`; the one place a DB connection is used today ([`core/router.py`](../../app/core/router.py)'s `/health`) opens a raw `engine.connect()` directly, not a `Session`.
 
-FastAPI's usual answer is a `yield`-based dependency:
+FastAPI's usual answer is a `yield`-based dependency, now in [`core/db.py`](../../app/core/db.py):
 
 ```python
-# app/core/db.py, to be added
-from collections.abc import AsyncGenerator
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-_session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
-
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with _session_factory() as session:
+    async with get_session_factory()() as session:
         yield session
 ```
 
@@ -81,12 +75,13 @@ This is why BOOK-26 has to start here rather than at `PropertyRepository` itself
 
 A repository's job ends at "read/write this module's rows." It says nothing about *when a transaction commits*, or how to make writes to two different modules' repositories succeed-or-fail together (e.g., a reservation row and a payment row in Epic 8's saga). That's Unit of Work — BOOK-27, kept as a separate ticket on purpose, layered on top of repositories rather than folded into them.
 
-## 8. The actual plan for BOOK-26, once we start
+## 8. BOOK-26 status
 
-1. Add `get_db()` to `core/db.py` (section 6) — the session dependency every repository needs.
-2. `PropertyRepository` in `app/property/repository.py`, covering the queries `service.py`/`router.py` will need for BOOK-29 (CRUD + pagination + filtering by city).
-3. Repeat the same shape for `auth/`, `reservation/`, `payment/`, `review/` as their epics reach the point of needing queries — BOOK-26 doesn't need to pre-build all five before anything else can proceed; `property/` first is enough to prove the pattern.
-4. No behavior changes yet to verify against — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
+1. ✅ `get_db()` in `core/db.py` (section 6) — the session dependency every repository needs.
+2. ✅ `BaseRepository[ModelT]` in `core/repository.py` (section 3) — `get_by_id`, `list`, `add`, `delete`.
+3. ✅ `PropertyRepository` in `app/property/repository.py`, inheriting the base, adding `list_by_city` for BOOK-29.
+4. Remaining: repeat the same shape (`BaseRepository[Model]` + module-specific methods) for `auth/`, `reservation/`, `payment/`, `review/` as their epics reach the point of needing queries — not required to pre-build all five now.
+5. No behavior changes to verify yet — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
 
 ---
 
@@ -95,6 +90,7 @@ A repository's job ends at "read/write this module's rows." It says nothing abou
 | Term | One-line meaning |
 |---|---|
 | Repository | One class per module, wrapping that module's models' queries behind business-named methods |
+| `BaseRepository[ModelT]` | Shared base (`core/repository.py`) providing `get_by_id`/`list`/`add`/`delete` — generic, no domain knowledge, inherited by every module's repository |
 | `service.py` | Calls the repository; never imports `select` or touches `AsyncSession` query-building itself |
 | `get_db()` | The `yield`-based FastAPI dependency that hands each request a request-scoped `AsyncSession` — doesn't exist yet, first thing BOOK-26 needs. Mechanics: [`dependency-injection-basics.md`](../db/dependency-injection-basics.md) |
 | Unit of Work (BOOK-27) | The separate concern of transactional boundaries spanning one or more repositories — not part of the repository itself |

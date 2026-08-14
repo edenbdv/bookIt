@@ -35,3 +35,9 @@ Docker's `healthcheck:` (in `docker-compose.yml`) is a *separate*, generic mecha
 For `app`, the healthcheck command happens to call our own `/health` endpoint (via Python's `urllib`, since the slim base image has no `curl`/`wget`), because that's the most meaningful way to check *this* service — but that's a choice we made, not something Docker required or auto-discovered.
 
 **Why this matters beyond just having a status icon:** `depends_on: condition: service_healthy` is what actually reads these healthcheck results — it's why the `app` service in `docker-compose.yml` waits for `db`/`redis`/`rabbitmq` to report healthy before starting at all, rather than starting immediately and racing to connect to infra that isn't ready yet.
+
+## `repository.py` — `BaseRepository` is generic CRUD, not soft-delete-aware
+
+`BaseRepository.delete()` issues a real, unconditional `DELETE` — it has no idea a model might use a soft-delete column instead (`deleted_at`, currently only on `Property`). That's deliberate: knowing "this particular model prefers soft delete" is domain knowledge, and per the discipline above, `core/` — including this base class — carries none.
+
+Concretely: `Property.deleted_at` exists precisely so properties are never hard-deleted while they have reservation history (see `app/property/models.py`'s comment on that column). `BaseRepository.delete()` won't stop anyone from calling `property_repo.delete(some_property)` anyway — enforcing "use soft delete here, not `delete()`" is `service.py`'s job, the same "no business rules in a repository" rule that keeps any other domain check out of the repository layer.
