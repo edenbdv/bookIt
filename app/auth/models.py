@@ -29,7 +29,7 @@ class User(Base):
     hashed_password: Mapped[str]
     # values_callable: store the enum's string value ("user"), not its member
     # name ("USER") — SQLAlchemy defaults to the name, which would silently
-    # diverge from UserRole's own str values and from docs/er-diagram.md
+    # diverge from UserRole's own str values and from docs/db/er-diagram.md
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
         default=UserRole.USER,

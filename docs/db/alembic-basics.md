@@ -78,7 +78,7 @@ alembic downgrade base     # undo everything, back to an empty schema
 
 ## 6. Why this project needs the *async* template specifically
 
-[`app/core/config.py`](../app/core/config.py)'s `database_url` is `postgresql+asyncpg://...` — `asyncpg` is an **async-only** driver, it has no synchronous interface at all. Alembic's default project scaffold (`alembic init alembic`) assumes a normal synchronous SQLAlchemy engine and calls things like `connection.execute(...)` directly — that flatly doesn't work with an async-only driver.
+[`app/core/config.py`](../../app/core/config.py)'s `database_url` is `postgresql+asyncpg://...` — `asyncpg` is an **async-only** driver, it has no synchronous interface at all. Alembic's default project scaffold (`alembic init alembic`) assumes a normal synchronous SQLAlchemy engine and calls things like `connection.execute(...)` directly — that flatly doesn't work with an async-only driver.
 
 Alembic ships a separate scaffold for this (`alembic init -t async ...`) that wraps the whole migration run in `asyncio.run(...)` and uses `await connection.run_sync(do_run_migrations)` — meaning: open an async connection (using `asyncpg`), then hand control briefly to a synchronous function that does the actual migration logic Alembic already knows how to do, then hand control back. This is the same `run_sync` bridge already explained in `sqlalchemy-basics.md` for `Base.metadata.create_all` in every demo script this session — same underlying reason (a sync-style API being driven from inside an async context), just Alembic's version of it.
 

@@ -51,7 +51,7 @@ class Reservation(Base):
         # DB-level double-booking prevention, not app-level checking — an app-level
         # "is it free?" query can't stop two concurrent requests from both passing
         # the check before either writes; only a DB constraint can (see
-        # docs/exclude-constraint-basics.md and docs/concurrency-basics.md).
+        # docs/db/exclude-constraint-basics.md and docs/db/concurrency-basics.md).
         # '[)' half-open range: check_out day itself isn't occupied, so a same-day
         # turnover (one guest's checkout = another's check-in) is not an overlap.
         # Cancelled reservations are excluded entirely, freeing their dates.

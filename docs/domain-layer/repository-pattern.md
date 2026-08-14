@@ -1,0 +1,100 @@
+# Repository pattern basics (BOOK-26)
+
+Written as theory before touching anything, same approach as `alembic-basics.md` and `exclude-constraint-basics.md` — updated in place once the actual BOOK-26 work happens, so it stays a real reference afterward.
+
+**Prerequisite:** this assumes you've read [`sqlalchemy-basics.md`](../db/sqlalchemy-basics.md) — a repository is fundamentally "where the `Session`/`select()` calls live," so the vocabulary there (session, flush, identity map) is used freely below without re-explaining it.
+
+## 1. The problem: `service.py` has nowhere to put a query except inline
+
+Every module's `service.py` is currently an empty placeholder (see [`app/README.md`](../../app/README.md)). The moment real business logic gets written there, it needs data — and today the only tool available is talking to SQLAlchemy directly: build a `select(Property).where(...)`, hand it to an `AsyncSession`, unwrap the result.
+
+That's not wrong, exactly, but it fuses two different concerns into one function: *what the business rule needs* ("the property with this id, if it exists and isn't deleted") and *how SQLAlchemy expresses that* (`select`, `.where`, `.scalar_one_or_none()`). A repository is the seam that separates them.
+
+## 2. What a repository actually is
+
+One class per module, holding the query methods for that module's models — named for what's being asked, not how it's fetched:
+
+```python
+# app/property/repository.py
+from uuid import UUID
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.property.models import Property
+
+class PropertyRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_by_id(self, property_id: UUID) -> Property | None:
+        return await self.session.get(Property, property_id)
+
+    async def list_by_city(self, city: str, limit: int, offset: int) -> list[Property]:
+        stmt = select(Property).where(Property.city == city).limit(limit).offset(offset)
+        result = await self.session.scalars(stmt)
+        return list(result)
+
+    def add(self, property: Property) -> None:
+        self.session.add(property)
+```
+
+`service.py` calls `PropertyRepository(session).get_by_id(...)` and never imports `select` itself. Every SQLAlchemy-specific decision for that module's models — which columns to filter on, how pagination is expressed, which relationships get eager-loaded — lives in exactly one file.
+
+## 3. Why per-module, not one shared repository
+
+This is the same "package by feature, not by layer" reasoning [`app/README.md`](../../app/README.md) already makes for `models.py`/`schemas.py`/`service.py`/`router.py`: a `PropertyRepository` belongs in `app/property/`, a `ReservationRepository` in `app/reservation/`, and so on — not a single `app/repositories.py` holding every domain's queries mixed together. Same motivation both times: each domain's code stays in one place, and extracting a module later (Epic 11) doesn't mean untangling a shared file first.
+
+## 4. Why bother — what this actually buys, concretely
+
+**Testability.** Right now, testing anything in `service.py` means testing against a real Postgres, because the query logic is inline — there's nothing to substitute. With a repository, a unit test can construct the service with a fake in-memory repository (a plain Python object implementing the same methods over a dict/list) and check the business logic in isolation — no DB, no Docker, fast. This is what the roadmap's Epic 10 ("Testing strategy & CI/CD") leans on for "unit tests for business logic (mocked repos)."
+
+**One place for query-shape decisions that matter later.** [`concurrency-basics.md`](../db/concurrency-basics.md) and [`exclude-constraint-basics.md`](../db/exclude-constraint-basics.md) cover why the `EXCLUDE` constraint is the real defense against double-booking — but Epic 4's booking flow will still want a `SELECT ... FOR UPDATE` read as part of that flow (locking the row it's about to act on, belt-and-suspenders alongside the DB constraint). That's exactly the kind of decision that belongs in `ReservationRepository`, written once, instead of copy-pasted wherever `service.py` happens to need a reservation.
+
+## 5. Where it does *not* help — not a database-swapping abstraction
+
+A repository is not an excuse to hide SQLAlchemy behind a generic `save()`/`find(**filters)` interface on the theory that Postgres might get swapped out later — it won't, and pretending otherwise just adds indirection nobody benefits from. Methods stay specific to what the module's service code actually needs (`list_by_city`, not a generic filter-kwargs dispatcher). If a query is only ever used once, it's fine for it to look exactly like that one call site — don't invent generality no caller asked for.
+
+## 6. The missing piece first: there's no session to inject yet
+
+Every repository method above takes `session: AsyncSession` — but nothing in this codebase currently constructs one. [`core/db.py`](../../app/core/db.py) only has `get_engine()`, an `lru_cache`d `AsyncEngine`; the one place a DB connection is used today ([`core/router.py`](../../app/core/router.py)'s `/health`) opens a raw `engine.connect()` directly, not a `Session`.
+
+FastAPI's usual answer is a `yield`-based dependency:
+
+```python
+# app/core/db.py, to be added
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with _session_factory() as session:
+        yield session
+```
+
+FastAPI runs the code before `yield` when a request starts, hands the yielded `session` to whatever depends on it, then resumes after `yield` (closing the session) once the request finishes — the same request-scoped lifecycle [`core/README.md`](../../app/core/README.md) already describes generically for "checkout, use, return" against the shared pool. A router route gets it via `Depends(get_db)`, then builds `PropertyRepository(session)` (directly, or via `service.py`) from that.
+
+This is why BOOK-26 has to start here rather than at `PropertyRepository` itself — the repository's constructor is meaningless without something to hand it.
+
+**For how `Depends(...)` + `yield` actually work, why the function is named `get_db` despite yielding a `Session`, and what closing the session does (and doesn't) close — see [`dependency-injection-basics.md`](../db/dependency-injection-basics.md).** None of that is specific to repositories, so it's kept as its own reference rather than repeated here.
+
+## 7. Where this stops — Unit of Work is the next ticket, deliberately
+
+A repository's job ends at "read/write this module's rows." It says nothing about *when a transaction commits*, or how to make writes to two different modules' repositories succeed-or-fail together (e.g., a reservation row and a payment row in Epic 8's saga). That's Unit of Work — BOOK-27, kept as a separate ticket on purpose, layered on top of repositories rather than folded into them.
+
+## 8. The actual plan for BOOK-26, once we start
+
+1. Add `get_db()` to `core/db.py` (section 6) — the session dependency every repository needs.
+2. `PropertyRepository` in `app/property/repository.py`, covering the queries `service.py`/`router.py` will need for BOOK-29 (CRUD + pagination + filtering by city).
+3. Repeat the same shape for `auth/`, `reservation/`, `payment/`, `review/` as their epics reach the point of needing queries — BOOK-26 doesn't need to pre-build all five before anything else can proceed; `property/` first is enough to prove the pattern.
+4. No behavior changes yet to verify against — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
+
+---
+
+## Cheat sheet
+
+| Term | One-line meaning |
+|---|---|
+| Repository | One class per module, wrapping that module's models' queries behind business-named methods |
+| `service.py` | Calls the repository; never imports `select` or touches `AsyncSession` query-building itself |
+| `get_db()` | The `yield`-based FastAPI dependency that hands each request a request-scoped `AsyncSession` — doesn't exist yet, first thing BOOK-26 needs. Mechanics: [`dependency-injection-basics.md`](../db/dependency-injection-basics.md) |
+| Unit of Work (BOOK-27) | The separate concern of transactional boundaries spanning one or more repositories — not part of the repository itself |

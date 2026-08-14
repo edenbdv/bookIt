@@ -24,7 +24,7 @@ A natural question: does this "other connections can't see it yet" thing actuall
 
 It's already true on your own machine, right now. **DBeaver** holds a connection to Postgres. **The FastAPI app** holds a separate connection to the same Postgres. That's already two connections, from one person, at once — neither sees the other's uncommitted work. Open a `psql` terminal too and that's three.
 
-At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve (`docs/concurrency-basics.md`, `docs/exclude-constraint-basics.md`). It's also *why* connection pooling exists (see `app/core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time.
+At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve (`docs/db/concurrency-basics.md`, `docs/db/exclude-constraint-basics.md`). It's also *why* connection pooling exists (see `app/core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time.
 
 ## 4. `COMMIT`/`ROLLBACK` are universal SQL — `add()`/`flush()` are not
 
