@@ -75,7 +75,7 @@ This is why BOOK-26 has to start here rather than at `PropertyRepository` itself
 
 ## 7. Where this stops — Unit of Work is the next ticket, deliberately
 
-A repository's job ends at "read/write this module's rows." It says nothing about *when a transaction commits*, or how to make writes to two different modules' repositories succeed-or-fail together (e.g., a reservation row and a payment row in Epic 8's saga). That's Unit of Work — BOOK-27, kept as a separate ticket on purpose, layered on top of repositories rather than folded into them.
+A repository's job ends at "read/write this module's rows." It says nothing about *when a transaction commits*, or how to make writes to two different modules' repositories succeed-or-fail together (e.g., a reservation row and a payment row in Epic 8's saga). That's Unit of Work — [`unit-of-work-basics.md`](unit-of-work-basics.md), BOOK-27, kept as a separate ticket on purpose, layered on top of repositories rather than folded into them.
 
 ## 8. BOOK-26 status
 
