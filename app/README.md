@@ -4,7 +4,7 @@ Modular monolith: each domain module is a self-contained package with the same i
 
 ## Modules
 
-BookIt is a short-term rental platform — see [docs/er-diagram.md](../docs/er-diagram.md) for the domain model. One module per entity:
+BookIt is a short-term rental platform — see [docs/db/er-diagram.md](../docs/db/er-diagram.md) for the domain model. One module per entity:
 
 - **auth/** — `User`. Signup/login, password hashing, JWT issuing, `get_current_user` dependency, role-based access control
 - **property/** — `Property`. A place a host rents out; CRUD, search, filtering
@@ -21,7 +21,7 @@ BookIt is a short-term rental platform — see [docs/er-diagram.md](../docs/er-d
 - **service.py** — business logic, calls repositories, independent of HTTP
 - **router.py** — FastAPI `APIRouter`, thin — parses requests, calls `service.py`, returns responses
 
-**Exception: `notification/` has no `models.py`.** Every other module owns a table in [docs/er-diagram.md](../docs/er-diagram.md); `notification/` doesn't — it reacts to events from other modules (a reservation confirmed, a payment failed) rather than storing anything of its own, so there's no model to define. If it ever needs its own persisted state (e.g. tracking which notifications were already sent, for idempotency), add `models.py` back then — don't keep an empty file around just for shape consistency.
+**Exception: `notification/` has no `models.py`.** Every other module owns a table in [docs/db/er-diagram.md](../docs/db/er-diagram.md); `notification/` doesn't — it reacts to events from other modules (a reservation confirmed, a payment failed) rather than storing anything of its own, so there's no model to define. If it ever needs its own persisted state (e.g. tracking which notifications were already sent, for idempotency), add `models.py` back then — don't keep an empty file around just for shape consistency.
 
 The remaining `schemas.py`/`service.py`/`router.py` files are currently empty placeholders; they get filled in as their corresponding Jira epics are implemented.
 

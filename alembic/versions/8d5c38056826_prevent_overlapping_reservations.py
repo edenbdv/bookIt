@@ -27,7 +27,7 @@ def upgrade() -> None:
     # property free?" query can't stop two concurrent requests from both
     # passing the check before either writes -- only a database constraint
     # can make the invalid state impossible to create in the first place
-    # (see docs/exclude-constraint-basics.md and docs/concurrency-basics.md).
+    # (see docs/db/exclude-constraint-basics.md and docs/db/concurrency-basics.md).
     op.execute("""
         ALTER TABLE reservations ADD CONSTRAINT no_overlapping_reservations
         EXCLUDE USING gist (

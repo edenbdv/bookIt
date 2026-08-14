@@ -29,7 +29,8 @@ class Property(Base):
     max_guests: Mapped[int]
     price_per_night_cents: Mapped[int]
     # soft delete: null while listed, set on delist. Never hard-delete a
-    # property with reservation history (see core/README's Property note).
+    # property with reservation history — see core/README.md's
+    # "repository.py" section for why BaseRepository.delete() won't stop you.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

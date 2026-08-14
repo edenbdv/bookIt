@@ -24,7 +24,7 @@ A natural question: does this "other connections can't see it yet" thing actuall
 
 It's already true on your own machine, right now. **DBeaver** holds a connection to Postgres. **The FastAPI app** holds a separate connection to the same Postgres. That's already two connections, from one person, at once — neither sees the other's uncommitted work. Open a `psql` terminal too and that's three.
 
-At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve (`docs/concurrency-basics.md`, `docs/exclude-constraint-basics.md`). It's also *why* connection pooling exists (see `app/core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time.
+At real scale this is constant: a live app serving many users means many requests hitting the same database at the same moment — which is exactly the double-booking race condition this whole project exists to solve (`docs/db/concurrency-basics.md`, `docs/db/exclude-constraint-basics.md`). It's also *why* connection pooling exists (see `app/core/README.md`) — a pool holds several connections specifically because several things need to talk to Postgres simultaneously, not one at a time.
 
 ## 4. `COMMIT`/`ROLLBACK` are universal SQL — `add()`/`flush()` are not
 
@@ -35,6 +35,26 @@ Worth being precise about which parts of "how ORMs write data" are actually univ
 **Staging changes before writing them — `add()` then `flush()` — is not universal.** Raw SQL has no such concept at all: you write `INSERT INTO ...` and it happens, no separate staging step. This "stage first, write later" shape is a specific architectural pattern called **Unit of Work**. SQLAlchemy's `Session` explicitly modeled this on **Hibernate** (Java's dominant ORM), which has the identical shape — even the same method name, `session.flush()`. But it isn't universal across ORMs: Django's default ORM writes immediately on `.save()` (no separate staging step), and Active Record-style ORMs (Rails, Laravel's Eloquent) work the same way.
 
 So: `COMMIT`/`ROLLBACK` would exist no matter what tool touched the database. `add()`/`flush()` reflect a specific design choice SQLAlchemy shares with some ORMs (notably Hibernate) but not all of them. See `sqlalchemy-basics.md` for how SQLAlchemy's `Session`, `add()`, and `flush()` actually work.
+
+## 5. `LIMIT`/`OFFSET` — pagination, and why a query needs it at all
+
+```sql
+SELECT * FROM properties WHERE city = 'Tel Aviv' LIMIT 10 OFFSET 20
+```
+
+**`LIMIT`** caps how many rows Postgres returns — at most this many, even if far more matched. **`OFFSET`** skips that many matching rows before it starts collecting. Both are real SQL, universal across databases — nothing ORM-specific about the concept, same as `COMMIT`/`ROLLBACK` above.
+
+**Why bother — what breaks without it:** `SELECT * FROM properties WHERE city = 'Tel Aviv'` with no `LIMIT` returns *every* matching row, all at once — could be 5, could be 50,000. That's three separate problems stacked together:
+
+- **The database does more work than needed.** Postgres reads and prepares every matching row, not just the handful actually going to be shown.
+- **The network transfers more than needed.** Every row crosses the wire to the app, even though a UI showing "20 properties per page" only needs 20 of them right now.
+- **It's a resource-exhaustion risk on a public endpoint.** `list_by_city` backs a public search (BOOK-29). With no `LIMIT`, one request for a popular city becomes an unbounded query — cheap for an attacker to trigger, expensive for the database to answer, repeatedly, on demand.
+
+`LIMIT`+`OFFSET` is how "page 2 of 20 results per page" gets expressed: `LIMIT 20 OFFSET 20` (skip the first page, take the next 20). In general: `OFFSET = (page_number - 1) * page_size`.
+
+**A real gotcha, not just theory:** `LIMIT`/`OFFSET` only produce a *stable* page-by-page result if the query has a deterministic `ORDER BY`. Without one, Postgres is free to return matching rows in whatever order is internally convenient — which can change between two calls (e.g., after a concurrent write), so "page 2" might reshuffle rows already seen on "page 1," or skip/duplicate one across pages. `list_by_city` orders by `price_per_night_cents, id` — price as the meaningful sort, `id` as a tiebreaker, since price alone isn't unique (two properties can share a price, and an untiebroken sort is exactly as unstable as no `ORDER BY` at all for those tied rows). Exposing other sort choices to callers is BOOK-29's concern, not this repository method's.
+
+**One more limitation worth knowing, not fixing now:** `OFFSET` doesn't skip for free — Postgres still has to walk past every skipped row internally before it can start collecting. `OFFSET 20` is cheap; `OFFSET 50000` genuinely costs more, growing with the offset itself. There's a different technique (keyset/cursor pagination — "give me rows after this specific id/timestamp") that avoids this, but it's more complex and not needed at this project's scale; `LIMIT`/`OFFSET` is the right choice for now.
 
 ---
 
@@ -48,3 +68,7 @@ So: `COMMIT`/`ROLLBACK` would exist no matter what tool touched the database. `a
 | Autocommit mode | Every statement commits itself immediately — no transaction is ever left open to notice |
 | `COMMIT`/`ROLLBACK` | Real SQL statements, part of the SQL standard — not ORM-specific |
 | Unit of Work | The stage-then-flush pattern (`add()`/`flush()`) — SQLAlchemy and Hibernate use it; Django/Active Record-style ORMs don't |
+| `LIMIT` | Caps how many rows a query returns |
+| `OFFSET` | Skips this many matching rows before collecting — together, "page N" |
+| Why paginate | Without it: DB does needless work, more data crosses the network than needed, and a public endpoint becomes an unbounded-query risk |
+| `LIMIT`/`OFFSET` without `ORDER BY` | Not actually stable — row order can shift between calls, breaking "page 2 follows page 1" |
