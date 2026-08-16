@@ -1,0 +1,109 @@
+# Router & service basics (BOOK-29)
+
+Written alongside the actual BOOK-29 work — `app/property/router.py` and `app/property/service.py` already have one real endpoint (`POST /properties`) by the time this doc exists, so the examples below are the real code, not a sketch.
+
+**Prerequisite:** this assumes [`repository-pattern.md`](repository-pattern.md), [`unit-of-work-basics.md`](unit-of-work-basics.md), and [`pydantic-schemas-basics.md`](pydantic-schemas-basics.md) — this is the layer that finally *uses* all three together.
+
+## 1. The four layers, now all in place
+
+| Layer | File | Job | Speaks in terms of |
+|---|---|---|---|
+| HTTP | `router.py` | Parse the request, call `service.py`, shape the response | Pydantic schemas (`PropertyCreate`, `PropertyRead`) |
+| Business logic | `service.py` | Orchestrate repositories via a `UnitOfWork`, apply business rules | ORM model instances (`Property`) |
+| Data access | `repository.py` | Read/write rows for one module's models | `Session`, `select()` |
+| Persistence | `models.py` | Table/column definitions | SQLAlchemy `Mapped[...]` |
+
+Every ticket since `BOOK-26` built one row of this table. `BOOK-29` is the first time all four are wired together end to end for a real request.
+
+## 2. `router.py`'s job — and what it deliberately doesn't do
+
+```python
+@router.post("", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
+async def create_property(
+    data: PropertyCreate,
+    host_id: uuid.UUID,
+    uow: UnitOfWork = Depends(get_uow),
+) -> Property:
+    return await service.create_property(uow, data, host_id)
+```
+
+This function's entire job is HTTP-shaped concerns: which schema parses the body (`PropertyCreate`), where `host_id` comes from (query string), what status code a successful create returns (`201`), which schema shapes the response (`PropertyRead`, via `response_model`). It has exactly one line of actual work — call `service.create_property(...)` — and returns whatever that gives back.
+
+**Why `status_code=status.HTTP_201_CREATED` is explicit here, but `GET /{property_id}` (below) doesn't set one at all:** FastAPI's default `status_code` for *every* route, regardless of HTTP method, is `200`. For `GET`, `200` already happens to be the RESTfully-correct answer — so there's nothing to override, and the route just omits the argument. For `POST`, the correct answer for "a resource was successfully created" is `201`, not `200` — so it has to be stated explicitly, or a successful create would silently report back the wrong code. It's not that `GET` is missing something `POST` has; it's the reverse — `POST` needs an override because its correct code differs from the library default, while `GET`'s correct code happens to *be* the default. The same reasoning will apply to `DELETE` once it exists: the correct code there is usually `204 No Content`, which also isn't the default and will need its own explicit `status_code=status.HTTP_204_NO_CONTENT`.
+
+**What it doesn't do:** decide *what a property is allowed to look like*, compute anything, or touch a repository directly. If `create_property` the route function started building `Property(...)` itself or calling `uow.properties.add(...)` directly, business logic would leak into the HTTP layer — the same "wrong layer" problem `repository-pattern.md` describes for `service.py` talking to `select()` directly instead of a repository.
+
+## 3. `service.py`'s job — this is where business logic actually lives
+
+```python
+async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
+    property_ = Property(host_id=host_id, **data.model_dump())
+    uow.properties.add(property_)
+    await uow.session.flush()
+    return property_
+```
+
+This is deliberately the *one* layer allowed to contain business rules — contrast with `repository.py`, which `core/repository.py`'s own docstring says explicitly must not ("Data access only, no business rules"). `create_property` doesn't have an interesting rule to enforce yet (it's close to a pure passthrough), but this is where one would go — the AC's own example from `BOOK-28`, `guest_count <= property.max_guests`, will live in `reservation/service.py`'s eventual create-reservation function, not in `ReservationRepository`.
+
+**Why the `flush()` matters here, concretely:** `Property.created_at` is a server-side default — it doesn't exist in Python until the `INSERT` actually runs. `commit()` doesn't happen until the whole request finishes (`get_uow()`'s `__aexit__`, after this function has already returned). Without the `flush()`, `PropertyRead`'s response would have to build with an empty `created_at`, which isn't allowed by the schema. `flush()` runs the `INSERT` now, populates `property_.created_at` in Python, without ending the transaction.
+
+## 4. Why split them into two files at all
+
+**Different concerns.** `router.py` deals with "how does this arrive over HTTP and how does it leave over HTTP" — query strings, status codes, response shaping. `service.py` deals with "what is actually allowed to happen" — the same "what the business rule needs" vs. "how it's expressed" split `repository-pattern.md` section 1 makes for repositories, one layer further out.
+
+**Testability, again.** A test can call `service.create_property(fake_uow, data, host_id)` directly — no HTTP, no FastAPI `TestClient`, no running server — and check the business logic in isolation, the same testability argument `repository-pattern.md` section 4 makes for repositories vs. inline queries.
+
+## 5. Where `schemas.py` fits — the translation happens at the router boundary
+
+`service.py` never imports `PropertyRead`. It takes `PropertyCreate` in (already-validated input) and returns a real `Property` ORM instance out — the same object shape `repository.py` already works with. The *router* is what converts between the API's contract and the domain's objects in both directions:
+
+* incoming: FastAPI parses JSON into `PropertyCreate` before `create_property` (the route) even runs
+* outgoing: FastAPI takes the `Property` instance the route returns and builds `PropertyRead` from it via `response_model` + `ConfigDict(from_attributes=True)` ([`pydantic-schemas-basics.md`](pydantic-schemas-basics.md))
+
+`service.py` sits entirely on the "domain object" side of that boundary — it never sees a schema class, only ever `Property`.
+
+## 6. Full request trace, end to end, for `POST /properties`
+
+1. Client sends `POST /properties?host_id=<uuid>` with a JSON body.
+2. FastAPI parses the body against `PropertyCreate` — a bad field fails here with `422`, before any of our code runs.
+3. `Depends(get_uow)` runs: opens a `UnitOfWork`, which opens a session and builds every module's repository on it.
+4. The route calls `service.create_property(uow, data, host_id)`.
+5. `service.py` constructs a `Property`, calls `uow.properties.add(...)` (inherited from `BaseRepository`), then `flush()`s to populate `created_at`.
+6. The route returns the `Property` instance; FastAPI builds `PropertyRead` from it via `response_model`.
+7. The response is sent to the client — **then** `get_uow()`'s `__aexit__` runs, committing the transaction.
+
+Note the order in step 7: the client already has the response before the commit finishes. This is normal — it's the same "response first, cleanup after" shape `get_db()` already has, just now with a commit attached to the cleanup instead of only a session close.
+
+## 7. `Query(...)` — `Field`'s counterpart for query-string parameters
+
+`GET /properties` takes several filters as query-string parameters (`?limit=5&city=Tel+Aviv&max_guests=2`), not as a JSON body:
+
+```python
+@router.get("", response_model=list[PropertyRead])
+async def list_properties(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    city: str | None = None,
+    max_guests: int | None = Query(default=None, gt=0),
+    min_price_cents: int | None = Query(default=None, ge=0),
+    max_price_cents: int | None = Query(default=None, ge=0),
+    uow: UnitOfWork = Depends(get_uow),
+) -> list[Property]:
+```
+
+`Query(...)` is `Field(...)`'s counterpart for this case — same job (attach constraints: a default, `ge`/`le`/`gt`), same underlying Pydantic validation machinery, just declared on a bare function parameter instead of an attribute inside a `BaseModel`. `city: str | None = None` doesn't need `Query(...)` at all — it's still read from the query string (same inference rule that already applies to `host_id` in `create_property`: a plain scalar, not part of the URL path, is read from the query string by default) — `Query(...)` is only needed when there's an actual constraint to declare beyond a bare default, which `city` doesn't have here.
+
+**Why these aren't bundled into a schema class the way `PropertyCreate` bundles the request body:** the real difference is what's actually arriving on the wire. A request body is genuinely *one JSON object* — the client sends one cohesive blob, so one Pydantic class naturally represents it. Query parameters are *independent `key=value` pairs* in the URL — not one object, just several loosely-related knobs. Wrapping six independent, optional filters in their own class would be extra structure that doesn't reflect how they actually arrive, for no benefit at this scale. (FastAPI does support grouping query params into a class too, worth reaching for if the same filter-shape were reused across several endpoints — not the case here.)
+
+---
+
+## Cheat sheet
+
+| Term | One-line meaning |
+|---|---|
+| `router.py` | HTTP-shaped concerns only — parses via schemas, calls `service.py`, shapes the response. No business logic, no direct repository calls. |
+| `service.py` | The one layer allowed to hold business rules. Takes validated schema input in, returns ORM instances out — never imports a `*Read`/`*Create` schema itself. |
+| `response_model` | Tells FastAPI which schema to build from whatever the route returns, via `ConfigDict(from_attributes=True)` |
+| Translation boundary | The router, not `service.py`, is where schema ↔ ORM-object conversion happens, in both directions |
+| Request order | Route returns → response sent to client → `get_uow()`'s `__aexit__` commits, after the fact |
+| `Query(...)` | `Field`'s counterpart for a bare function parameter read from the URL's query string, not the body |
