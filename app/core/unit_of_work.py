@@ -1,3 +1,4 @@
+from collections.abc import AsyncGenerator
 from types import TracebackType
 from typing import Self
 
@@ -35,3 +36,12 @@ class UnitOfWork:
         else:
             await self.session.rollback()
         await self.session.close()
+
+
+# FastAPI dependency: one UnitOfWork per request -- commits when the route
+# returns normally, rolls back if the route raised. Same "one request, one
+# session" shape as get_db(), just handing routes a UnitOfWork instead of a
+# bare AsyncSession.
+async def get_uow() -> AsyncGenerator[UnitOfWork, None]:
+    async with UnitOfWork() as uow:
+        yield uow

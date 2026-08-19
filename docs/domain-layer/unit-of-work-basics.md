@@ -212,7 +212,7 @@ async def main() -> None:
 
 ## 9. Where this stops — `service.py` still isn't real yet
 
-The AC's last line — "`service.py` functions receive a `UnitOfWork` ... instead of importing `get_engine()`/`AsyncSession` directly" — isn't demonstrated by real business logic yet, because every module's `service.py` is still an empty placeholder (same situation `repository-pattern.md` section 1 describes). The pattern to follow once one gets written: a service function takes a `UnitOfWork` (or a factory that produces one) as a parameter, never reaches for `get_engine()` or constructs a session itself.
+The AC's last line — "`service.py` functions receive a `UnitOfWork` ... instead of importing `get_engine()`/`AsyncSession` directly" — wasn't demonstrated by real business logic at the time this was written, because every module's `service.py` was still an empty placeholder (same situation `repository-pattern.md` section 1 describes). It is now, for `property/service.py` — see [`router-service-basics.md`](router-service-basics.md) for the full request-scoped `get_uow()` dependency this section originally only sketched.
 
 ## 10. BOOK-27 status
 

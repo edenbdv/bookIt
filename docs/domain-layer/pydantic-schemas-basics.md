@@ -180,9 +180,23 @@ Every DB `CheckConstraint`/`UniqueConstraint`/`ExcludeConstraint` in this codeba
 
 **Why keep the DB constraint even where the schema already checks the same thing (tiers 1–2)?** Defense in depth, not redundancy: the schema check only runs for requests that go through this particular FastAPI route. The DB constraint is the backstop that holds regardless of how a row gets written — `scripts/verify_no_overlapping_reservations.py`, `core/seed.py`, a future admin script, or a bug in `service.py` that bypasses the schema entirely. The schema check exists purely for a *better error, earlier* (section 2) — it's never the only thing standing between bad data and the table.
 
-## 4. Where this stops
+## 3.6 The reverse direction: `model_dump()` builds an ORM instance from a schema
 
-This ticket defines the schemas themselves — nothing about wiring them into actual routes. `BOOK-29` is what builds real endpoints that use `PropertyCreate`/`PropertyRead` as request/response types.
+Section 3 covered `model_validate()`: ORM instance → schema, needed when a route *returns* data. `service.py` needs the opposite direction too — turning a validated `*Create` schema into the actual SQLAlchemy row to insert. From [app/property/service.py](../../app/property/service.py):
+
+```python
+async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
+    property_ = Property(host_id=host_id, **data.model_dump())
+    ...
+```
+
+`data.model_dump()` converts the `PropertyCreate` instance into a plain dict — `{"title": ..., "description": ..., "city": ..., ...}` — with real Python values, not JSON strings. `**` unpacks that dict as keyword arguments into `Property(...)`, SQLAlchemy's own constructor. This only works cleanly because `PropertyCreate`'s field names match `Property`'s column names one-for-one; `host_id` is passed separately, alongside the unpacked dict, since it isn't a `PropertyCreate` field at all — section 3.2 covers where it actually comes from (auth, not the client).
+
+`model_dump()` and `model_validate()` are mirror images: `model_validate(orm_instance)` builds a *schema* from something else; `model_dump()` breaks a *schema* back down into a dict something else (here, an ORM constructor) can consume. Neither one touches JSON directly — that's `model_dump_json()`'s job (section 1), which additionally converts values like `UUID`/`datetime` into JSON-safe strings. `model_dump()` keeps them as real Python objects, which is exactly what a Python constructor call needs.
+
+## 4. Where this stands
+
+This ticket defined the schemas themselves. Wiring them into actual routes/services (originally scoped as `BOOK-29`) has since started for `property/` — `router.py` and `service.py` are real, working code using `PropertyCreate`/`PropertyRead` as request/response types, `get_uow`/`UnitOfWork` for the DB transaction, and `model_dump()`/`model_validate()` as described above. The other four modules' `router.py`/`service.py` are still empty placeholders, same schema-only state as when this ticket started.
 
 ---
 

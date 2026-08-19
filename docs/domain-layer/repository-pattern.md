@@ -6,7 +6,7 @@ Written as theory before touching anything, same approach as `alembic-basics.md`
 
 ## 1. The problem: `service.py` has nowhere to put a query except inline
 
-Every module's `service.py` is currently an empty placeholder (see [`app/README.md`](../../app/README.md)). The moment real business logic gets written there, it needs data — and today the only tool available is talking to SQLAlchemy directly: build a `select(Property).where(...)`, hand it to an `AsyncSession`, unwrap the result.
+Every module's `service.py` was, at the time this was written, an empty placeholder (see [`app/README.md`](../../app/README.md); `app/property/service.py` has real logic now — see [`router-service-basics.md`](router-service-basics.md)). The moment real business logic gets written there, it needs data — and without a repository, the only tool available is talking to SQLAlchemy directly: build a `select(Property).where(...)`, hand it to an `AsyncSession`, unwrap the result.
 
 That's not wrong, exactly, but it fuses two different concerns into one function: *what the business rule needs* ("the property with this id, if it exists and isn't deleted") and *how SQLAlchemy expresses that* (`select`, `.where`, `.scalar_one_or_none()`). A repository is the seam that separates them.
 
@@ -23,17 +23,17 @@ from app.property.models import Property
 class PropertyRepository(BaseRepository[Property]):
     model = Property
 
-    async def list_by_city(self, city: str, limit: int, offset: int) -> list[Property]:
-        stmt = (
-            select(Property)
-            .where(Property.city == city)
-            .order_by(Property.price_per_night_cents.asc(), Property.id.asc())
-            .limit(limit)
-            .offset(offset)
-        )
+    async def list_filtered(self, limit: int, offset: int, city: str | None = None) -> list[Property]:
+        stmt = select(Property).where(Property.deleted_at.is_(None))
+        if city is not None:
+            stmt = stmt.where(Property.city == city)
+        stmt = stmt.order_by(Property.price_per_night_cents.asc(), Property.id.asc())
+        stmt = stmt.limit(limit).offset(offset)
         result = await self.session.scalars(stmt)
         return list(result)
 ```
+
+(Simplified for illustration — the real `list_filtered` in `app/property/repository.py` also filters by `max_guests`/price range, added in `BOOK-29`; see [`router-service-basics.md`](router-service-basics.md).)
 
 `get_by_id` and `add` aren't redefined here — they're inherited. `service.py` calls `PropertyRepository(session).get_by_id(...)` and never imports `select` itself. Every SQLAlchemy-specific decision for that module's models — which columns to filter on, how pagination is expressed, which relationships get eager-loaded — lives in exactly one file.
 
@@ -81,7 +81,7 @@ A repository's job ends at "read/write this module's rows." It says nothing abou
 
 1. ✅ `get_db()` in `core/db.py` (section 6) — the session dependency every repository needs.
 2. ✅ `BaseRepository[ModelT]` in `core/repository.py` (section 3) — `get_by_id`, `list`, `add`, `delete`.
-3. ✅ `PropertyRepository` in `app/property/repository.py`, inheriting the base, adding `list_by_city` for BOOK-29.
+3. ✅ `PropertyRepository` in `app/property/repository.py`, inheriting the base, adding `get_active_by_id` and `list_filtered` for `BOOK-29`.
 4. ✅ `UserRepository`, `ReservationRepository`, `PaymentRepository`, `ReviewRepository` — bare `BaseRepository[Model]` shells (`app/auth/repository.py`, `app/reservation/repository.py`, `app/payment/repository.py`, `app/review/repository.py`), matching the AC's "one repository class per module that owns a model." Module-specific methods (beyond the inherited four) still only get added once that module's epic actually needs a query — the epics aren't organized per-module (checked: none of the 13 epics is "the Review epic"), so waiting for one to "naturally" prompt each repository isn't reliable.
 5. No behavior changes to verify yet — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
 
