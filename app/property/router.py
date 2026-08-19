@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.property import service
 from app.property.models import Property
-from app.property.schemas import PropertyCreate, PropertyRead
+from app.property.schemas import PropertyCreate, PropertyRead, PropertyUpdate
 
 router = APIRouter(prefix="/properties", tags=["properties"])
 
@@ -52,3 +52,19 @@ async def list_properties(
     return await service.list_properties(
         uow, limit, offset, city, guests, min_price_cents, max_price_cents
     )
+
+
+@router.patch("/{property_id}", response_model=PropertyRead)
+async def update_property(
+    property_id: uuid.UUID,
+    data: PropertyUpdate,
+    # same SECURITY GAP as create_property: nothing verifies the caller is
+    # this property's host, or is authenticated at all -- anyone can PATCH
+    # any property. Acceptable for local dev only; BOOK-5 needs to add a
+    # host_id == current_user.id check here before this build goes public.
+    uow: UnitOfWork = Depends(get_uow),
+) -> Property:
+    property_ = await service.update_property(uow, property_id, data)
+    if property_ is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+    return property_

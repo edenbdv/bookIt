@@ -47,6 +47,29 @@ This is deliberately the *one* layer allowed to contain business rules — contr
 
 **Why the `flush()` matters here, concretely:** `Property.created_at` is a server-side default — it doesn't exist in Python until the `INSERT` actually runs. `commit()` doesn't happen until the whole request finishes (`get_uow()`'s `__aexit__`, after this function has already returned). Without the `flush()`, `PropertyRead`'s response would have to build with an empty `created_at`, which isn't allowed by the schema. `flush()` runs the `INSERT` now, populates `property_.created_at` in Python, without ending the transaction.
 
+## 3.1 `update_property` — mutating an already-tracked object instead of building a new one
+
+```python
+async def update_property(uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate) -> Property | None:
+    property_ = await uow.properties.get_active_by_id(id)
+    if property_ is None:
+        return None
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(property_, field, value)
+    return property_
+```
+
+This is a different shape from `create_property` in two ways worth being precise about.
+
+**`setattr` doesn't touch the database — it changes Python memory now, and SQL follows later, separately.** `setattr(property_, "title", "New Title")` is plain Python (equivalent to `property_.title = "New Title"`, just with the attribute name as a variable) — nothing to do with SQL by itself. But `title` here isn't a plain attribute: it's a SQLAlchemy-instrumented one (from `Mapped[str]` in `models.py`), which intercepts the assignment via Python's descriptor protocol and marks the object "dirty" in the session's bookkeeping. That's still just in-memory tracking — **no `UPDATE` is sent to Postgres at the moment `setattr` runs.** The route returns `property_` with the new value already visible in Python; the router builds `PropertyRead` straight from that in-memory object, and the response goes out to the client. Only *after* that, in `get_uow()`'s `__aexit__`, does `session.commit()` actually run and send `UPDATE properties SET title = ... WHERE id = ...` — meaning the database is genuinely updated *after* the client already has the response, same ordering `create_property`'s `flush()` note above works around, just without needing to work around it here (nothing in the response depends on data only the database can produce).
+
+**No `uow.properties.add(property_)` here, unlike `create_property` — and that's correct, not an omission.** `add()` exists for exactly one situation: a brand-new object the session has never seen (`Property(...)`, just constructed, no row in the database yet) — the session doesn't know it exists until you hand it over explicitly. `update_property` never constructs a new object; `get_active_by_id` *loads* one via `select(...)`, and loading an object through a session automatically registers it in that session's **identity map** ([`sqlalchemy-basics.md`](../db/sqlalchemy-basics.md)) — being loaded already *is* being tracked. `setattr`-ing an attribute on an already-tracked object is enough on its own; there's no separate "start watching this" step to opt into.
+
+| Situation | Session already tracking it? | Needs `add()`? |
+|---|---|---|
+| `Property(...)` — just constructed (`create_property`) | No | Yes |
+| Loaded via `get_active_by_id`/`select(...)` (`update_property`) | Yes, automatically | No |
+
 ## 4. Why split them into two files at all
 
 **Different concerns.** `router.py` deals with "how does this arrive over HTTP and how does it leave over HTTP" — query strings, status codes, response shaping. `service.py` deals with "what is actually allowed to happen" — the same "what the business rule needs" vs. "how it's expressed" split `repository-pattern.md` section 1 makes for repositories, one layer further out.
@@ -125,3 +148,5 @@ Mechanically, FastAPI decides query-vs-body per *parameter*, based on its type, 
 | Translation boundary | The router, not `service.py`, is where schema ↔ ORM-object conversion happens, in both directions |
 | Request order | Route returns → response sent to client → `get_uow()`'s `__aexit__` commits, after the fact |
 | `Query(...)` | `Field`'s counterpart for a bare function parameter read from the URL's query string, not the body |
+| `setattr(obj, field, value)` | Plain Python, not SQL — changes an in-memory attribute now; the `UPDATE` it eventually causes only fires at flush/commit, later |
+| `add()` vs. loaded-via-`select()` | `add()` is only for objects the session has never seen; anything loaded through the session (`get_active_by_id`, etc.) is already tracked automatically via the identity map |
