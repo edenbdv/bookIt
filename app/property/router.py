@@ -44,11 +44,11 @@ async def list_properties(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     city: str | None = None,
-    max_guests: int | None = Query(default=None, gt=0),
+    guests: int | None = Query(default=None, gt=0),
     min_price_cents: int | None = Query(default=None, ge=0),
     max_price_cents: int | None = Query(default=None, ge=0),
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[Property]:
     return await service.list_properties(
-        uow, limit, offset, city, max_guests, min_price_cents, max_price_cents
+        uow, limit, offset, city, guests, min_price_cents, max_price_cents
     )

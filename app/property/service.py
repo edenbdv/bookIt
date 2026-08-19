@@ -24,7 +24,7 @@ async def list_properties(
     limit: int,
     offset: int,
     city: str | None = None,
-    max_guests: int | None = None,
+    guests: int | None = None,
     min_price_cents: int | None = None,
     max_price_cents: int | None = None,
 ) -> list[Property]:
@@ -32,7 +32,7 @@ async def list_properties(
         limit=limit,
         offset=offset,
         city=city,
-        max_guests=max_guests,
+        guests=guests,
         min_price_cents=min_price_cents,
         max_price_cents=max_price_cents,
     )

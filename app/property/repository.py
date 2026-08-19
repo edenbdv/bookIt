@@ -20,7 +20,7 @@ class PropertyRepository(BaseRepository[Property]):
         limit: int,
         offset: int,
         city: str | None = None,
-        max_guests: int | None = None,
+        guests: int | None = None,
         min_price_cents: int | None = None,
         max_price_cents: int | None = None,
     ) -> list[Property]:
@@ -32,8 +32,12 @@ class PropertyRepository(BaseRepository[Property]):
         if city is not None:
             # uses the existing ix_properties_city index (docs/db/indexes-basics.md)
             stmt = stmt.where(Property.city == city)
-        if max_guests is not None:
-            stmt = stmt.where(Property.max_guests >= max_guests)
+        if guests is not None:
+            # guests = size of the group searching, NOT an upper bound --
+            # >= on purpose: a property that fits more than `guests` still
+            # works. Same relationship as the reservation-time rule
+            # guest_count <= property.max_guests (docs/db/er-diagram.md)
+            stmt = stmt.where(Property.max_guests >= guests)
         if min_price_cents is not None:
             stmt = stmt.where(Property.price_per_night_cents >= min_price_cents)
         if max_price_cents is not None:
@@ -41,7 +45,10 @@ class PropertyRepository(BaseRepository[Property]):
 
         # order_by is required for LIMIT/OFFSET to paginate consistently
         # (docs/db/sql-basics.md#5); id is a tiebreaker since price alone
-        # isn't unique. Exposing other sort options is BOOK-29's concern.
+        # isn't unique. price ASC is a placeholder default, not the intended
+        # long-term one -- Airbnb/Booking.com default to a "Recommended"
+        # sort (avg. rating), which needs BOOK-73's Review rows aggregated
+        # first. See the BOOK-29/BOOK-73 comment thread on this.
         stmt = stmt.order_by(Property.price_per_night_cents.asc(), Property.id.asc())
         stmt = stmt.limit(limit).offset(offset)
 

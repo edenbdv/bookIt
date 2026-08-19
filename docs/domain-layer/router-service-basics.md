@@ -84,7 +84,7 @@ async def list_properties(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     city: str | None = None,
-    max_guests: int | None = Query(default=None, gt=0),
+    guests: int | None = Query(default=None, gt=0),
     min_price_cents: int | None = Query(default=None, ge=0),
     max_price_cents: int | None = Query(default=None, ge=0),
     uow: UnitOfWork = Depends(get_uow),
@@ -94,6 +94,24 @@ async def list_properties(
 `Query(...)` is `Field(...)`'s counterpart for this case — same job (attach constraints: a default, `ge`/`le`/`gt`), same underlying Pydantic validation machinery, just declared on a bare function parameter instead of an attribute inside a `BaseModel`. `city: str | None = None` doesn't need `Query(...)` at all — it's still read from the query string (same inference rule that already applies to `host_id` in `create_property`: a plain scalar, not part of the URL path, is read from the query string by default) — `Query(...)` is only needed when there's an actual constraint to declare beyond a bare default, which `city` doesn't have here.
 
 **Why these aren't bundled into a schema class the way `PropertyCreate` bundles the request body:** the real difference is what's actually arriving on the wire. A request body is genuinely *one JSON object* — the client sends one cohesive blob, so one Pydantic class naturally represents it. Query parameters are *independent `key=value` pairs* in the URL — not one object, just several loosely-related knobs. Wrapping six independent, optional filters in their own class would be extra structure that doesn't reflect how they actually arrive, for no benefit at this scale. (FastAPI does support grouping query params into a class too, worth reaching for if the same filter-shape were reused across several endpoints — not the case here.)
+
+**`guests` vs. `Property.max_guests`:** worth flagging since the two are easy to conflate. `guests` is the size of the group *searching* — a minimum requirement, not a cap — compared against each property's own `max_guests` capacity as `Property.max_guests >= guests` in `repository.py`. It used to be named `max_guests` too, matching the column it filters on, which read as though it meant "cap the property's max_guests at this value" — the opposite of what it actually does. Renamed to `guests` precisely to stop implying an upper bound it never was.
+
+### 7.1 Why filters are query params here, not a JSON body — even though `GET` *could* technically have one
+
+Four compounding reasons, not just convention for its own sake:
+
+1. **`GET` requests aren't supposed to carry a body at all.** Per the HTTP spec, a body on `GET` "has no defined semantics" — servers, proxies, and caches are free to ignore or strip it. In practice a lot of infrastructure (browsers, CDNs, some HTTP client libraries) doesn't reliably send or forward one. Relying on a `GET` body is fragile in a way relying on query params isn't — query params are the only standard way to parameterize a `GET`.
+
+2. **Caching.** `GET` is meant to be safe and cacheable — that's the whole REST contract for it (no side effects, same input → same output, cacheable by intermediaries). Every caching layer (browser cache, CDN, reverse proxy) keys its cache off the URL, query string included. A filter expressed as `?city=Tel+Aviv&guests=2` is naturally part of that cache key; a filter buried in a body isn't visible to a cache at all, so two different searches could collide in a cache, or nothing would get cached correctly.
+
+3. **Shareable/bookmarkable.** Because query params live in the URL, `GET /properties?city=Tel+Aviv&guests=2` is a complete, copyable, linkable thing — paste it in a browser, bookmark it, put it in a `<a href>`, and you get the same filtered results. A JSON body isn't part of the URL, so a filtered search expressed that way couldn't be shared as a link at all — you'd need to also transmit the body out-of-band.
+
+4. **It matches what the request is actually for.** A body represents "the resource I'm sending you" — that's why `POST /properties` has one (`PropertyCreate` is the new property). `GET /properties` isn't sending a resource, it's asking a question with some filters attached — query params are the idiomatic way to parameterize a read, not describe a payload.
+
+**Mechanically, in this code:** FastAPI decides query-vs-body per parameter based on two things — the HTTP method, and the parameter's type. Every parameter in `list_properties` is a plain scalar (`int`, `str | None`, etc.), not a Pydantic `BaseModel` — that's what makes FastAPI treat them as query params automatically (`Query(...)` just adds validation on top, the same way `Field(...)` does for a body field). Contrast with `create_property`'s `data: PropertyCreate` — that's a `BaseModel` type, which is what tells FastAPI "parse this from the JSON body" instead. So the query-vs-body split isn't a special rule for `GET` specifically — it falls out of "which type is this parameter," and it happens to line up with `GET` because nobody in this codebase typed a `BaseModel` parameter on a `GET` route.
+
+Mechanically, FastAPI decides query-vs-body per *parameter*, based on its type, not the HTTP method directly: a plain scalar type (`int`, `str | None`, `uuid.UUID`) becomes a query/path param; a `BaseModel` type (like `PropertyCreate`) becomes the parsed body. Every parameter on `list_properties` is a scalar, which is what actually makes them query params — it falls out of the type each one was given, and happens to line up with `GET` because nothing here typed a `BaseModel` parameter on a `GET` route.
 
 ---
 
