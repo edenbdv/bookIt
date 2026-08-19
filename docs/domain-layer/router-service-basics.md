@@ -70,6 +70,29 @@ This is a different shape from `create_property` in two ways worth being precise
 | `Property(...)` — just constructed (`create_property`) | No | Yes |
 | Loaded via `get_active_by_id`/`select(...)` (`update_property`) | Yes, automatically | No |
 
+## 3.2 `delete_property` — soft delete, and why `status_code`/`-> None` have to agree
+
+```python
+async def delete_property(uow: UnitOfWork, id: uuid.UUID) -> bool:
+    property_ = await uow.properties.get_active_by_id(id)
+    if property_ is None:
+        return False
+    property_.deleted_at = datetime.now(UTC)
+    return True
+```
+
+```python
+@router.delete("/{property_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_property(property_id: uuid.UUID, uow: UnitOfWork = Depends(get_uow)) -> None:
+    deleted = await service.delete_property(uow, property_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+```
+
+**Deliberately not `uow.properties.delete(property_)`.** That's the inherited `BaseRepository` hard delete, which `core/README.md`'s "repository.py" section already says won't stop misuse — soft delete belongs in `service.py` specifically *because* it's a business rule (a delist decision), not data access. `deleted_at` has no `server_default`, unlike `created_at`: a server-side default only makes sense for a value true for *every* row, computable by the database alone with no business decision involved. `created_at` qualifies (every row has a creation moment); `deleted_at` doesn't (most rows never get one, and *whether* one applies is a decision only `service.py` can make) — so it has to be set explicitly here, in Python, when a delist actually happens.
+
+**`status_code=status.HTTP_204_NO_CONTENT` and `-> None` aren't two unrelated choices — they have to agree.** `status_code` (the decorator argument) controls the response's *status line* (`HTTP/1.1 204 No Content`), independent of whatever the function returns. `-> None`, with no `response_model` declared, controls the *body* — nothing here for FastAPI to serialize as JSON, so the body is empty. These have to match: HTTP requires a `204` response to have **no body at all**. Returning the deleted `Property` here instead — the way `create_property`/`update_property` return theirs — would be wrong for this specific status code, not just superfluous. Same reasoning as `POST`'s explicit `status_code=status.HTTP_201_CREATED` from section 2: FastAPI's default status code is always `200`, which is wrong for both `POST` (should be `201`) and `DELETE` (should be `204`) — both need an explicit override, for different REST-correct reasons.
+
 ## 4. Why split them into two files at all
 
 **Different concerns.** `router.py` deals with "how does this arrive over HTTP and how does it leave over HTTP" — query strings, status codes, response shaping. `service.py` deals with "what is actually allowed to happen" — the same "what the business rule needs" vs. "how it's expressed" split `repository-pattern.md` section 1 makes for repositories, one layer further out.
@@ -150,3 +173,5 @@ Mechanically, FastAPI decides query-vs-body per *parameter*, based on its type, 
 | `Query(...)` | `Field`'s counterpart for a bare function parameter read from the URL's query string, not the body |
 | `setattr(obj, field, value)` | Plain Python, not SQL — changes an in-memory attribute now; the `UPDATE` it eventually causes only fires at flush/commit, later |
 | `add()` vs. loaded-via-`select()` | `add()` is only for objects the session has never seen; anything loaded through the session (`get_active_by_id`, etc.) is already tracked automatically via the identity map |
+| `status_code` vs. `-> None` | `status_code` sets the response's status line; `-> None` (no `response_model`) sets an empty body. A `204` response requires both — they have to agree, not just happen to match |
+| Why `deleted_at` has no `server_default` | Only appropriate for a value true for every row and computable by the DB alone; whether a property is delisted is a business decision, not a database fact — so it's set explicitly in `service.py`, never by Postgres |

@@ -68,3 +68,19 @@ async def update_property(
     if property_ is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
     return property_
+
+
+@router.delete("/{property_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_property(
+    property_id: uuid.UUID,
+    # same SECURITY GAP as update_property/create_property -- see those
+    # comments
+    uow: UnitOfWork = Depends(get_uow),
+) -> None:
+    # status_code=204 (the status LINE) and -> None (no response_model, so
+    # no BODY) have to agree -- HTTP requires a 204 response to have no
+    # body at all. Returning the deleted Property here instead would be
+    # wrong for this status code, not just unnecessary.
+    deleted = await service.delete_property(uow, property_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")

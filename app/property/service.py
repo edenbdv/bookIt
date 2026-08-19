@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from app.core.unit_of_work import UnitOfWork
 from app.property.models import Property
@@ -50,3 +51,17 @@ async def update_property(uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate) 
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(property_, field, value)
     return property_
+
+
+async def delete_property(uow: UnitOfWork, id: uuid.UUID) -> bool:
+    property_ = await uow.properties.get_active_by_id(id)
+    if property_ is None:
+        return False
+    # deliberately NOT uow.properties.delete(property_) -- that's the
+    # inherited BaseRepository hard delete, which core/README.md's
+    # "repository.py" section explicitly says won't stop misuse; soft
+    # delete is service.py's job specifically because it's a business
+    # rule, not data access. deleted_at has no DB default (unlike
+    # created_at) -- it's meant to be set here, on delist, not by Postgres
+    property_.deleted_at = datetime.now(UTC)
+    return True
