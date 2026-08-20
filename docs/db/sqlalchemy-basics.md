@@ -434,6 +434,16 @@ But it's still not final. Think of it like a server accepting your form and givi
 
 This project sets `expire_on_commit=False` when building the session factory ([`core/db.py`](../../app/core/db.py)) — the default (`True`) would at least force a fresh load the *next* time you access an object's attributes after your own `commit()`. With it off, that safety net is disabled too: even post-commit, an already-loaded object stays exactly as it was when first loaded, until something forces a real reload. If staleness within a session genuinely matters, `await session.refresh(obj)` forces a real round-trip, bypassing the identity map on purpose.
 
+**`IntegrityError` — a constraint violation, caught after `flush()`.** Item 3 above in practice: `app/review/service.py`'s `create_review` relies on the DB's `UNIQUE (reservation_id, author_id)` constraint to catch a duplicate review, instead of checking-then-inserting (which would race under concurrent requests). `flush()` is what sends the `INSERT` and gives Postgres the chance to reject it; SQLAlchemy wraps that rejection as `sqlalchemy.exc.IntegrityError`. It's broader than just `UNIQUE` — the same exception type wraps `NOT NULL`, `CHECK`, and foreign-key violations too, so catching it means "the database refused this for *some* integrity reason," not specifically the one you had in mind.
+
+```python
+uow.reviews.add(review)
+try:
+    await uow.session.flush()
+except IntegrityError as exc:
+    raise DuplicateReviewError from exc
+```
+
 ## 15. Insert order isn't `add()` order — it's foreign-key order
 
 ```python
@@ -567,6 +577,7 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `.scalar_one()` / `.scalar_one_or_none()` / `.scalars().all()` | Extract rows from a `Result`: exactly one (raise if not), one-or-none, or a list |
 | `.add(obj)` | Stage an object — no network call |
 | `.flush()` | Send pending changes to Postgres — first round-trip, still not permanent |
+| `IntegrityError` | A constraint violation Postgres rejected at `flush()`/`commit()` — covers `UNIQUE`, `NOT NULL`, `CHECK`, and FK violations alike, not just one specific rule |
 | `.commit()` | Make it permanent and visible to everyone else |
 | `.rollback()` | Discard everything pending — undo |
 | `default=` | Python computes the value, before touching the DB |

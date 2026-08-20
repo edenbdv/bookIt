@@ -93,6 +93,52 @@ async def delete_property(property_id: uuid.UUID, uow: UnitOfWork = Depends(get_
 
 **`status_code=status.HTTP_204_NO_CONTENT` and `-> None` aren't two unrelated choices — they have to agree.** `status_code` (the decorator argument) controls the response's *status line* (`HTTP/1.1 204 No Content`), independent of whatever the function returns. `-> None`, with no `response_model` declared, controls the *body* — nothing here for FastAPI to serialize as JSON, so the body is empty. These have to match: HTTP requires a `204` response to have **no body at all**. Returning the deleted `Property` here instead — the way `create_property`/`update_property` return theirs — would be wrong for this specific status code, not just superfluous. Same reasoning as `POST`'s explicit `status_code=status.HTTP_201_CREATED` from section 2: FastAPI's default status code is always `200`, which is wrong for both `POST` (should be `201`) and `DELETE` (should be `204`) — both need an explicit override, for different REST-correct reasons.
 
+## 3.3 `create_review` (`BOOK-73`) — custom exceptions, when `None` can't say enough
+
+Every `property` endpoint so far only had one way to fail besides validation: "not found." Returning `None` and letting the router turn that into a `404` was enough. `POST /reservations/{id}/reviews` has **four** distinct failure reasons, each needing a *different* HTTP status — one `None` can't distinguish "reservation doesn't exist" from "reservation exists but isn't completed" from "you're not a participant" from "you already reviewed this." Trying to cram that into a single sentinel return value (`None`, `False`, or similar) would force the router to guess which failure happened.
+
+```python
+# app/review/service.py
+class ReservationNotFoundError(Exception): ...
+class ReservationNotCompletedError(Exception): ...
+class NotAParticipantError(Exception): ...
+class DuplicateReviewError(Exception): ...
+
+async def create_review(uow, reservation_id, author_id, data) -> Review:
+    reservation = await uow.reservations.get_by_id(reservation_id)
+    if reservation is None:
+        raise ReservationNotFoundError
+    if reservation.status != ReservationStatus.COMPLETED:
+        raise ReservationNotCompletedError
+    ...
+    if author_id not in participant_ids:
+        raise NotAParticipantError
+    ...
+    try:
+        await uow.session.flush()
+    except IntegrityError as exc:
+        raise DuplicateReviewError from exc
+    return review
+```
+
+```python
+# app/review/router.py
+try:
+    return await service.create_review(uow, reservation_id, author_id, data)
+except service.ReservationNotFoundError as exc:
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found") from exc
+except service.ReservationNotCompletedError as exc:
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Reservation is not completed") from exc
+except service.NotAParticipantError as exc:
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="...") from exc
+except service.DuplicateReviewError as exc:
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="...") from exc
+```
+
+This keeps the same discipline `get_property`'s `None` already established — `service.py` still never imports `HTTPException` or anything FastAPI-specific, it just has a richer vocabulary than `None`/not-`None` for saying *what* went wrong. The router is still the only place that decides what HTTP status a given failure maps to.
+
+**The duplicate-review check is the DB's `UNIQUE (reservation_id, author_id)` constraint, not a Python `if`.** `create_review` doesn't query for an existing review first — it just tries the `flush()` and catches `IntegrityError` if the constraint rejects it. This avoids a race: a check-then-insert (`if no existing review: insert`) has a gap between the check and the insert where two concurrent requests could both pass the check before either commits — the same "an app-level check can't stop concurrent double-booking" reasoning `docs/db/concurrency-basics.md` already makes for `Reservation`'s `EXCLUDE` constraint. The `UNIQUE` constraint is the actual source of truth; catching its violation is just how that gets turned into a clean `409` instead of a raw database error reaching the client.
+
 ## 4. Why split them into two files at all
 
 **Different concerns.** `router.py` deals with "how does this arrive over HTTP and how does it leave over HTTP" — query strings, status codes, response shaping. `service.py` deals with "what is actually allowed to happen" — the same "what the business rule needs" vs. "how it's expressed" split `repository-pattern.md` section 1 makes for repositories, one layer further out.
@@ -175,3 +221,5 @@ Mechanically, FastAPI decides query-vs-body per *parameter*, based on its type, 
 | `add()` vs. loaded-via-`select()` | `add()` is only for objects the session has never seen; anything loaded through the session (`get_active_by_id`, etc.) is already tracked automatically via the identity map |
 | `status_code` vs. `-> None` | `status_code` sets the response's status line; `-> None` (no `response_model`) sets an empty body. A `204` response requires both — they have to agree, not just happen to match |
 | Why `deleted_at` has no `server_default` | Only appropriate for a value true for every row and computable by the DB alone; whether a property is delisted is a business decision, not a database fact — so it's set explicitly in `service.py`, never by Postgres |
+| Custom `service.py` exceptions | Used when `None`/not-`None` can't distinguish enough outcomes (`BOOK-73`'s 4 failure reasons); `service.py` still never imports `HTTPException` — the router catches each and decides the status code |
+| Duplicate check via `IntegrityError` | Relying on the DB's `UNIQUE` constraint (catch-after-flush) instead of a check-then-insert avoids a race between two concurrent requests — same reasoning as `Reservation`'s `EXCLUDE` constraint |
