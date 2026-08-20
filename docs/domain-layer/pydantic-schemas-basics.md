@@ -26,6 +26,16 @@ Four concrete failure modes if a route accepts or returns a SQLAlchemy model dir
 
 **Same underlying motivation as the repository pattern's split** ([`repository-pattern.md`](repository-pattern.md) section 1: "what the business rule needs" vs. "how SQLAlchemy expresses it"). Here it's "what the client sends/receives" vs. "how the DB stores it" — two different concerns, two different classes, even where they look nearly identical today, because that separation is what stops them from becoming *accidentally* coupled later.
 
+## 2.1 When to duplicate a DB rule at the app level, and when not to
+
+`Review.rating` (1–5) and `Property.max_guests`/`price_per_night_cents` (> 0) are duplicated in the schema. `app/review/service.py`'s duplicate-review check (`UNIQUE (reservation_id, author_id)`) deliberately is **not** — it relies on the DB constraint alone, caught as an `IntegrityError` ([`sqlalchemy-basics.md`](../db/sqlalchemy-basics.md) section 14). The difference isn't inconsistency — it's what kind of rule each one is:
+
+**Duplicate the rule at the app level when it only needs data already in the request.** "Is `rating` between 1 and 5" needs nothing but the submitted value — no database round-trip. Checking it in the schema is free, and buys an instant `422` instead of a request traveling all the way to a failed `INSERT`.
+
+**Don't duplicate it as a check-then-act when the rule depends on database *state*** — "does a review already exist for this pair" can only be answered by asking the database, and that answer can change between the check and the insert. A check-then-insert has a race: two concurrent requests can both see "no existing review," both proceed, and the DB constraint still has to reject the second one anyway — same reasoning [`concurrency-basics.md`](../db/concurrency-basics.md) already gives for why an app-level "is it free?" check can't stop concurrent double-booking on `Reservation`. The DB constraint is the actual source of truth either way; an app-level pre-check would just add a wasted round-trip without removing the need to handle the DB's rejection.
+
+**The "ugly DB error" problem `rating`'s duplication solves is already solved here differently.** `except IntegrityError: raise DuplicateReviewError` already turns the constraint violation into a clean `409` — there's no remaining bad-error-message problem left for a pre-check to fix. That's what actually makes duplication worth it or not: not "does the DB already enforce this," but "is there still a real gap in error quality or round-trip cost that a pre-check would close."
+
 ## 3. What this will look like, per module
 
 Per the AC, each module's `schemas.py` gets multiple Pydantic classes for the same model, one per direction:
@@ -210,3 +220,4 @@ This ticket defined the schemas themselves. Wiring them into actual routes/servi
 | `*Update` schema | For partial updates (`PATCH`) — every field optional, distinct shape from `Create`/`Read` |
 | `ConfigDict(from_attributes=True)` | Lets a response schema be built directly from a SQLAlchemy model instance, not manual field mapping |
 | Why not reuse the DB model | Prevents leaking sensitive columns, prevents clients setting server-generated fields, decouples API contract from storage schema, enables schema-level validation with clearer errors |
+| When to duplicate a DB rule | Yes if it only needs the request's own data (free, no round-trip). No, as a check-then-act, if it depends on DB state — that races; rely on the constraint + catch `IntegrityError` instead |

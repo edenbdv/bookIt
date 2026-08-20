@@ -56,6 +56,33 @@ SELECT * FROM properties WHERE city = 'Tel Aviv' LIMIT 10 OFFSET 20
 
 **One more limitation worth knowing, not fixing now:** `OFFSET` doesn't skip for free — Postgres still has to walk past every skipped row internally before it can start collecting. `OFFSET 20` is cheap; `OFFSET 50000` genuinely costs more, growing with the offset itself. There's a different technique (keyset/cursor pagination — "give me rows after this specific id/timestamp") that avoids this, but it's more complex and not needed at this project's scale; `LIMIT`/`OFFSET` is the right choice for now.
 
+## 6. `JOIN` — reaching a column that lives on a different table
+
+`ReviewRepository.list_by_property_id` needs to filter reviews by `property_id` — but `reviews` has no `property_id` column at all, only `reservation_id`. `property_id` lives on `reservations`. A `JOIN` is what makes a column on one table reachable while querying another.
+
+Concretely, with tiny sample data:
+
+**`reviews`:**
+| id | reservation_id | rating |
+|---|---|---|
+| R1 | X1 | 5 |
+| R2 | X2 | 4 |
+
+**`reservations`:**
+| id | property_id |
+|---|---|
+| X1 | P1 |
+| X2 | P2 |
+
+`JOIN reservations ON reviews.reservation_id = reservations.id` lines up rows from both tables wherever that condition holds, producing temporary combined rows — both tables' columns side by side, nothing filtered out yet:
+
+| review.id | review.reservation_id | review.rating | reservation.id | reservation.property_id |
+|---|---|---|---|---|
+| R1 | X1 | 5 | X1 | P1 |
+| R2 | X2 | 4 | X2 | P2 |
+
+*Now* `WHERE reservations.property_id = 'P1'` can run against this combined set — it filters the wider rows, keeping only `R1`. Finally, `SELECT reviews.*` throws away the `reservations.*` columns that only existed to make the filter possible, leaving just the review. The join's two parts answer two different questions: **which** table to bring in (`reservations`), and **how** to match up rows between the two (`reviews.reservation_id = reservations.id`, the `ON` condition). Without it, `property_id` simply isn't reachable anywhere in the query at all.
+
 ---
 
 ## Cheat sheet
@@ -71,4 +98,5 @@ SELECT * FROM properties WHERE city = 'Tel Aviv' LIMIT 10 OFFSET 20
 | `LIMIT` | Caps how many rows a query returns |
 | `OFFSET` | Skips this many matching rows before collecting — together, "page N" |
 | Why paginate | Without it: DB does needless work, more data crosses the network than needed, and a public endpoint becomes an unbounded-query risk |
+| `JOIN` | Makes a column on a different table reachable, by lining up matching rows from both — the `SELECT`/`WHERE` still only touch the columns you actually asked for |
 | `LIMIT`/`OFFSET` without `ORDER BY` | Not actually stable — row order can shift between calls, breaking "page 2 follows page 1" |
