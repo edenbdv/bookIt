@@ -211,6 +211,8 @@ host: Mapped["User"] = relationship(foreign_keys=[host_id], back_populates="prop
 
 Not required here — with exactly one FK between the two tables, there's nothing to disambiguate, so the implicit version above (no `foreign_keys=`) is what this codebase uses. `foreign_keys=` only becomes *necessary* the moment there's more than one FK between the same two tables — e.g. if `Property` ever gained a second column like `last_edited_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))`. At that point SQLAlchemy can no longer guess which column a given `relationship()` means, and raises `AmbiguousForeignKeysError` at startup until you tell it explicitly which FK each relationship should use. It's a loud, immediate failure (not a silent bug), so it's fine to add `foreign_keys=` only when that day comes rather than defensively up front.
 
+**One more limitation: `relationship()` has no guaranteed order by default.** `some_property.photos` (if such a relationship existed) would return rows in whatever order Postgres happens to give back — not necessarily insertion order, not necessarily any meaningful order. Fixing that needs an explicit `relationship(..., order_by="PropertyPhoto.position")`. This project's actual `PropertyPhoto` case (`app/property/repository.py`) doesn't do that — it deliberately skips a `photos` relationship entirely and always fetches through `PropertyPhotoRepository.list_by_property_id`, which has its own explicit `.order_by(PropertyPhoto.position)`. Same reasoning either way: if you need rows back in a specific order, a bare `relationship()` doesn't give you that for free — either configure `order_by=` on it, or query explicitly with `.order_by(...)` yourself.
+
 ## 7. `CheckConstraint` — rules Postgres enforces, not just your app
 
 ```python
@@ -557,6 +559,7 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | `expire_on_commit=False` | This project's session-factory setting — disables SQLAlchemy's default post-commit re-fetch, so loaded objects stay as-is even across a `commit()` |
 | `relationship(...)` | Not a column — a computed, in-Python convenience built from an existing foreign key |
 | `back_populates=` | Names the matching `relationship()` attribute on the other class, keeping both sides in sync in memory |
+| `relationship()` ordering | No guaranteed order by default — needs `order_by=` on the relationship, or query explicitly (`.order_by(...)`) instead, like `PropertyPhotoRepository.list_by_property_id` does |
 | FK column vs. `relationship` | `host_id` = raw UUID, free to read, use for filtering; `host` = full object, may cost a round-trip, use for reading data |
 | `index=True` | Builds a Postgres index — fast lookups on that column |
 | `unique=True` | A constraint — Postgres rejects duplicate values (not about speed) |

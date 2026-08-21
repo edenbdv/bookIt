@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PropertyCreate(BaseModel):
@@ -40,3 +40,50 @@ class PropertyUpdate(BaseModel):
     country: str | None = None
     max_guests: int | None = Field(default=None, gt=0)
     price_per_night_cents: int | None = Field(default=None, ge=0)
+
+
+class PropertyPhotoCreate(BaseModel):
+    url: str
+    # no position -- adding a photo appends it to the end (server-computed);
+    # changing order is reorder's job, a separate operation, not something
+    # a client picks when adding a new photo
+    # no id, no property_id, no created_at -- server-generated/from the URL path
+
+
+class PropertyPhotoRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    property_id: uuid.UUID
+    url: str
+    position: int
+    created_at: datetime
+
+
+class PropertyListRead(PropertyRead):
+    # only the list endpoint computes this (one DISTINCT ON query per page,
+    # docs/db/sql-basics.md#7) -- create/update don't, so it doesn't belong
+    # on the shared PropertyRead they use (would always show null there)
+    cover_photo: PropertyPhotoRead | None
+
+
+class PropertyDetailRead(PropertyRead):
+    # the full gallery -- only get_property (single fetch) computes this;
+    # PropertyRead stays photo-less for create/update, PropertyListRead
+    # carries just a cover_photo for the list endpoint (see its comment)
+    #
+    photos: list[PropertyPhotoRead]
+
+
+class PropertyPhotoReorder(BaseModel):
+    # the complete new order, not one photo's target position -- position i
+    # in this list becomes photo i's new `position`. Whether this list is
+    # exactly the property's current photo set (no missing/extra ids) needs
+    # a DB lookup, so that check lives in service.py, not here
+    photo_ids: list[uuid.UUID]
+
+    @model_validator(mode="after")
+    def no_duplicate_ids(self) -> "PropertyPhotoReorder":
+        if len(set(self.photo_ids)) != len(self.photo_ids):
+            raise ValueError("photo_ids must not contain duplicates")
+        return self
