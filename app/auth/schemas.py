@@ -26,6 +26,11 @@ class UserRead(BaseModel):
     # no hashed_password -- see pydantic-schemas-basics.md section 2
 
 
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     # no password here -- changing a password is a security-sensitive
