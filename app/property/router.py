@@ -4,8 +4,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.property import service
-from app.property.models import Property
-from app.property.schemas import PropertyCreate, PropertyRead, PropertyUpdate
+from app.property.models import Property, PropertyPhoto
+from app.property.schemas import (
+    PropertyCreate,
+    PropertyDetailRead,
+    PropertyListRead,
+    PropertyPhotoCreate,
+    PropertyPhotoRead,
+    PropertyPhotoReorder,
+    PropertyRead,
+    PropertyUpdate,
+)
 
 router = APIRouter(prefix="/properties", tags=["properties"])
 
@@ -26,7 +35,7 @@ async def create_property(
     return await service.create_property(uow, data, host_id)
 
 
-@router.get("/{property_id}", response_model=PropertyRead)
+@router.get("/{property_id}", response_model=PropertyDetailRead)
 async def get_property(
     property_id: uuid.UUID,
     uow: UnitOfWork = Depends(get_uow),
@@ -39,7 +48,7 @@ async def get_property(
     return property_
 
 
-@router.get("", response_model=list[PropertyRead])
+@router.get("", response_model=list[PropertyListRead])
 async def list_properties(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -84,3 +93,58 @@ async def delete_property(
     deleted = await service.delete_property(uow, property_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
+
+@router.post(
+    "/{property_id}/photos", response_model=PropertyPhotoRead, status_code=status.HTTP_201_CREATED
+)
+async def add_photo(
+    property_id: uuid.UUID,
+    data: PropertyPhotoCreate,
+    # same SECURITY GAP as create_property/update_property/delete_property
+    # -- see create_property's comment
+    uow: UnitOfWork = Depends(get_uow),
+) -> PropertyPhoto:
+    try:
+        return await service.add_photo(uow, property_id, data)
+    except service.PropertyNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
+        ) from exc
+
+
+@router.delete("/{property_id}/photos/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_photo(
+    property_id: uuid.UUID,
+    photo_id: uuid.UUID,
+    # same SECURITY GAP as create_property/update_property/delete_property
+    # -- see create_property's comment
+    uow: UnitOfWork = Depends(get_uow),
+) -> None:
+    try:
+        await service.remove_photo(uow, property_id, photo_id)
+    except service.PhotoNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found"
+        ) from exc
+
+
+@router.put("/{property_id}/photos", response_model=list[PropertyPhotoRead])
+async def reorder_photos(
+    property_id: uuid.UUID,
+    data: PropertyPhotoReorder,
+    # same SECURITY GAP as create_property/update_property/delete_property
+    # -- see create_property's comment
+    uow: UnitOfWork = Depends(get_uow),
+) -> list[PropertyPhoto]:
+    try:
+        return await service.reorder_photos(uow, property_id, data)
+    except service.PropertyNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
+        ) from exc
+    except service.PhotoOrderMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="photo_ids must exactly match this property's current photos",
+        ) from exc

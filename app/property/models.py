@@ -38,3 +38,18 @@ class Property(Base):
     host: Mapped["User"] = relationship(back_populates="properties")
     # in-Python only, no column: mirrors Reservation.property
     reservations: Mapped[list["Reservation"]] = relationship(back_populates="property")
+
+
+class PropertyPhoto(Base):
+    __tablename__ = "property_photos"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    property_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("properties.id"))
+    url: Mapped[str]
+    # not DB-unique per property on purpose: reordering means several rows'
+    # positions change together, and enforcing uniqueness would need a
+    # deferred constraint just to allow a multi-row swap inside one
+    # transaction. Ordering is enforced by ORDER BY position at query time
+    # (BOOK-74's repository), not by a uniqueness guarantee here.
+    position: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

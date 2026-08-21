@@ -83,6 +83,27 @@ Concretely, with tiny sample data:
 
 *Now* `WHERE reservations.property_id = 'P1'` can run against this combined set — it filters the wider rows, keeping only `R1`. Finally, `SELECT reviews.*` throws away the `reservations.*` columns that only existed to make the filter possible, leaving just the review. The join's two parts answer two different questions: **which** table to bring in (`reservations`), and **how** to match up rows between the two (`reviews.reservation_id = reservations.id`, the `ON` condition). Without it, `property_id` simply isn't reachable anywhere in the query at all.
 
+## 7. `DISTINCT` vs `DISTINCT ON` — one is standard SQL, one is Postgres-only
+
+**`SELECT DISTINCT`** is part of the SQL standard, works in every database. It dedupes whole rows: run it, and two rows that are identical in every selected column collapse into one. It doesn't pick a "best" row among near-duplicates — it only removes exact repeats.
+
+**`DISTINCT ON (column)`** is a **Postgres-specific extension** — MySQL and SQL Server don't have it. It answers a different question: "give me one row per distinct value of this column" — not "remove exact duplicate rows." Which row wins for each value is controlled by `ORDER BY`: Postgres keeps the *first* row per group, in that order, and discards the rest.
+
+This is exactly how to fetch a property's cover photo (its lowest-`position` photo) without loading every photo for every property in a list:
+
+```sql
+SELECT DISTINCT ON (property_id) *
+FROM property_photos
+WHERE property_id IN ('P1', 'P2')
+ORDER BY property_id, position ASC
+```
+
+For each `property_id`, Postgres walks matching rows in `(property_id, position)` order and keeps only the first one it sees — i.e. the photo with the lowest `position`. One query, one row back per property, regardless of how many photos each one actually has.
+
+**The gotcha:** `DISTINCT ON`'s column(s) must be a *prefix* of the `ORDER BY` list — `ORDER BY property_id, position` is required, not optional, because `DISTINCT ON` needs that order to know which row is "first" per group. Drop the `ORDER BY` (or reorder it) and which row survives becomes whatever Postgres happens to scan first — not wrong, just undefined.
+
+Since this project only targets Postgres, `DISTINCT ON` is a fine choice here — a different database (MySQL, SQL Server) would need a window function instead (`ROW_NUMBER() OVER (PARTITION BY property_id ORDER BY position)`, keeping only rows where the row number is 1) to get the same "one row per group" result.
+
 ---
 
 ## Cheat sheet
@@ -100,3 +121,5 @@ Concretely, with tiny sample data:
 | Why paginate | Without it: DB does needless work, more data crosses the network than needed, and a public endpoint becomes an unbounded-query risk |
 | `JOIN` | Makes a column on a different table reachable, by lining up matching rows from both — the `SELECT`/`WHERE` still only touch the columns you actually asked for |
 | `LIMIT`/`OFFSET` without `ORDER BY` | Not actually stable — row order can shift between calls, breaking "page 2 follows page 1" |
+| `DISTINCT` | Standard SQL — dedupes exact-duplicate whole rows |
+| `DISTINCT ON (col)` | Postgres-only — one row per distinct value of `col`, "first" decided by `ORDER BY`; other DBs need a window function instead |

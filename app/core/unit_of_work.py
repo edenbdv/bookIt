@@ -5,7 +5,7 @@ from typing import Self
 from app.auth.repository import UserRepository
 from app.core.db import get_session_factory
 from app.payment.repository import PaymentRepository
-from app.property.repository import PropertyRepository
+from app.property.repository import PropertyPhotoRepository, PropertyRepository
 from app.reservation.repository import ReservationRepository
 from app.review.repository import ReviewRepository
 
@@ -20,6 +20,7 @@ class UnitOfWork:
         self.session = get_session_factory()()
         self.users = UserRepository(self.session)
         self.properties = PropertyRepository(self.session)
+        self.property_photos = PropertyPhotoRepository(self.session)
         self.reservations = ReservationRepository(self.session)
         self.payments = PaymentRepository(self.session)
         self.reviews = ReviewRepository(self.session)

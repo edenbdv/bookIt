@@ -2,8 +2,25 @@ import uuid
 from datetime import UTC, datetime
 
 from app.core.unit_of_work import UnitOfWork
-from app.property.models import Property
-from app.property.schemas import PropertyCreate, PropertyUpdate
+from app.property.models import Property, PropertyPhoto
+from app.property.schemas import (
+    PropertyCreate,
+    PropertyPhotoCreate,
+    PropertyPhotoReorder,
+    PropertyUpdate,
+)
+
+
+class PropertyNotFoundError(Exception):
+    pass
+
+
+class PhotoNotFoundError(Exception):
+    pass
+
+
+class PhotoOrderMismatchError(Exception):
+    pass
 
 
 async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
@@ -17,7 +34,14 @@ async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.U
 
 
 async def get_property(uow: UnitOfWork, id: uuid.UUID) -> Property | None:
-    return await uow.properties.get_active_by_id(id)
+    property_ = await uow.properties.get_active_by_id(id)
+    if property_ is None:
+        return None
+    # not a mapped column/relationship -- attached here purely so
+    # PropertyDetailRead's from_attributes=True can read it (same technique
+    # as list_properties' cover_photo above); never persisted
+    property_.photos = await uow.property_photos.list_by_property_id(id)
+    return property_
 
 
 async def list_properties(
@@ -29,7 +53,7 @@ async def list_properties(
     min_price_cents: int | None = None,
     max_price_cents: int | None = None,
 ) -> list[Property]:
-    return await uow.properties.list_filtered(
+    properties = await uow.properties.list_filtered(
         limit=limit,
         offset=offset,
         city=city,
@@ -37,6 +61,17 @@ async def list_properties(
         min_price_cents=min_price_cents,
         max_price_cents=max_price_cents,
     )
+
+    property_ids = [property_.id for property_ in properties]
+    cover_photos = await uow.property_photos.list_cover_photos(property_ids)
+    cover_photo_by_property_id = {photo.property_id: photo for photo in cover_photos}
+    for property_ in properties:
+        # not a mapped column/relationship -- attached here purely so
+        # PropertyListRead's from_attributes=True can read it
+        # (docs/domain-layer/router-service-basics.md); never persisted
+        property_.cover_photo = cover_photo_by_property_id.get(property_.id)
+
+    return properties
 
 
 async def update_property(uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate) -> Property | None:
@@ -65,3 +100,54 @@ async def delete_property(uow: UnitOfWork, id: uuid.UUID) -> bool:
     # created_at) -- it's meant to be set here, on delist, not by Postgres
     property_.deleted_at = datetime.now(UTC)
     return True
+
+
+async def add_photo(
+    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoCreate
+) -> PropertyPhoto:
+    property_ = await uow.properties.get_active_by_id(property_id)
+    if property_ is None:
+        raise PropertyNotFoundError
+
+    existing = await uow.property_photos.list_by_property_id(property_id)
+    # max(...) + 1, not len(existing): a prior remove can leave gaps in
+    # position (e.g. 0, 2 after removing 1) -- len() could collide with an
+    # existing position in that case, max()+1 never does
+    next_position = max((photo.position for photo in existing), default=-1) + 1
+    photo = PropertyPhoto(property_id=property_id, position=next_position, **data.model_dump())
+    uow.property_photos.add(photo)
+    await uow.session.flush()
+    return photo
+
+
+async def remove_photo(uow: UnitOfWork, property_id: uuid.UUID, photo_id: uuid.UUID) -> None:
+    # no property-exists/active check: a bogus property_id can't match a
+    # real photo anyway, and cleanup should work even on a delisted listing
+    photo = await uow.property_photos.get_by_id(photo_id)
+    # property_id match prevents deleting a real photo via someone else's
+    # property URL -- without it, property_id in the URL is decorative
+    if photo is None or photo.property_id != property_id:
+        raise PhotoNotFoundError
+    await uow.property_photos.delete(photo)
+
+
+async def reorder_photos(
+    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoReorder
+) -> list[PropertyPhoto]:
+    property_ = await uow.properties.get_active_by_id(property_id)
+    if property_ is None:
+        raise PropertyNotFoundError
+
+    existing = await uow.property_photos.list_by_property_id(property_id)
+    photos_by_id = {photo.id: photo for photo in existing}
+    # the submitted list must be an exact permutation of the current photo
+    # set -- not checkable in the schema (needs a DB lookup), so it's here
+    if set(data.photo_ids) != set(photos_by_id):
+        raise PhotoOrderMismatchError
+
+    for position, photo_id in enumerate(data.photo_ids):
+        photos_by_id[photo_id].position = position
+
+    # return in the new order, not DB-load order -- confirms the applied
+    # order back to the caller without needing a separate GET
+    return [photos_by_id[photo_id] for photo_id in data.photo_ids]

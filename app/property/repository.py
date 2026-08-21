@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.core.repository import BaseRepository
-from app.property.models import Property
+from app.property.models import Property, PropertyPhoto
 
 
 class PropertyRepository(BaseRepository[Property]):
@@ -52,5 +52,34 @@ class PropertyRepository(BaseRepository[Property]):
         stmt = stmt.order_by(Property.price_per_night_cents.asc(), Property.id.asc())
         stmt = stmt.limit(limit).offset(offset)
 
+        result = await self.session.scalars(stmt)
+        return list(result)
+
+
+class PropertyPhotoRepository(BaseRepository[PropertyPhoto]):
+    model = PropertyPhoto
+
+    async def list_by_property_id(self, property_id: UUID) -> list[PropertyPhoto]:
+        # no limit/offset -- a property's photo count is naturally small
+        # and bounded, unlike a browse/search listing; AC doesn't ask for
+        # pagination here
+        stmt = (
+            select(PropertyPhoto)
+            .where(PropertyPhoto.property_id == property_id)
+            .order_by(PropertyPhoto.position.asc())
+        )
+        result = await self.session.scalars(stmt)
+        return list(result)
+
+    async def list_cover_photos(self, property_ids: list[UUID]) -> list[PropertyPhoto]:
+        # DISTINCT ON (Postgres-only, docs/db/sql-basics.md#7): one row per
+        # property_id, the lowest-position one -- a list page's cover photo,
+        # without loading every photo of every property on the page
+        stmt = (
+            select(PropertyPhoto)
+            .distinct(PropertyPhoto.property_id)
+            .where(PropertyPhoto.property_id.in_(property_ids))
+            .order_by(PropertyPhoto.property_id, PropertyPhoto.position.asc())
+        )
         result = await self.session.scalars(stmt)
         return list(result)
