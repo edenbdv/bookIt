@@ -31,6 +31,16 @@ class UserLogin(BaseModel):
     password: str
 
 
+class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     # no password here -- changing a password is a security-sensitive
