@@ -2,6 +2,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.auth.dependencies import get_current_user
+from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.review import service
 from app.review.models import Review
@@ -18,15 +20,11 @@ router = APIRouter(tags=["reviews"])
 async def create_review(
     reservation_id: uuid.UUID,
     data: ReviewCreate,
-    # SECURITY GAP, same as PropertyCreate/host_id: nothing verifies the
-    # caller actually is this author. Acceptable for local dev only; BOOK-5
-    # needs to replace this with a host_id/author_id derived from
-    # Depends(get_current_user).
-    author_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Review:
     try:
-        return await service.create_review(uow, reservation_id, author_id, data)
+        return await service.create_review(uow, reservation_id, current_user.id, data)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"

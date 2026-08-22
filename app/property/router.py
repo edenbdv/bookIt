@@ -2,6 +2,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.auth.dependencies import get_current_user
+from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.property import service
 from app.property.models import Property, PropertyPhoto
@@ -22,17 +24,10 @@ router = APIRouter(prefix="/properties", tags=["properties"])
 @router.post("", response_model=PropertyRead, status_code=status.HTTP_201_CREATED)
 async def create_property(
     data: PropertyCreate,
-    # SECURITY GAP, not just "temporary": nothing verifies the caller is
-    # actually this host -- anyone who knows/guesses a host_id can create
-    # listings under it. Acceptable for local dev only (e.g. seed.py's host
-    # UUIDs); do not expose this build publicly before BOOK-5 (auth) replaces
-    # this with a host_id derived from Depends(get_current_user). See
-    # PropertyCreate's own comment for why host_id isn't part of the body
-    # schema instead.
-    host_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Property:
-    return await service.create_property(uow, data, host_id)
+    return await service.create_property(uow, data, current_user.id)
 
 
 @router.get("/{property_id}", response_model=PropertyDetailRead)
@@ -67,10 +62,11 @@ async def list_properties(
 async def update_property(
     property_id: uuid.UUID,
     data: PropertyUpdate,
-    # same SECURITY GAP as create_property: nothing verifies the caller is
-    # this property's host, or is authenticated at all -- anyone can PATCH
-    # any property. Acceptable for local dev only; BOOK-5 needs to add a
-    # host_id == current_user.id check here before this build goes public.
+    # requires authentication now (BOOK-33), but not yet ownership -- nothing
+    # here verifies current_user is *this property's* host, so any logged-in
+    # user can still PATCH any property. That equality check (current_user.id
+    # == property.host_id) is resource-owner authorization, BOOK-32's job.
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Property:
     property_ = await service.update_property(uow, property_id, data)
@@ -82,8 +78,9 @@ async def update_property(
 @router.delete("/{property_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_property(
     property_id: uuid.UUID,
-    # same SECURITY GAP as update_property/create_property -- see those
-    # comments
+    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
+    # same split as update_property, see its comment
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
     # status_code=204 (the status LINE) and -> None (no response_model, so
@@ -101,8 +98,9 @@ async def delete_property(
 async def add_photo(
     property_id: uuid.UUID,
     data: PropertyPhotoCreate,
-    # same SECURITY GAP as create_property/update_property/delete_property
-    # -- see create_property's comment
+    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
+    # same split as update_property, see its comment
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> PropertyPhoto:
     try:
@@ -117,8 +115,9 @@ async def add_photo(
 async def remove_photo(
     property_id: uuid.UUID,
     photo_id: uuid.UUID,
-    # same SECURITY GAP as create_property/update_property/delete_property
-    # -- see create_property's comment
+    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
+    # same split as update_property, see its comment
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
     try:
@@ -133,8 +132,9 @@ async def remove_photo(
 async def reorder_photos(
     property_id: uuid.UUID,
     data: PropertyPhotoReorder,
-    # same SECURITY GAP as create_property/update_property/delete_property
-    # -- see create_property's comment
+    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
+    # same split as update_property, see its comment
+    current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[PropertyPhoto]:
     try:
