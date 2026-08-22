@@ -62,14 +62,16 @@ async def list_properties(
 async def update_property(
     property_id: uuid.UUID,
     data: PropertyUpdate,
-    # requires authentication now (BOOK-33), but not yet ownership -- nothing
-    # here verifies current_user is *this property's* host, so any logged-in
-    # user can still PATCH any property. That equality check (current_user.id
-    # == property.host_id) is resource-owner authorization, BOOK-32's job.
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Property:
-    property_ = await service.update_property(uow, property_id, data)
+    try:
+        property_ = await service.update_property(uow, property_id, data, current_user.id)
+    except service.NotPropertyOwnerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this property's host may update it",
+        ) from exc
     if property_ is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
     return property_
@@ -78,8 +80,6 @@ async def update_property(
 @router.delete("/{property_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_property(
     property_id: uuid.UUID,
-    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
-    # same split as update_property, see its comment
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
@@ -87,7 +87,13 @@ async def delete_property(
     # no BODY) have to agree -- HTTP requires a 204 response to have no
     # body at all. Returning the deleted Property here instead would be
     # wrong for this status code, not just unnecessary.
-    deleted = await service.delete_property(uow, property_id)
+    try:
+        deleted = await service.delete_property(uow, property_id, current_user.id)
+    except service.NotPropertyOwnerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this property's host may delete it",
+        ) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
 
@@ -98,16 +104,19 @@ async def delete_property(
 async def add_photo(
     property_id: uuid.UUID,
     data: PropertyPhotoCreate,
-    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
-    # same split as update_property, see its comment
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> PropertyPhoto:
     try:
-        return await service.add_photo(uow, property_id, data)
+        return await service.add_photo(uow, property_id, data, current_user.id)
     except service.PropertyNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
+        ) from exc
+    except service.NotPropertyOwnerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this property's host may add photos",
         ) from exc
 
 
@@ -115,16 +124,19 @@ async def add_photo(
 async def remove_photo(
     property_id: uuid.UUID,
     photo_id: uuid.UUID,
-    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
-    # same split as update_property, see its comment
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
     try:
-        await service.remove_photo(uow, property_id, photo_id)
+        await service.remove_photo(uow, property_id, photo_id, current_user.id)
     except service.PhotoNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found"
+        ) from exc
+    except service.NotPropertyOwnerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this property's host may remove photos",
         ) from exc
 
 
@@ -132,16 +144,19 @@ async def remove_photo(
 async def reorder_photos(
     property_id: uuid.UUID,
     data: PropertyPhotoReorder,
-    # requires authentication now (BOOK-33); ownership check is BOOK-32 --
-    # same split as update_property, see its comment
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[PropertyPhoto]:
     try:
-        return await service.reorder_photos(uow, property_id, data)
+        return await service.reorder_photos(uow, property_id, data, current_user.id)
     except service.PropertyNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
+        ) from exc
+    except service.NotPropertyOwnerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this property's host may reorder photos",
         ) from exc
     except service.PhotoOrderMismatchError as exc:
         raise HTTPException(
