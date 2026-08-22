@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
@@ -13,11 +13,14 @@ router = APIRouter(prefix="/reservations", tags=["reservations"])
 @router.post("", response_model=ReservationRead, status_code=status.HTTP_201_CREATED)
 async def create_reservation(
     data: ReservationCreate,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
-        return await service.create_reservation(uow, data, current_user.id)
+        return await service.create_reservation_idempotent(
+            uow, data, current_user.id, idempotency_key
+        )
     except service.PropertyNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Property not found"
@@ -35,4 +38,9 @@ async def create_reservation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="These dates are no longer available for this property",
+        ) from exc
+    except service.IdempotencyKeyInProgressError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A request with this Idempotency-Key is already being processed",
         ) from exc

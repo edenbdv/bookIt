@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class ReservationStatus(str, enum.Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
-    CANCELLED = "cancelled"  # a reservation can be cancelled by the guest or by the host (Epic 8's saga/idempotency work needs that history)
+    CANCELLED = "cancelled"
     COMPLETED = "completed"
 
 
@@ -32,29 +32,21 @@ class Reservation(Base):
     check_in: Mapped[date] = mapped_column(Date)
     check_out: Mapped[date] = mapped_column(Date)
     guest_count: Mapped[int]
-    # snapshot at booking time, not derived from property.price_per_night_cents —
-    # a later price change must not alter what a guest already agreed to
+    # snapshot at booking time -- a later price change shouldn't retroactively change this
     total_cents: Mapped[int]
-    # values_callable: store the enum's string value, not its member name — see
-    # the same note on User.role
     status: Mapped[ReservationStatus] = mapped_column(
         Enum(ReservationStatus, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
         default=ReservationStatus.PENDING,
     )
-    # null once confirmed; used by Epic 6's expiry job to clear abandoned pending holds
+    # used by Epic 6's (not-yet-built) expiry job to clear abandoned pending holds
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         CheckConstraint("check_out > check_in", name="check_out_after_check_in"),
         CheckConstraint("guest_count > 0", name="guest_count_positive"),
-        # DB-level double-booking prevention, not app-level checking — an app-level
-        # "is it free?" query can't stop two concurrent requests from both passing
-        # the check before either writes; only a DB constraint can (see
-        # docs/db/exclude-constraint-basics.md and docs/db/concurrency-basics.md).
-        # '[)' half-open range: check_out day itself isn't occupied, so a same-day
-        # turnover (one guest's checkout = another's check-in) is not an overlap.
-        # Cancelled reservations are excluded entirely, freeing their dates.
+        # DB-level double-booking prevention (docs/db/exclude-constraint-basics.md).
+        # '[)' range: same-day turnover isn't an overlap. Cancelled rows excluded.
         ExcludeConstraint(
             (property_id, "="),
             (func.daterange(check_in, check_out, "[)"), "&&"),
@@ -66,7 +58,27 @@ class Reservation(Base):
 
     property: Mapped["Property"] = relationship(back_populates="reservations")
     guest: Mapped["User"] = relationship(back_populates="reservations")
-    # in-Python only, no column: mirrors Payment.reservation
     payments: Mapped[list["Payment"]] = relationship(back_populates="reservation")
-    # in-Python only, no column: mirrors Review.reservation
     reviews: Mapped[list["Review"]] = relationship(back_populates="reservation")
+
+
+class IdempotencyKeyStatus(str, enum.Enum):
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+
+
+class IdempotencyKey(Base):
+    __tablename__ = "idempotency_keys"
+
+    # client-supplied key is the primary key (docs/db/idempotency-basics.md)
+    key: Mapped[str] = mapped_column(primary_key=True)
+    status: Mapped[IdempotencyKeyStatus] = mapped_column(
+        Enum(IdempotencyKeyStatus, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=IdempotencyKeyStatus.PROCESSING,
+    )
+    # reference to the result, not a stored response body -- reservation-specific
+    # until a second real consumer (e.g. Epic 8 payments) justifies generalizing
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reservations.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # ~24h window (docs/db/idempotency-basics.md); cleanup job deferred, same as Reservation.expires_at
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
