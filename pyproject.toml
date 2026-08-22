@@ -17,6 +17,7 @@ dependencies = [
     "alembic-postgresql-enum>=1.10.0",
     "email-validator>=2.3.0",
     "bcrypt>=4.2",
+    "pyjwt>=2.9",
 ]
 
 [tool.uv]
