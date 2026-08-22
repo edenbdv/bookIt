@@ -4,8 +4,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 
 from app.core.unit_of_work import UnitOfWork
-from app.reservation.models import Reservation
+from app.reservation.models import IdempotencyKey, IdempotencyKeyStatus, Reservation
 from app.reservation.schemas import ReservationCreate
+
+# docs/db/idempotency-basics.md's ~24h window
+IDEMPOTENCY_KEY_TTL_HOURS = 24
 
 # how long a PENDING reservation holds its dates before Epic 6's expiry job
 # would clear an abandoned one -- no expiry job exists yet, so nothing
@@ -27,6 +30,10 @@ class GuestCountExceededError(Exception):
 
 
 class ReservationConflictError(Exception):
+    pass
+
+
+class IdempotencyKeyInProgressError(Exception):
     pass
 
 
@@ -78,4 +85,47 @@ async def create_reservation(
         await uow.session.flush()
     except IntegrityError as exc:
         raise ReservationConflictError from exc
+    return reservation
+
+
+async def create_reservation_idempotent(
+    uow: UnitOfWork, data: ReservationCreate, guest_id: uuid.UUID, idempotency_key: str
+) -> Reservation:
+    # insert-first, not check-then-insert: the key column's PK constraint is
+    # what actually closes the concurrent-duplicate-key race (two requests
+    # with the same key can't both "see nothing yet" and both proceed) --
+    # see docs/db/idempotency-basics.md's concurrent-key race section
+    key_row = IdempotencyKey(
+        key=idempotency_key,
+        expires_at=datetime.now(UTC) + timedelta(hours=IDEMPOTENCY_KEY_TTL_HOURS),
+    )
+    uow.session.add(key_row)
+    try:
+        await uow.session.flush()
+    except IntegrityError:
+        # the failed flush left the transaction aborted -- roll back before
+        # this session can run any more queries
+        await uow.session.rollback()
+        existing = await uow.session.get(IdempotencyKey, idempotency_key)
+        if existing.status == IdempotencyKeyStatus.COMPLETED:
+            existing_reservation = await uow.reservations.get_by_id(existing.reservation_id)
+            # keys aren't scoped per-guest in this table -- without this check,
+            # a different guest reusing/guessing someone else's key would get
+            # back that other guest's reservation as their own POST's result
+            if existing_reservation.guest_id != guest_id:
+                raise IdempotencyKeyInProgressError
+            return existing_reservation
+        # still PROCESSING: a genuinely concurrent request for the same key
+        # is mid-flight right now -- reject rather than poll/wait, same
+        # simplicity call as BOOK-35's broad IntegrityError catch
+        raise IdempotencyKeyInProgressError
+
+    # if create_reservation raises, the UoW rolls back this whole request's
+    # transaction on the way out. flush() above isn't commit() -- the
+    # PROCESSING row was only sent to Postgres, never made permanent -- so
+    # rollback erases it too, not just the failed attempt. no row survives,
+    # so the same key is free to retry from scratch (docs/db/idempotency-basics.md)
+    reservation = await create_reservation(uow, data, guest_id)
+    key_row.status = IdempotencyKeyStatus.COMPLETED
+    key_row.reservation_id = reservation.id
     return reservation
