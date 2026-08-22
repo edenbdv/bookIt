@@ -23,6 +23,10 @@ class PhotoOrderMismatchError(Exception):
     pass
 
 
+class NotPropertyOwnerError(Exception):
+    pass
+
+
 async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
     property_ = Property(host_id=host_id, **data.model_dump())
     uow.properties.add(property_)
@@ -74,10 +78,17 @@ async def list_properties(
     return properties
 
 
-async def update_property(uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate) -> Property | None:
+async def update_property(
+    uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate, current_user_id: uuid.UUID
+) -> Property | None:
     property_ = await uow.properties.get_active_by_id(id)
     if property_ is None:
         return None
+    # checked after existence, not before -- 404 for a nonexistent property
+    # takes priority over 403 for a real one you don't own, same order as
+    # review/service.py's ReservationNotFoundError-before-NotAParticipantError
+    if property_.host_id != current_user_id:
+        raise NotPropertyOwnerError
     # exclude_unset=True: only include fields the client actually sent,
     # not every field with omitted ones defaulting to None. Without it,
     # {"title": "x"} would dump as {"title": "x", "description": None,
@@ -88,10 +99,14 @@ async def update_property(uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate) 
     return property_
 
 
-async def delete_property(uow: UnitOfWork, id: uuid.UUID) -> bool:
+async def delete_property(uow: UnitOfWork, id: uuid.UUID, current_user_id: uuid.UUID) -> bool:
     property_ = await uow.properties.get_active_by_id(id)
     if property_ is None:
         return False
+    # same order as update_property: 404 (via False, below) takes priority
+    # over 403 for a real property you don't own
+    if property_.host_id != current_user_id:
+        raise NotPropertyOwnerError
     # deliberately NOT uow.properties.delete(property_) -- that's the
     # inherited BaseRepository hard delete, which core/README.md's
     # "repository.py" section explicitly says won't stop misuse; soft
@@ -103,11 +118,13 @@ async def delete_property(uow: UnitOfWork, id: uuid.UUID) -> bool:
 
 
 async def add_photo(
-    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoCreate
+    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoCreate, current_user_id: uuid.UUID
 ) -> PropertyPhoto:
     property_ = await uow.properties.get_active_by_id(property_id)
     if property_ is None:
         raise PropertyNotFoundError
+    if property_.host_id != current_user_id:
+        raise NotPropertyOwnerError
 
     existing = await uow.property_photos.list_by_property_id(property_id)
     # max(...) + 1, not len(existing): a prior remove can leave gaps in
@@ -120,7 +137,9 @@ async def add_photo(
     return photo
 
 
-async def remove_photo(uow: UnitOfWork, property_id: uuid.UUID, photo_id: uuid.UUID) -> None:
+async def remove_photo(
+    uow: UnitOfWork, property_id: uuid.UUID, photo_id: uuid.UUID, current_user_id: uuid.UUID
+) -> None:
     # no property-exists/active check: a bogus property_id can't match a
     # real photo anyway, and cleanup should work even on a delisted listing
     photo = await uow.property_photos.get_by_id(photo_id)
@@ -128,15 +147,26 @@ async def remove_photo(uow: UnitOfWork, property_id: uuid.UUID, photo_id: uuid.U
     # property URL -- without it, property_id in the URL is decorative
     if photo is None or photo.property_id != property_id:
         raise PhotoNotFoundError
+
+    # get_by_id, not get_active_by_id -- ownership still applies to a
+    # delisted property's photos, same "works even when delisted" reasoning
+    # as the photo lookup above. The photo's own FK guarantees this property
+    # row exists, so no None check is needed here.
+    property_ = await uow.properties.get_by_id(property_id)
+    if property_.host_id != current_user_id:
+        raise NotPropertyOwnerError
+
     await uow.property_photos.delete(photo)
 
 
 async def reorder_photos(
-    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoReorder
+    uow: UnitOfWork, property_id: uuid.UUID, data: PropertyPhotoReorder, current_user_id: uuid.UUID
 ) -> list[PropertyPhoto]:
     property_ = await uow.properties.get_active_by_id(property_id)
     if property_ is None:
         raise PropertyNotFoundError
+    if property_.host_id != current_user_id:
+        raise NotPropertyOwnerError
 
     existing = await uow.property_photos.list_by_property_id(property_id)
     photos_by_id = {photo.id: photo for photo in existing}
