@@ -31,3 +31,8 @@ async def create_reservation(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="guest_count exceeds this property's max_guests",
         ) from exc
+    except service.ReservationConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="These dates are no longer available for this property",
+        ) from exc

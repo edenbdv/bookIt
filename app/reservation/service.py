@@ -1,6 +1,8 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.unit_of_work import UnitOfWork
 from app.reservation.models import Reservation
 from app.reservation.schemas import ReservationCreate
@@ -21,6 +23,10 @@ class SelfBookingError(Exception):
 
 
 class GuestCountExceededError(Exception):
+    pass
+
+
+class ReservationConflictError(Exception):
     pass
 
 
@@ -60,8 +66,16 @@ async def create_reservation(
         expires_at=datetime.now(UTC) + timedelta(minutes=PENDING_HOLD_MINUTES),
     )
     uow.reservations.add(reservation)
-    # flush, not commit: populates created_at, and is also what would raise
-    # the EXCLUDE constraint's IntegrityError on a genuine date conflict --
-    # catching that cleanly is BOOK-35, not this ticket
-    await uow.session.flush()
+    try:
+        # flush, not commit: populates created_at, and is also what actually
+        # runs the EXCLUDE constraint's check -- a genuine date conflict only
+        # surfaces as an IntegrityError here, not before. Caught broadly
+        # (not inspecting exc.orig's specific type) because every other
+        # possible cause is already ruled out above: property_id exists
+        # (fetched), guest_id is always valid (the authenticated user),
+        # check_out > check_in and guest_count > 0 are already schema-
+        # validated -- see docs/db/integrity-error-basics.md
+        await uow.session.flush()
+    except IntegrityError as exc:
+        raise ReservationConflictError from exc
     return reservation
