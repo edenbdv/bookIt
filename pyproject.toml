@@ -23,11 +23,18 @@ dependencies = [
 [tool.uv]
 package = false
 
+[tool.pytest.ini_options]
+# app/ isn't an installed package ([tool.uv] package = false above) --
+# pytest doesn't put the repo root on sys.path on its own, so imports
+# like `from app.reservation.models import ...` fail without this.
+pythonpath = ["."]
+
 [dependency-groups]
 dev = [
     "black>=26.5.1",
     "pre-commit>=4.6.1",
     "ruff>=0.16.2",
+    "pytest>=8.3",
 ]
 
 [tool.ruff]
