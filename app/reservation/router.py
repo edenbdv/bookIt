@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from app.auth.dependencies import get_current_user
@@ -44,3 +46,22 @@ async def create_reservation(
             status_code=status.HTTP_409_CONFLICT,
             detail="A request with this Idempotency-Key is already being processed",
         ) from exc
+
+
+# manual stand-in for Epic 8's (BOOK-10) payment webhook -- see
+# service.confirm_reservation's docstring-comment and
+# docs/domain-layer/state-machine-basics.md
+@router.post("/{reservation_id}/confirm", response_model=ReservationRead)
+async def confirm_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    uow: UnitOfWork = Depends(get_uow),
+) -> Reservation:
+    try:
+        return await service.confirm_reservation(uow, reservation_id)
+    except service.ReservationNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
+        ) from exc
+    except service.IllegalTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
