@@ -65,3 +65,25 @@ async def confirm_reservation(
         ) from exc
     except service.IllegalTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+# guest-only (BOOK-38) -- host-initiated cancellation is BOOK-80, not this
+@router.post("/{reservation_id}/cancel", response_model=ReservationRead)
+async def cancel_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    uow: UnitOfWork = Depends(get_uow),
+) -> Reservation:
+    try:
+        return await service.cancel_reservation(uow, reservation_id, current_user.id)
+    except service.ReservationNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
+        ) from exc
+    except service.NotReservationGuestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this reservation's guest may cancel it",
+        ) from exc
+    except service.IllegalTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

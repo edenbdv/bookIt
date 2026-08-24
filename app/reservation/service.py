@@ -50,6 +50,10 @@ class ReservationNotFoundError(Exception):
     pass
 
 
+class NotReservationGuestError(Exception):
+    pass
+
+
 # CANCELLED and COMPLETED map to an empty set: terminal states, no legal
 # transition out of either. BOOK-38 (cancel) and any future confirm/complete
 # logic should go through transition_to() below rather than setting
@@ -78,6 +82,24 @@ async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Res
     if reservation is None:
         raise ReservationNotFoundError
     transition_to(reservation, ReservationStatus.CONFIRMED)
+    return reservation
+
+
+# guest-only for now (BOOK-38) -- host-initiated cancellation is a
+# different, penalized action on real platforms (refund/notification/strike
+# behavior all differ), split off to BOOK-80 rather than folded in here
+async def cancel_reservation(
+    uow: UnitOfWork, reservation_id: uuid.UUID, current_user_id: uuid.UUID
+) -> Reservation:
+    reservation = await uow.reservations.get_by_id(reservation_id)
+    if reservation is None:
+        raise ReservationNotFoundError
+    # checked after existence, not before -- 404 for a nonexistent
+    # reservation takes priority over 403 for a real one you don't own,
+    # same order as property/service.py's update_property
+    if reservation.guest_id != current_user_id:
+        raise NotReservationGuestError
+    transition_to(reservation, ReservationStatus.CANCELLED)
     return reservation
 
 
