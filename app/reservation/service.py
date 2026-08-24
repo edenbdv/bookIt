@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 
 from app.core.unit_of_work import UnitOfWork
-from app.reservation.models import IdempotencyKey, IdempotencyKeyStatus, Reservation
+from app.reservation.models import (
+    IdempotencyKey,
+    IdempotencyKeyStatus,
+    Reservation,
+    ReservationStatus,
+)
 from app.reservation.schemas import ReservationCreate
 
 # docs/db/idempotency-basics.md's ~24h window
@@ -35,6 +40,45 @@ class ReservationConflictError(Exception):
 
 class IdempotencyKeyInProgressError(Exception):
     pass
+
+
+class IllegalTransitionError(Exception):
+    pass
+
+
+class ReservationNotFoundError(Exception):
+    pass
+
+
+# CANCELLED and COMPLETED map to an empty set: terminal states, no legal
+# transition out of either. BOOK-38 (cancel) and any future confirm/complete
+# logic should go through transition_to() below rather than setting
+# .status directly, so this table stays the one place the rules live.
+_LEGAL_TRANSITIONS: dict[ReservationStatus, set[ReservationStatus]] = {
+    ReservationStatus.PENDING: {ReservationStatus.CONFIRMED, ReservationStatus.CANCELLED},
+    ReservationStatus.CONFIRMED: {ReservationStatus.CANCELLED, ReservationStatus.COMPLETED},
+    ReservationStatus.CANCELLED: set(),
+    ReservationStatus.COMPLETED: set(),
+}
+
+
+def transition_to(reservation: Reservation, new_status: ReservationStatus) -> None:
+    if new_status not in _LEGAL_TRANSITIONS[reservation.status]:
+        raise IllegalTransitionError(
+            f"cannot transition reservation from {reservation.status} to {new_status}"
+        )
+    reservation.status = new_status
+
+
+# stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
+# transition_to() on success. Manually callable for now so the state machine
+# is testable end-to-end before payments exist -- see docs/domain-layer/state-machine-basics.md
+async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Reservation:
+    reservation = await uow.reservations.get_by_id(reservation_id)
+    if reservation is None:
+        raise ReservationNotFoundError
+    transition_to(reservation, ReservationStatus.CONFIRMED)
+    return reservation
 
 
 async def create_reservation(
