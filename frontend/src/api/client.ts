@@ -56,6 +56,7 @@ export function listProperties(filters: PropertyFilters): Promise<PropertyListIt
   if (filters.guests) params.set('guests', String(filters.guests))
   if (filters.min_price_cents != null) params.set('min_price_cents', String(filters.min_price_cents))
   if (filters.max_price_cents != null) params.set('max_price_cents', String(filters.max_price_cents))
+  if (filters.sort) params.set('sort', filters.sort)
 
   return request<PropertyListItem[]>(`/properties?${params.toString()}`)
 }

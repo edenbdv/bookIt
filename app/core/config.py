@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
+    # BOOK-77 ranking tunable: roughly how many reviews a property needs
+    # before its own average outweighs the global mean in the "recommended"
+    # sort. Raise it to make ranking more conservative (harder for a listing
+    # with few reviews to climb), lower it to make it more responsive.
+    # Environment-overridable so it can be tuned without a redeploy -- but
+    # note that overriding it per-environment means staging and production
+    # will order listings differently.
+    rating_smoothing_m: int = 5
+
 
 # lru_cache on a zero-argument function = singleton: .env is parsed once,
 # every caller gets the same cached Settings instance. See core/README.md.

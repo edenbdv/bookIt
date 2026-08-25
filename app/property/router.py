@@ -7,6 +7,7 @@ from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.property import service
 from app.property.models import Property, PropertyPhoto
+from app.property.repository import PropertySort
 from app.property.schemas import (
     PropertyCreate,
     PropertyDetailRead,
@@ -58,10 +59,17 @@ async def list_properties(
     guests: int | None = Query(default=None, gt=0),
     min_price_cents: int | None = Query(default=None, ge=0),
     max_price_cents: int | None = Query(default=None, ge=0),
+    # BOOK-77: "recommended" ranks by a Bayesian-smoothed average rating and
+    # is now the default, replacing BOOK-29's price ASC placeholder. Note this
+    # changes the response order of an existing endpoint for callers that
+    # don't pass ?sort= -- price is still available explicitly.
+    # No Query(...) wrapper needed: it carries no constraints beyond the type,
+    # and the Literal already yields a 422 for anything else.
+    sort: PropertySort = "recommended",
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[Property]:
     return await service.list_properties(
-        uow, limit, offset, city, guests, min_price_cents, max_price_cents
+        uow, limit, offset, city, guests, min_price_cents, max_price_cents, sort=sort
     )
 
 

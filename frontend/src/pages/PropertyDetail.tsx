@@ -116,7 +116,13 @@ export function PropertyDetail() {
         {reviewsState.status === 'error' && (
           <p className="text-sm text-gray-500">Could not load reviews.</p>
         )}
-        {reviewsState.status === 'ready' && <ReviewList reviews={reviewsState.reviews} />}
+        {reviewsState.status === 'ready' && (
+          <ReviewList
+            reviews={reviewsState.reviews}
+            ratingAvg={property.rating_avg}
+            reviewCount={property.review_count}
+          />
+        )}
       </div>
     </div>
   )

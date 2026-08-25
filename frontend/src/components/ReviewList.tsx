@@ -16,22 +16,31 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short' })
 }
 
-export function ReviewList({ reviews }: { reviews: Review[] }) {
+interface Props {
+  reviews: Review[]
+  // the server's aggregate over ALL reviews. Preferred over averaging
+  // `reviews` here, which only holds the fetched page (limit=50) and would
+  // silently drift once a property has more than that.
+  ratingAvg: number | null
+  reviewCount: number
+}
+
+export function ReviewList({ reviews, ratingAvg, reviewCount }: Props) {
   if (reviews.length === 0) {
     return <p className="text-sm text-gray-500">No reviews yet.</p>
   }
 
-  const average = reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
-
   return (
     <div>
-      <div className="mb-4 flex items-center gap-2 text-sm">
-        <Stars rating={Math.round(average)} />
-        <span className="font-semibold">{average.toFixed(1)}</span>
-        <span className="text-gray-500">
-          &middot; {reviews.length} review{reviews.length === 1 ? '' : 's'}
-        </span>
-      </div>
+      {ratingAvg !== null && (
+        <div className="mb-4 flex items-center gap-2 text-sm">
+          <Stars rating={Math.round(ratingAvg)} />
+          <span className="font-semibold">{ratingAvg.toFixed(1)}</span>
+          <span className="text-gray-500">
+            &middot; {reviewCount} review{reviewCount === 1 ? '' : 's'}
+          </span>
+        </div>
+      )}
 
       <ul className="space-y-5">
         {reviews.map((review) => (

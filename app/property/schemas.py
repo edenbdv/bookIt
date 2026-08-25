@@ -60,14 +60,27 @@ class PropertyPhotoRead(BaseModel):
     created_at: datetime
 
 
-class PropertyListRead(PropertyRead):
+class PropertyRatingRead(BaseModel):
+    """The review aggregate shared by the list and detail responses (BOOK-77).
+
+    Not on PropertyRead itself: create/update don't compute it, so it would
+    always be null there -- same reasoning as cover_photo.
+    """
+
+    # None (not 0.0) when a property has no reviews yet -- "unrated" and
+    # "rated zero" are different things, and the UI shows them differently
+    rating_avg: float | None
+    review_count: int
+
+
+class PropertyListRead(PropertyRead, PropertyRatingRead):
     # only the list endpoint computes this (one DISTINCT ON query per page,
     # docs/db/sql-basics.md#7) -- create/update don't, so it doesn't belong
     # on the shared PropertyRead they use (would always show null there)
     cover_photo: PropertyPhotoRead | None
 
 
-class PropertyDetailRead(PropertyRead):
+class PropertyDetailRead(PropertyRead, PropertyRatingRead):
     # the full gallery -- only get_property (single fetch) computes this;
     # PropertyRead stays photo-less for create/update, PropertyListRead
     # carries just a cover_photo for the list endpoint (see its comment)

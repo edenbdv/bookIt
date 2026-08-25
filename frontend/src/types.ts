@@ -35,6 +35,11 @@ export interface PropertyBase {
   max_guests: number
   price_per_night_cents: number
   created_at: string
+  // BOOK-77 review aggregate, on both the list and detail responses (but not
+  // create/update). null rating_avg means "no reviews yet", which the UI
+  // shows as "New" rather than as a zero score.
+  rating_avg: number | null
+  review_count: number
 }
 
 export interface PropertyListItem extends PropertyBase {
@@ -45,11 +50,14 @@ export interface PropertyDetail extends PropertyBase {
   photos: PropertyPhoto[]
 }
 
+export type PropertySort = 'price' | 'recommended'
+
 export interface PropertyFilters {
   city?: string
   guests?: number
   min_price_cents?: number
   max_price_cents?: number
+  sort?: PropertySort
 }
 
 export interface Review {

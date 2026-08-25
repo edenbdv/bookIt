@@ -33,6 +33,7 @@ PROPERTY_HAIFA_COTTAGE = uuid.UUID("00000000-0000-0000-0000-000000000102")
 RESERVATION_CAROL_TLV = uuid.UUID("00000000-0000-0000-0000-000000000201")
 RESERVATION_DAVE_HAIFA = uuid.UUID("00000000-0000-0000-0000-000000000202")
 RESERVATION_CAROL_HAIFA_CANCELLED = uuid.UUID("00000000-0000-0000-0000-000000000203")
+RESERVATION_BOB_TLV = uuid.UUID("00000000-0000-0000-0000-000000000204")
 
 PAYMENT_CAROL_TLV_CHARGE = uuid.UUID("00000000-0000-0000-0000-000000000301")
 PAYMENT_DAVE_HAIFA_CHARGE = uuid.UUID("00000000-0000-0000-0000-000000000302")
@@ -41,6 +42,8 @@ PAYMENT_CAROL_HAIFA_REFUND = uuid.UUID("00000000-0000-0000-0000-000000000304")
 
 REVIEW_CAROL_ON_TLV_LOFT = uuid.UUID("00000000-0000-0000-0000-000000000401")
 REVIEW_ALICE_ON_CAROL = uuid.UUID("00000000-0000-0000-0000-000000000402")
+REVIEW_DAVE_ON_HAIFA_COTTAGE = uuid.UUID("00000000-0000-0000-0000-000000000403")
+REVIEW_BOB_ON_TLV_LOFT = uuid.UUID("00000000-0000-0000-0000-000000000404")
 
 
 async def get_or_create[ModelT: Base](
@@ -164,6 +167,25 @@ async def seed(uow: UnitOfWork) -> None:
         total_cents=64000,
         status=ReservationStatus.CANCELLED,
     )
+    # the only COMPLETED stay in the seed set, and the only one whose dates are
+    # in the past -- a review is only allowed on a completed reservation
+    # (review/service.py), so without one the seed's reviews describe stays
+    # that haven't happened yet. Bob hosts the Haifa cottage but books the
+    # loft as a guest here; nothing stops a host from being someone else's
+    # guest. Dates avoid Carol's Sep 1-5 booking so the EXCLUDE constraint on
+    # overlapping reservations stays satisfied.
+    res_bob_tlv = await get_or_create(
+        session,
+        Reservation,
+        RESERVATION_BOB_TLV,
+        property_id=tlv_loft.id,
+        guest_id=host_bob.id,
+        check_in=date(2026, 8, 10),
+        check_out=date(2026, 8, 14),
+        guest_count=2,
+        total_cents=180000,
+        status=ReservationStatus.COMPLETED,
+    )
 
     await get_or_create(
         session,
@@ -222,6 +244,32 @@ async def seed(uow: UnitOfWork) -> None:
         author_id=host_alice.id,
         rating=5,
         comment="Great guest, left the place spotless.",
+    )
+    # deliberately a lower rating than the loft's, and on the cheaper property:
+    # it gives BOOK-77's "recommended" sort something to actually reorder --
+    # price ASC puts the cottage first, recommended puts the loft first, so the
+    # two sorts are distinguishable instead of coincidentally identical
+    await get_or_create(
+        session,
+        Review,
+        REVIEW_DAVE_ON_HAIFA_COTTAGE,
+        reservation_id=res_dave_haifa.id,
+        author_id=guest_dave.id,
+        rating=3,
+        comment="Nice view, but further from town than we expected.",
+    )
+    # a 4 alongside Carol's 5 on the same property: the loft's rating becomes a
+    # mean of differing scores rather than one rating echoed back, which is
+    # what makes it visible that the number is computed per request (BOOK-77)
+    # and not stored on the listing
+    await get_or_create(
+        session,
+        Review,
+        REVIEW_BOB_ON_TLV_LOFT,
+        reservation_id=res_bob_tlv.id,
+        author_id=host_bob.id,
+        rating=4,
+        comment="Comfortable and well located. Shower pressure could be better.",
     )
 
 

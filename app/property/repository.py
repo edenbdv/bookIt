@@ -1,9 +1,48 @@
+from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import Subquery, func, select
 
 from app.core.repository import BaseRepository
 from app.property.models import Property, PropertyPhoto
+from app.reservation.models import Reservation
+from app.review.models import Review
+
+PropertySort = Literal["price", "recommended"]
+
+
+def _review_stats_subquery() -> Subquery:
+    """Per-property rating sum, average and count, as a joinable subquery.
+
+    Reaches property_id through Reservation because Review has no property_id
+    column of its own, and counts guest->property reviews only -- a host's
+    review OF a guest says nothing about the listing. Same direction filter as
+    ReviewRepository.list_by_property_id.
+    """
+    return (
+        select(
+            Reservation.property_id.label("property_id"),
+            func.sum(Review.rating).label("rating_sum"),
+            func.avg(Review.rating).label("rating_avg"),
+            func.count(Review.id).label("review_count"),
+        )
+        .select_from(Review)
+        .join(Reservation, Review.reservation_id == Reservation.id)
+        .where(Review.author_id == Reservation.guest_id)
+        .group_by(Reservation.property_id)
+        .subquery()
+    )
+
+
+def _global_mean_rating():
+    """C in the Bayesian formula: mean guest->property rating across all listings."""
+    return (
+        select(func.avg(Review.rating))
+        .select_from(Review)
+        .join(Reservation, Review.reservation_id == Reservation.id)
+        .where(Review.author_id == Reservation.guest_id)
+        .scalar_subquery()
+    )
 
 
 class PropertyRepository(BaseRepository[Property]):
@@ -23,12 +62,32 @@ class PropertyRepository(BaseRepository[Property]):
         guests: int | None = None,
         min_price_cents: int | None = None,
         max_price_cents: int | None = None,
+        # keyword-only and required, no defaults: router.py is the single place
+        # the default sort is declared. A default here would be unreachable
+        # (every caller passes one) and free to silently drift from the real
+        # one. Keyword-only because a required arg can't follow defaulted ones.
+        *,
+        sort: PropertySort,
+        # Bayesian smoothing constant (settings.rating_smoothing_m), passed in
+        # rather than read here so the repository stays pure data access with
+        # no config dependency -- service.py owns reading settings.
+        smoothing_m: int,
     ) -> list[Property]:
         # every filter is optional -- omit one, it just doesn't narrow the
         # results. deleted_at IS NULL isn't optional: browsing/search should
         # never surface a delisted property (same reasoning as
         # get_active_by_id above).
-        stmt = select(Property).where(Property.deleted_at.is_(None))
+        #
+        # LEFT (outer) join, not inner: a property with no reviews must still
+        # appear in the listing, with NULL stats. The aggregate rides along on
+        # the main query rather than being fetched separately like cover_photo
+        # -- sorting by it requires it in this statement.
+        stats = _review_stats_subquery()
+        stmt = (
+            select(Property, stats.c.rating_avg, stats.c.review_count)
+            .outerjoin(stats, Property.id == stats.c.property_id)
+            .where(Property.deleted_at.is_(None))
+        )
         if city is not None:
             # case-insensitive: a guest typing "tel aviv" should still match
             # a listing stored as "Tel Aviv". This can't use the plain
@@ -49,16 +108,57 @@ class PropertyRepository(BaseRepository[Property]):
             stmt = stmt.where(Property.price_per_night_cents <= max_price_cents)
 
         # order_by is required for LIMIT/OFFSET to paginate consistently
-        # (docs/db/sql-basics.md#5); id is a tiebreaker since price alone
-        # isn't unique. price ASC is a placeholder default, not the intended
-        # long-term one -- Airbnb/Booking.com default to a "Recommended"
-        # sort (avg. rating), which needs BOOK-73's Review rows aggregated
-        # first. See the BOOK-29/BOOK-73 comment thread on this.
-        stmt = stmt.order_by(Property.price_per_night_cents.asc(), Property.id.asc())
-        stmt = stmt.limit(limit).offset(offset)
+        # (docs/db/sql-basics.md#5); id is the final tiebreaker in both sorts
+        # since neither price nor score is unique.
+        #
+        # "recommended" is the default as of BOOK-77, replacing the price ASC
+        # placeholder BOOK-29 shipped with. Price ASC was never the intended
+        # long-term default -- it was what existed before Review rows did.
+        # Price remains available as an explicit choice.
+        if sort == "recommended":
+            # W = (sum_of_ratings + m*C) / (v + m) -- the algebraically
+            # identical "m phantom reviews at the global mean" form of
+            # (v/(v+m))*R + (m/(v+m))*C. Preferred here because it needs one
+            # division instead of two, and because the numerator is numeric
+            # (m*C), which keeps Postgres out of integer division.
+            #
+            # coalesce handles the no-reviews case: rating_sum/review_count
+            # are NULL from the outer join, so the score collapses to exactly
+            # C -- an unrated property ranks at the global mean (mid-table),
+            # not last. Deliberate: a new listing is unknown, not bad, and
+            # burying it means it can never earn a first review.
+            global_mean = func.coalesce(_global_mean_rating(), 0)
+            rating_sum = func.coalesce(stats.c.rating_sum, 0)
+            review_count = func.coalesce(stats.c.review_count, 0)
+            score = (rating_sum + smoothing_m * global_mean) / (review_count + smoothing_m)
+            stmt = stmt.order_by(score.desc(), Property.price_per_night_cents.asc())
+        else:
+            stmt = stmt.order_by(Property.price_per_night_cents.asc())
+        stmt = stmt.order_by(Property.id.asc()).limit(limit).offset(offset)
 
-        result = await self.session.scalars(stmt)
-        return list(result)
+        # execute, not scalars: the rows carry the joined aggregate columns
+        # alongside the Property entity
+        result = await self.session.execute(stmt)
+        properties = []
+        for property_, rating_avg, review_count in result:
+            # not mapped columns -- attached so PropertyListRead's
+            # from_attributes=True can read them as flat fields (same
+            # technique as cover_photo); never persisted
+            property_.rating_avg = round(float(rating_avg), 2) if rating_avg is not None else None
+            property_.review_count = review_count or 0
+            properties.append(property_)
+        return properties
+
+    async def get_review_stats(self, property_id: UUID) -> tuple[float | None, int]:
+        """(average rating, review count) for one property, for the detail page."""
+        stats = _review_stats_subquery()
+        stmt = select(stats.c.rating_avg, stats.c.review_count).where(
+            stats.c.property_id == property_id
+        )
+        row = (await self.session.execute(stmt)).first()
+        if row is None or row.rating_avg is None:
+            return None, 0
+        return round(float(row.rating_avg), 2), row.review_count
 
     async def list_distinct_cities(self) -> list[str]:
         # powers the search bar's autocomplete -- excludes delisted
