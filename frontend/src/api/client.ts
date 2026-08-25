@@ -10,14 +10,57 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
+/**
+ * Auth plumbing supplied by AuthProvider at mount.
+ *
+ * This module can't read React state, and duplicating the localStorage key
+ * here would give the session two owners. Instead the provider — which owns
+ * the session — registers accessors, and this module just calls them.
+ */
+export interface AuthHooks {
+  getAccessToken: () => string | null
+  /** Returns a fresh access token, or null if the session can't be renewed. */
+  refreshAccessToken: () => Promise<string | null>
+}
+
+let authHooks: AuthHooks | null = null
+
+export function configureAuth(hooks: AuthHooks | null): void {
+  authHooks = hooks
+}
+
+interface RequestOptions {
+  /** Skip auth entirely. Set on /auth/* so a 401 there can't recurse into refresh. */
+  anonymous?: boolean
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  { anonymous = false }: RequestOptions = {},
+): Promise<T> {
+  const send = (token: string | null) => {
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      ...init?.headers,
-    },
-  })
+      ...(init?.headers as Record<string, string> | undefined),
+    }
+    // only when a session exists -- public endpoints must keep working
+    // logged out, and an empty Bearer header is worse than none
+    if (token) headers.Authorization = `Bearer ${token}`
+    return fetch(`${API_BASE_URL}${path}`, { ...init, headers })
+  }
+
+  const token = anonymous ? null : (authHooks?.getAccessToken() ?? null)
+  let res = await send(token)
+
+  // access tokens last 15 minutes (settings.access_token_expire_minutes), so
+  // expiring mid-session is routine rather than exceptional: renew once and
+  // replay the request before surfacing an error. Only when we actually sent
+  // a token -- a 401 without one is a genuine "you must log in".
+  if (res.status === 401 && !anonymous && token && authHooks) {
+    const fresh = await authHooks.refreshAccessToken()
+    if (fresh) res = await send(fresh)
+  }
 
   if (!res.ok) {
     // FastAPI's HTTPException body shape is {"detail": "..."} -- fall back to
@@ -35,18 +78,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+// every /auth/* call is `anonymous`: they establish or renew the session
+// rather than consuming it, and a 401 from one must surface to the caller
+// instead of triggering a refresh that would recurse straight back here
+
 export function signup(email: string, password: string, displayName: string): Promise<User> {
-  return request<User>('/auth/signup', {
-    method: 'POST',
-    body: JSON.stringify({ email, password, display_name: displayName }),
-  })
+  return request<User>(
+    '/auth/signup',
+    { method: 'POST', body: JSON.stringify({ email, password, display_name: displayName }) },
+    { anonymous: true },
+  )
 }
 
 export function login(email: string, password: string): Promise<Tokens> {
-  return request<Tokens>('/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ email, password }),
-  })
+  return request<Tokens>(
+    '/auth/login',
+    { method: 'POST', body: JSON.stringify({ email, password }) },
+    { anonymous: true },
+  )
+}
+
+export function refreshTokens(refreshToken: string): Promise<Tokens> {
+  // mints a fresh pair, but does NOT invalidate the refresh token spent to
+  // get it -- that one stays valid for its full refresh_token_expire_days
+  // (verified: replaying the same one repeatedly still returns 200). Rotation
+  // and revocation are BOOK-78. So storing the returned refresh_token is
+  // housekeeping, not a security boundary.
+  return request<Tokens>(
+    '/auth/refresh',
+    { method: 'POST', body: JSON.stringify({ refresh_token: refreshToken }) },
+    { anonymous: true },
+  )
 }
 
 export function listProperties(filters: PropertyFilters): Promise<PropertyListItem[]> {
