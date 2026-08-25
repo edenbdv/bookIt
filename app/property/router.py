@@ -30,6 +30,13 @@ async def create_property(
     return await service.create_property(uow, data, current_user.id)
 
 
+@router.get("/cities", response_model=list[str])
+# registered before "/{property_id}" -- otherwise "cities" would be matched
+# as that route's property_id path param first and fail UUID validation
+async def list_cities(uow: UnitOfWork = Depends(get_uow)) -> list[str]:
+    return await service.list_cities(uow)
+
+
 @router.get("/{property_id}", response_model=PropertyDetailRead)
 async def get_property(
     property_id: uuid.UUID,

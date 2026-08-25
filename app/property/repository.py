@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.repository import BaseRepository
 from app.property.models import Property, PropertyPhoto
@@ -30,8 +30,13 @@ class PropertyRepository(BaseRepository[Property]):
         # get_active_by_id above).
         stmt = select(Property).where(Property.deleted_at.is_(None))
         if city is not None:
-            # uses the existing ix_properties_city index (docs/db/indexes-basics.md)
-            stmt = stmt.where(Property.city == city)
+            # case-insensitive: a guest typing "tel aviv" should still match
+            # a listing stored as "Tel Aviv". This can't use the plain
+            # ix_properties_city btree index (it would need a matching
+            # expression index on lower(city), or the citext extension) --
+            # fine at today's data volume, worth revisiting if city search
+            # ever shows up slow.
+            stmt = stmt.where(func.lower(Property.city) == city.lower())
         if guests is not None:
             # guests = size of the group searching, NOT an upper bound --
             # >= on purpose: a property that fits more than `guests` still
@@ -52,6 +57,19 @@ class PropertyRepository(BaseRepository[Property]):
         stmt = stmt.order_by(Property.price_per_night_cents.asc(), Property.id.asc())
         stmt = stmt.limit(limit).offset(offset)
 
+        result = await self.session.scalars(stmt)
+        return list(result)
+
+    async def list_distinct_cities(self) -> list[str]:
+        # powers the search bar's autocomplete -- excludes delisted
+        # properties so a city never gets suggested if searching it would
+        # always come back empty
+        stmt = (
+            select(Property.city)
+            .where(Property.deleted_at.is_(None))
+            .distinct()
+            .order_by(Property.city.asc())
+        )
         result = await self.session.scalars(stmt)
         return list(result)
 

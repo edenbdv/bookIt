@@ -32,7 +32,11 @@ async def signup(uow: UnitOfWork, data: UserCreate) -> User:
 
     # role isn't part of UserCreate (schemas.py) -- always starts at the
     # model's default (UserRole.USER); granting ADMIN is a separate action
-    user = User(email=data.email, hashed_password=hash_password(data.password))
+    user = User(
+        email=data.email,
+        display_name=data.display_name,
+        hashed_password=hash_password(data.password),
+    )
     uow.users.add(user)
     # flush, not commit: populates the server-generated created_at so the
     # response can include it -- commit happens once at request end, in

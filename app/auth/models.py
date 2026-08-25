@@ -26,6 +26,12 @@ class User(Base):
     # client-side default: id is available immediately, no DB round-trip needed
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(unique=True, index=True)
+    # the only publicly-showable name: email must never leave the API on a
+    # public endpoint (see ReviewRead). Nullable here but REQUIRED in
+    # UserCreate -- rows predating this column have no name and aren't
+    # backfilled, so the column has to tolerate NULL even though every new
+    # signup must supply one.
+    display_name: Mapped[str | None]
     hashed_password: Mapped[str]
     # values_callable: store the enum's string value ("user"), not its member
     # name ("USER") — SQLAlchemy defaults to the name, which would silently

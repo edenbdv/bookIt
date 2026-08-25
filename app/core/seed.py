@@ -68,6 +68,7 @@ async def seed(uow: UnitOfWork) -> None:
         User,
         HOST_ALICE,
         email="alice.host@example.com",
+        display_name="Alice",
         hashed_password="seed-data-not-a-real-hash",
         role=UserRole.USER,
     )
@@ -76,6 +77,7 @@ async def seed(uow: UnitOfWork) -> None:
         User,
         HOST_BOB,
         email="bob.host@example.com",
+        display_name="Bob",
         hashed_password="seed-data-not-a-real-hash",
         role=UserRole.USER,
     )
@@ -84,6 +86,7 @@ async def seed(uow: UnitOfWork) -> None:
         User,
         GUEST_CAROL,
         email="carol.guest@example.com",
+        display_name="Carol",
         hashed_password="seed-data-not-a-real-hash",
         role=UserRole.USER,
     )
@@ -92,6 +95,7 @@ async def seed(uow: UnitOfWork) -> None:
         User,
         GUEST_DAVE,
         email="dave.guest@example.com",
+        display_name="Dave",
         hashed_password="seed-data-not-a-real-hash",
         role=UserRole.USER,
     )

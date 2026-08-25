@@ -26,6 +26,12 @@ class ReviewRead(BaseModel):
     id: uuid.UUID
     reservation_id: uuid.UUID
     author_id: uuid.UUID
+    # the author's display_name, flattened on in service.py (Pydantic's
+    # from_attributes does same-name attribute access, not dotted paths, so
+    # it can't reach review.author.display_name by itself). NULL for authors
+    # predating the column. Never the author's email: this endpoint
+    # (GET /properties/{id}/reviews) is public and unauthenticated.
+    author_name: str | None
     rating: int
     comment: str
     created_at: datetime

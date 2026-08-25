@@ -8,6 +8,10 @@ from app.auth.models import UserRole
 
 class UserCreate(BaseModel):
     email: EmailStr
+    # required (min_length=1 rejects ""), unlike the nullable column on the
+    # model -- every NEW account must have a name, pre-existing rows keep
+    # NULL. This is what a public review is attributed to instead of email.
+    display_name: str = Field(min_length=1)
     # plain password from the client; service.py hashes it into
     # User.hashed_password before it ever reaches the repository
     password: str = Field(min_length=8)
@@ -21,6 +25,7 @@ class UserRead(BaseModel):
 
     id: uuid.UUID
     email: EmailStr
+    display_name: str | None
     role: UserRole
     created_at: datetime
     # no hashed_password -- see pydantic-schemas-basics.md section 2

@@ -78,6 +78,10 @@ async def list_properties(
     return properties
 
 
+async def list_cities(uow: UnitOfWork) -> list[str]:
+    return await uow.properties.list_distinct_cities()
+
+
 async def update_property(
     uow: UnitOfWork, id: uuid.UUID, data: PropertyUpdate, current_user_id: uuid.UUID
 ) -> Property | None:

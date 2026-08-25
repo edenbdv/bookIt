@@ -60,6 +60,12 @@ async def create_review(
         await uow.session.flush()
     except IntegrityError as exc:
         raise DuplicateReviewError from exc
+    # same non-persisted attribute as list_reviews_for_property below, so the
+    # 201 body carries the name too rather than a null the list endpoint
+    # would then fill in. review.author isn't loaded here (no eager-load on
+    # a freshly-constructed row), so read it off the User directly.
+    author = await uow.users.get_by_id(author_id)
+    review.author_name = author.display_name
     return review
 
 
@@ -69,4 +75,11 @@ async def list_reviews_for_property(
     property_ = await uow.properties.get_active_by_id(property_id)
     if property_ is None:
         raise PropertyNotFoundError
-    return await uow.reviews.list_by_property_id(property_id, limit, offset)
+    reviews = await uow.reviews.list_by_property_id(property_id, limit, offset)
+    for review in reviews:
+        # not a mapped column -- attached purely so ReviewRead's
+        # from_attributes=True can read it as a flat field (same technique as
+        # property/service.py's cover_photo); never persisted. The author is
+        # eager-loaded by the repository, so this touches no DB.
+        review.author_name = review.author.display_name
+    return reviews
