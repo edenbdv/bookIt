@@ -25,7 +25,19 @@ export function PropertyCard({ property }: { property: PropertyListItem }) {
         )}
       </div>
       <div className="pt-2">
-        <h3 className="truncate text-[15px] font-semibold text-gray-900">{property.title}</h3>
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="truncate text-[15px] font-semibold text-gray-900">{property.title}</h3>
+          {property.rating_avg === null ? (
+            // no reviews yet -- "New" reads better than "0.0", which would
+            // look like a terrible score rather than an absent one
+            <span className="shrink-0 text-xs font-semibold text-gray-500">New</span>
+          ) : (
+            <span className="shrink-0 text-sm text-gray-700">
+              <span className="text-amber-500">★</span> {property.rating_avg.toFixed(1)}
+              <span className="text-gray-500"> ({property.review_count})</span>
+            </span>
+          )}
+        </div>
         <p className="text-sm text-gray-500">
           {property.city}, {property.country}
         </p>

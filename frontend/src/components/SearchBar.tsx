@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { listCities } from '../api/client'
-import type { PropertyFilters } from '../types'
+import type { PropertyFilters, PropertySort } from '../types'
 
 interface Props {
   onSearch: (filters: PropertyFilters) => void
@@ -12,6 +12,9 @@ export function SearchBar({ onSearch }: Props) {
   const [minPrice, setMinPrice] = useState('')
   const [maxPrice, setMaxPrice] = useState('')
   const [cityOptions, setCityOptions] = useState<string[]>([])
+  // matches the API's own default (BOOK-77), so the dropdown reflects the
+  // order actually being shown before the user touches it
+  const [sort, setSort] = useState<PropertySort>('recommended')
 
   useEffect(() => {
     listCities()
@@ -21,14 +24,27 @@ export function SearchBar({ onSearch }: Props) {
       .catch(() => {})
   }, [])
 
-  function submit(e: FormEvent) {
-    e.preventDefault()
-    onSearch({
+  function buildFilters(nextSort: PropertySort): PropertyFilters {
+    return {
       city: city.trim() || undefined,
       guests: guests ? Number(guests) : undefined,
       min_price_cents: minPrice ? Math.round(Number(minPrice) * 100) : undefined,
       max_price_cents: maxPrice ? Math.round(Number(maxPrice) * 100) : undefined,
-    })
+      sort: nextSort,
+    }
+  }
+
+  function submit(e: FormEvent) {
+    e.preventDefault()
+    onSearch(buildFilters(sort))
+  }
+
+  function changeSort(next: PropertySort) {
+    setSort(next)
+    // re-search immediately rather than waiting for Search to be pressed --
+    // a sort control that does nothing until you press another button reads
+    // as broken. Carries the currently-typed filters along with it.
+    onSearch(buildFilters(next))
   }
 
   function clear() {
@@ -36,6 +52,7 @@ export function SearchBar({ onSearch }: Props) {
     setGuests('')
     setMinPrice('')
     setMaxPrice('')
+    setSort('recommended')
     onSearch({})
   }
 
@@ -83,9 +100,24 @@ export function SearchBar({ onSearch }: Props) {
       <button type="submit" className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90">
         Search
       </button>
+
       <button type="button" onClick={clear} className="text-sm text-gray-500 underline">
         Clear
       </button>
+
+      {/* ml-auto pushes the sort control to the far right, away from the
+          filter inputs -- it acts on results, it isn't another filter */}
+      <label className="ml-auto flex items-center gap-2 text-sm text-gray-500">
+        Sort
+        <select
+          className={inputClass}
+          value={sort}
+          onChange={(e) => changeSort(e.target.value as PropertySort)}
+        >
+          <option value="recommended">Recommended</option>
+          <option value="price">Price: low to high</option>
+        </select>
+      </label>
     </form>
   )
 }

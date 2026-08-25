@@ -1,8 +1,10 @@
 import uuid
 from datetime import UTC, datetime
 
+from app.core.config import get_settings
 from app.core.unit_of_work import UnitOfWork
 from app.property.models import Property, PropertyPhoto
+from app.property.repository import PropertySort
 from app.property.schemas import (
     PropertyCreate,
     PropertyPhotoCreate,
@@ -45,6 +47,9 @@ async def get_property(uow: UnitOfWork, id: uuid.UUID) -> Property | None:
     # PropertyDetailRead's from_attributes=True can read it (same technique
     # as list_properties' cover_photo above); never persisted
     property_.photos = await uow.property_photos.list_by_property_id(id)
+    # same non-persisted-attribute technique as cover_photo/photos above, so
+    # PropertyDetailRead can read the BOOK-77 aggregate as flat fields
+    property_.rating_avg, property_.review_count = await uow.properties.get_review_stats(id)
     return property_
 
 
@@ -56,6 +61,10 @@ async def list_properties(
     guests: int | None = None,
     min_price_cents: int | None = None,
     max_price_cents: int | None = None,
+    # keyword-only and required for the same reason as the repository's: the
+    # default belongs to router.py alone
+    *,
+    sort: PropertySort,
 ) -> list[Property]:
     properties = await uow.properties.list_filtered(
         limit=limit,
@@ -64,6 +73,10 @@ async def list_properties(
         guests=guests,
         min_price_cents=min_price_cents,
         max_price_cents=max_price_cents,
+        sort=sort,
+        # config lives here, not in the repository -- see get_settings()'s
+        # singleton note in core/README.md
+        smoothing_m=get_settings().rating_smoothing_m,
     )
 
     property_ids = [property_.id for property_ in properties]
