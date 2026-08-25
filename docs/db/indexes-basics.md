@@ -54,7 +54,26 @@ Reading the four leaves left to right gives alphabetical order (`Ashdod → Haif
 
 Same underlying "eliminate most of what's left" idea as before — but because each page holds ~200 keys instead of 1, each single disk read eliminates ~200x more of the search space.
 
-**One more real-world detail:** Postgres also caches recently-used pages in memory (`shared_buffers`) across queries, so a busy index's upper levels (root, often the first branch level) tend to stay cached — effectively free after the first access. It's mainly the much larger, more varied leaf level that actually hits disk regularly. That caching is an optimization layered on top of the multi-level structure, not a replacement for it — the multi-level shape is what keeps the *worst case* small even with a cold cache.
+**One more real-world detail:** Postgres also caches recently-used pages in memory (`shared_buffers`, plus the OS's own page cache on top) across queries — and this isn't limited to index pages. It applies just as much to the table's own **heap pages**, the actual row data being indexed. A **hot table** is exactly this: a table read often enough that its pages — heap *and* index — stay resident in memory instead of being evicted, so a repeated query against it typically never touches disk at all. For a busy index specifically, it's mainly the upper levels (root, often the first branch level) that stay reliably cached; the much larger, more varied leaf level is what still hits disk regularly on a cold cache. That caching is an optimization layered on top of the multi-level structure, not a replacement for it — the multi-level shape is what keeps the *worst case* small even with a cold cache.
+
+**Worth being precise about what "hot" buys you, and what it doesn't.** A hot table being fully RAM-resident makes the *I/O* free — but Postgres still has to parse the query, plan it, and, for anything beyond a plain indexed lookup, actually *execute* joins, aggregates, and sorts against those in-memory rows. That execution is real CPU work, separate from disk I/O entirely, and it reruns on every single request no matter how hot the table is. That's precisely the gap an application-level cache (Redis) is built to skip — see [`redis-basics.md`](../cache/redis-basics.md) §1 for the full breakdown of what a cache does and doesn't save once the DB is already RAM-resident.
+
+### 3a. What actually makes a table "hot" — eviction, and the two cache layers
+
+"Hot" isn't a label attached to a table — it's a description of *behavior*, and it can change over time. The mechanism behind it:
+
+**`shared_buffers` is a fixed-size cache of pages, not unlimited storage.** It's configured to some fixed amount of RAM at startup (e.g. a few hundred MB to a few GB, a fraction of total system RAM — Postgres never assumes it owns the whole machine). When a query needs a page:
+
+1. Postgres checks: is this page already sitting in `shared_buffers`? If yes — used directly, **zero disk I/O**.
+2. If not, it has to be fetched. But there's a second layer below `shared_buffers`: the **OS's own page cache** — the operating system independently keeps recently-read files in RAM too, underneath Postgres entirely. So a page can be "not in `shared_buffers`" and still cost nothing but a RAM copy, if the OS still has it. Only when *neither* layer has it does an actual physical disk read happen — milliseconds instead of nanoseconds, roughly a million times slower (same ratio §3 uses for page reads vs. in-memory comparisons).
+3. Whatever gets fetched is loaded into `shared_buffers` for next time.
+
+**Eviction is what makes "hot" possible — and "cold" inevitable.** Because `shared_buffers` is fixed-size, once it's full, loading a new page means kicking an old one out (roughly LRU-like: least-recently-used pages go first). That's the whole mechanism:
+
+- A **hot table** is one whose pages get re-requested often enough that they're essentially never idle long enough to be evicted before the next query needs them again. In steady state, it just permanently lives in memory.
+- A **cold table** is one queried rarely enough that, between one access and the next, its pages get pushed out by other tables' more frequent traffic — so the *next* access pays for a real fetch (disk, or at best the OS layer) all over again.
+
+**Concretely, in this project:** `properties` is read on nearly every request — `GET /properties` hits it every search, `GET /properties/{id}` every detail view. It's small enough and requested often enough that its pages (and `ix_properties_city`'s upper levels) realistically never leave `shared_buffers` once the app has been running a few minutes. It becomes hot *for free*, with zero caching code written — which is exactly why §1's redirect to `redis-basics.md` matters: the thing Epic 5 adds isn't "make `properties` reads faster by getting them into RAM" (Postgres already did that on its own) — it's skipping the *execution* (the JOIN, the aggregate, the sort) that a hot table still has to redo from scratch every single time.
 
 ## 4. It's actually a B**+**Tree — two structural differences that matter
 
@@ -100,7 +119,10 @@ The B-tree just described has one hard requirement: every value needs a single, 
 | B-tree | Sorted, multi-level tree letting you rule out most remaining values at each step — Postgres's default index, needs one linear sort order |
 | Multi-level / page | Each B-tree node holds many keys (sized to one disk page), so a handful of levels covers millions of rows in only a few page reads |
 | Why fewer levels matters | The real cost is disk reads (page fetches), not comparisons — once a page is in memory, searching within it is ~free |
-| `shared_buffers` | Postgres's page cache — keeps hot pages (often an index's upper levels) in memory across queries, on top of the multi-level structure |
+| `shared_buffers` | Postgres's page cache — keeps hot pages (table heap *and* index) in memory across queries, on top of the multi-level structure |
+| Hot table | A table read often enough that its pages stay resident in `shared_buffers`/OS cache instead of being evicted — removes disk I/O, not query *execution* cost (parsing, joins, aggregates, sorts). See `redis-basics.md` for why that gap is what an app-level cache actually targets |
+| Eviction (LRU) | `shared_buffers` is fixed-size — a full cache kicks out the least-recently-used page to fit a new one. This is *why* cold tables stay cold: their pages get evicted between accesses |
+| OS page cache | A second RAM layer beneath `shared_buffers`, kept by the operating system itself. A page can miss Postgres's own cache and still cost nothing but a RAM copy if the OS still has it |
 | B+Tree | What Postgres's "B-tree" actually is: only leaf nodes hold row-pointers (TIDs); internal nodes hold keys + child-pointers, for routing only |
 | Linked leaves | Leaf pages point to their neighbors, so range scans/`ORDER BY` just walk sideways instead of re-traversing the tree |
 | Lehman & Yao | The specific B+Tree variant Postgres uses — adds a "high key" + right-links so searches don't need read locks during concurrent page splits |
