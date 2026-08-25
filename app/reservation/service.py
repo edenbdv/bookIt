@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.unit_of_work import UnitOfWork
@@ -110,24 +111,30 @@ async def create_reservation(
     if property_ is None:
         raise PropertyNotFoundError
 
-    # a host can't book a stay at their own property (er-diagram.md's
-    # "Deliberately not modelled yet" -- explicitly called out as this
-    # ticket's job)
+    # host booking their own property: out of scope, see er-diagram.md
     if property_.host_id == guest_id:
         raise SelfBookingError
 
-    # cross-table rule, deliberately left out of ReservationCreate's own
-    # validation (see its comment in schemas.py) -- needs property's row
+    # cross-table rule, can't live in ReservationCreate's own validation
     if data.guest_count > property_.max_guests:
         raise GuestCountExceededError
 
-    # price_per_night_cents is read here exactly once, to compute total_cents
-    # now -- the stored result becomes the snapshot. Nothing ever re-reads
-    # property_.price_per_night_cents again later to recompute total_cents
-    # (e.g. on a future GET), so a later price change on the property can't
-    # retroactively alter what this guest already agreed to pay.
+    # snapshot total_cents now -- a later price change shouldn't retroactively
+    # alter what this guest already agreed to pay
     nights = (data.check_out - data.check_in).days
     total_cents = nights * property_.price_per_night_cents
+
+    # EXCLUDE uses a GiST index, not a UNIQUE B-tree -- overlapping rows are
+    # separate physical entries, so two concurrent inserts can both land
+    # uncommitted at once and then deadlock discovering each other (a
+    # UNIQUE/B-tree insert can't, only one row can ever hold that exact key).
+    # This lock removes that race by serializing inserts per property_id.
+    # xact-scoped: released automatically on commit/rollback.
+    # (docs/db/concurrency-basics.md sec.4.1)
+    await uow.session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:property_id))"),
+        {"property_id": str(data.property_id)},
+    )
 
     reservation = Reservation(
         property_id=data.property_id,
@@ -140,14 +147,9 @@ async def create_reservation(
     )
     uow.reservations.add(reservation)
     try:
-        # flush, not commit: populates created_at, and is also what actually
-        # runs the EXCLUDE constraint's check -- a genuine date conflict only
-        # surfaces as an IntegrityError here, not before. Caught broadly
-        # (not inspecting exc.orig's specific type) because every other
-        # possible cause is already ruled out above: property_id exists
-        # (fetched), guest_id is always valid (the authenticated user),
-        # check_out > check_in and guest_count > 0 are already schema-
-        # validated -- see docs/db/integrity-error-basics.md
+        # flush, not commit: runs the EXCLUDE constraint's check now. Caught
+        # broadly since every other integrity cause is already ruled out
+        # above -- see docs/db/integrity-error-basics.md
         await uow.session.flush()
     except IntegrityError as exc:
         raise ReservationConflictError from exc

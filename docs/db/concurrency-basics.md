@@ -45,9 +45,37 @@ Section 1's race relied on both requests' `SELECT` running *before* either `INSE
 
 So the two inserts aren't executed in parallel — B is made to wait its turn, automatically, as an inherent part of how a unique index maintains itself under concurrent writers. Nobody's code requested this waiting; it isn't `FOR UPDATE`, and it isn't a bug — it's just what "checking a unique index correctly under concurrency" requires.
 
+**How can B "see" A's conflicting entry at step 3, if A hasn't committed yet?** This looks like it contradicts normal MVCC isolation — under a regular `SELECT`, a transaction genuinely can't see another transaction's uncommitted rows, by design. But index maintenance doesn't go through that same MVCC snapshot machinery at all. A B-tree/GiST index is a shared physical structure every inserting transaction writes into directly, regardless of commit status — it has to be, because uniqueness can only be enforced by comparing against *everything currently being inserted*, not just what's already durably committed. If the index only compared against committed rows, two transactions inserting the same key at nearly the same instant would each check, see nothing committed yet, and both proceed — the exact race this constraint exists to prevent. So index insertion is a deliberate, narrow exception to normal row-visibility rules: it's allowed to notice an in-flight, uncommitted conflicting entry specifically so it can block on it, rather than being blind to it and letting both writers through.
+
 **This serialization is scoped only to the actual conflict, not the whole database.** A transaction inserting a payment for reservation X and another inserting an unrelated payment for reservation Y at the same instant share no key, so neither blocks on the other — both proceed with real parallelism across Postgres's separate backend processes. Postgres doesn't go single-threaded just because *something* concurrent is happening; only two writers racing for the *same* contested key ever get serialized this way.
 
+### 4.1 `EXCLUDE` constraints (GiST) can deadlock this way — plain `UNIQUE` (B-tree) can't
+
+`BOOK-39`'s concurrent-load script hit this for real, non-deterministically, on `Reservation`'s `no_overlapping_reservations` constraint:
+
+```
+asyncpg.exceptions.DeadlockDetectedError: deadlock detected
+DETAIL: Process 2618 waits for ShareLock on transaction 1023; blocked by process 2631.
+        Process 2631 waits for ShareLock on transaction 1021; blocked by process 2618.
+```
+
+This is a genuine cycle — each process ended up waiting on the *other* — which section 4's A/B walkthrough is structurally incapable of producing. The difference is where the serialization actually happens:
+
+**`UNIQUE` B-tree: the physical write itself is the serializing point.** A given key has exactly one slot in the tree. When two transactions try to insert the *same* key, whichever is second is blocked at the act of writing to that slot — it never becomes a present-but-uncommitted row at all until the first resolves. Only one inserter can ever be "in the index" for that key at a time, so a wait can only ever point one direction (second waits for first). A cycle needs two things each waiting on the other; a single shared slot with a strict arrival order can't produce one.
+
+**GiST `EXCLUDE`: two overlapping rows are two different physical entries, not one contested slot.** GiST indexes ranges in space, not exact-match keys — A's row and B's row live at different physical locations in the tree, so *both inserts can succeed and land, uncommitted, at the same time*, with neither blocking the other's write. Only afterward does each transaction scan for existing entries its own row overlaps — and that's where it can discover the *other's* uncommitted row and wait on it. If both scans happen to run around the same moment, each finds the other and waits for it — a symmetric, genuine deadlock, not a queue. Postgres's deadlock detector eventually kills one side to break the cycle, which is what turned into `DeadlockDetectedError` here.
+
+**Why this used to turn into a raw `500` instead of a clean `409`:** `create_reservation`'s `except IntegrityError` doesn't catch it — `DeadlockDetectedError` surfaces as `sqlalchemy.exc.DBAPIError`, a different exception entirely. An early fix mapped that specific exception to `ReservationConflictError` too, but that's a lossy answer: a deadlock *victim* hasn't actually learned its dates are taken, just that it was the transaction Postgres picked to kill to break the cycle — its dates might still be free. Reporting that as "conflict" can wrongly tell a guest to give up on dates that were never really taken.
+
+**The actual fix: remove the race, not just relabel its outcome.** `create_reservation` now takes a Postgres advisory lock scoped to `property_id` (`pg_advisory_xact_lock(hashtext(property_id::text))`) before inserting. This doesn't touch correctness — the `EXCLUDE` constraint is still what decides whether a booking is legal — it just serializes concurrent attempts *for the same property* so no two transactions ever hold uncommitted, overlapping GiST entries at once. That's the only situation the deadlock above can arise from, so with the lock in place it can't happen for this code path at all — not "less likely," structurally prevented. `except DBAPIError` was removed accordingly: there's no live case left for it to catch.
+
+**Why this lock, specifically because it's GiST, not B-tree:** the whole reason a lock is needed here is section 4.1's distinction above — a `UNIQUE` B-tree index never needed this, because the physical write *is* the serializing point (only one transaction can ever be "in the index" for a given key at a time, per section 4). GiST has no such single contested slot for overlapping ranges — two overlapping rows are separate physical entries that can both land uncommitted simultaneously, which is exactly the gap the advisory lock closes by hand. A `UNIQUE` constraint gets that serialization for free from the index structure itself; a GiST `EXCLUDE` constraint doesn't, so this codebase has to add it explicitly.
+
 ## 5. `SELECT ... FOR UPDATE` — a lock the database itself enforces
+
+**Not used anywhere in this codebase today** — every invariant so far (double-booking, idempotency keys, payment dedup) turned out to be expressible as a single-table constraint instead, which section 6 explains is the better default when that's possible. Reach for `FOR UPDATE` directly when it *isn't* possible — the rule needs a multi-step read-then-decide-then-write sequence to happen atomically (not just one row's uniqueness at insert time), or spans multiple rows in a way no single constraint can express.
+
+**A real future case: refund totals (Epic 8 / `BOOK-76`).** "Never refund more than a reservation was actually charged" is a sum across multiple `Payment` rows, not one row's uniqueness — a constraint can't express it. Two concurrent refund attempts could each sum the existing rows, both see the same amount still refundable, and both insert a refund that fits *individually* but doesn't together. `FOR UPDATE` on the reservation while summing, deciding, and inserting closes that gap the same way it does for the `Payment` example below.
 
 ```sql
 BEGIN;
@@ -55,6 +83,8 @@ SELECT * FROM reservations WHERE id = X FOR UPDATE;   -- locks this row
 -- ... check something, then INSERT/UPDATE related rows ...
 COMMIT;   -- lock released
 ```
+
+This is generic syntax, not a proposal for this codebase's `reservations` table specifically — `reservations` here is just a stand-in name to show the `FOR UPDATE` pattern in the abstract. The concrete example below, for `Payment`, is the one that actually engages with a real rule from this codebase.
 
 Unlike an in-process Python lock, this **is** enforced by Postgres itself, so it does coordinate correctly across every process and replica — no shared-memory problem here. If a second transaction tries to take the same lock while the first still holds it, Postgres makes it *wait* until the first commits or rolls back, so the second transaction's later `SELECT` sees the post-write state instead of a stale one.
 
@@ -146,3 +176,6 @@ Yes — "stateless app tier, stateful data tier" is a standard, load-bearing pat
 | In-process lock | Only coordinates code in the same process's memory — invisible to any other process |
 | `SELECT ... FOR UPDATE` | A row-level lock Postgres itself enforces — works across processes, but only if every writer remembers to use it |
 | DB constraint / unique index | Enforced by Postgres on every write, regardless of which code path wrote it — no discipline required |
+| `UNIQUE` (B-tree) can't deadlock this way | One physical slot per key — the write itself serializes, so a wait can only ever point one direction |
+| `EXCLUDE` (GiST) can deadlock | Overlapping rows are separate physical entries, both can land uncommitted at once, and each can discover + wait on the other — a real cycle (`BOOK-39` hit this on `Reservation`) |
+| Advisory lock (`pg_advisory_xact_lock`) | An app-chosen lock key with no table/row behind it — used here to serialize concurrent inserts per `property_id` so the `EXCLUDE` deadlock above can't occur; doesn't replace the constraint, just removes the race that triggered the deadlock |
