@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from app.core.config import get_settings
 from app.core.unit_of_work import UnitOfWork
@@ -61,6 +61,8 @@ async def list_properties(
     guests: int | None = None,
     min_price_cents: int | None = None,
     max_price_cents: int | None = None,
+    check_in: date | None = None,
+    check_out: date | None = None,
     # keyword-only and required for the same reason as the repository's: the
     # default belongs to router.py alone
     *,
@@ -73,6 +75,8 @@ async def list_properties(
         guests=guests,
         min_price_cents=min_price_cents,
         max_price_cents=max_price_cents,
+        check_in=check_in,
+        check_out=check_out,
         sort=sort,
         # config lives here, not in the repository -- see get_settings()'s
         # singleton note in core/README.md
