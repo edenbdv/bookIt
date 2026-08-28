@@ -105,6 +105,19 @@ The B-tree just described has one hard requirement: every value needs a single, 
 
 **Sorting by start time doesn't rescue this**, because that's a different, real question — you can absolutely say 8–10 starts before 9–11, and that ordering is perfectly valid (and transitive). But "starts before" only tells you which range begins first, not whether the ranges overlap, which depends on comparing *both* boundaries of *both* ranges together (does A's start fall before B's end, **and** B's start fall before A's end). A single sorted coordinate can't capture a relationship that inherently needs two numbers from each side at once — which is exactly the gap GiST exists to fill.
 
+## 6. When an index *doesn't* help — needing (almost) the whole table
+
+Everything above is about an index's actual job: **skip most of what you don't need.** That job only pays off when "what you need" is a small slice of the table. BOOK-88's measurement (`app/property/repository.py`, `_global_mean_rating()`/`_review_stats_subquery()`) is the real, concrete case where it structurally can't help at all — worth understanding *why*, not just that `EXPLAIN` showed `Seq Scan` instead of `Index Scan`.
+
+**What the two functions compute, and why both need nearly every row:**
+
+- **`_global_mean_rating()`** — one number: the average rating across *every* guest-authored review in the system. To average N things correctly, you must read all N of them. There's no subset that's "the average" — skipping any row changes the answer.
+- **`_review_stats_subquery()`** — the same shape of problem, once per property: sum/average/count, `GROUP BY property_id`. It runs *before* the outer query's `city`/`guests`/availability filters narrow anything down (see its docstring), so it aggregates every review for every property in the system, not just the ~20 that end up in the response.
+
+**Why an index can't fix "I need almost all the rows":** an `Index Scan` isn't free — each matched row costs a separate lookup (index page, then a jump to the actual table page, possibly a different disk/cache location each time). A `Seq Scan` reads pages in physical order, which is cheap *per page*. When a query only needs a small fraction of a table, the index's per-row lookups are far cheaper than reading the whole table to find them. But **when a query needs nearly every row anyway, those per-row index lookups are pure overhead on top of a scan you can't avoid** — the planner correctly picks `Seq Scan` over `Index Scan` in exactly this case (this is what actually happened in BOOK-88's captured plan). This ratio — "what fraction of the table does this query actually need" — is called **selectivity**: low selectivity (few matching rows) is where indexes win; high selectivity (most/all rows needed) is where they can't help at all, no matter which column you index or how well-built the B-tree is.
+
+**What *would* actually help, then — a preview of BOOK-92's job:** not a better index, but a **narrower question**. `_review_stats_subquery()` doesn't need stats for every property in the system — only for the ~20 that survive `city`/`guests`/`sort`/`LIMIT`. Restructuring the query so the aggregation runs *after* that narrowing (instead of before it) shrinks the row count the aggregate actually touches, which is a real fix — an index over an unavoidably-large scan just adds cost. `_global_mean_rating()` has no such narrowing available (there's no "page" of the global average) — which is exactly why BOOK-40 caches it instead (see `redis-basics.md`/`cache-aside-basics.md`): a value that must always come from the whole table, but changes slowly, is a caching problem, not an indexing one.
+
 ---
 
 ## Cheat sheet
@@ -127,3 +140,5 @@ The B-tree just described has one hard requirement: every value needs a single, 
 | Linked leaves | Leaf pages point to their neighbors, so range scans/`ORDER BY` just walk sideways instead of re-traversing the tree |
 | Lehman & Yao | The specific B+Tree variant Postgres uses — adds a "high key" + right-links so searches don't need read locks during concurrent page splits |
 | GiST | A framework for indexing relationships without a single sort order — overlaps, contains, nearest — not one fixed structure |
+| Selectivity | What fraction of the table a query actually needs. Low selectivity (few matching rows) = index wins. High selectivity (needs nearly everything) = index can't help, no matter the column |
+| Why an index can lose to `Seq Scan` | Each `Index Scan` row costs an extra lookup on top of the table read. Worth it only when skipping rows saves more than that overhead costs — not when nearly every row is needed anyway (`_global_mean_rating()`/`_review_stats_subquery()`, BOOK-88) |

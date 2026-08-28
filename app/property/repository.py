@@ -19,6 +19,9 @@ def _review_stats_subquery() -> Subquery:
     column of its own, and counts guest->property reviews only -- a host's
     review OF a guest says nothing about the listing. Same direction filter as
     ReviewRepository.list_by_property_id.
+
+    Measured as list_filtered's biggest cost at scale (BOOK-88) -- fix
+    tracked as BOOK-92, a query/index problem rather than a caching one.
     """
     return (
         select(
@@ -36,7 +39,12 @@ def _review_stats_subquery() -> Subquery:
 
 
 def _global_mean_rating():
-    """C in the Bayesian formula: mean guest->property rating across all listings."""
+    """C in the Bayesian formula: mean guest->property rating across all listings.
+
+    Recomputed from scratch on every request (BOOK-88) -- unlike the
+    subquery above, a good caching target: one global, slow-changing
+    scalar, no filter dimensions. Scoped for BOOK-40.
+    """
     return (
         select(func.avg(Review.rating))
         .select_from(Review)
@@ -137,20 +145,17 @@ class PropertyRepository(BaseRepository[Property]):
         # long-term default -- it was what existed before Review rows did.
         # Price remains available as an explicit choice.
         if sort == "recommended":
-            # W = (sum_of_ratings + m*C) / (v + m) -- the algebraically
-            # identical "m phantom reviews at the global mean" form of
-            # (v/(v+m))*R + (m/(v+m))*C. Preferred here because it needs one
-            # division instead of two, and because the numerator is numeric
-            # (m*C), which keeps Postgres out of integer division.
+            # Bayesian-smoothed average rating: pulls a property's score
+            # toward the global mean when it has few reviews, so one 5-star
+            # review doesn't outrank hundreds of real reviews averaging 4.8.
             #
-            # coalesce handles the no-reviews case: rating_sum/review_count
-            # are NULL from the outer join, so the score collapses to exactly
-            # C -- an unrated property ranks at the global mean (mid-table),
-            # not last. Deliberate: a new listing is unknown, not bad, and
-            # burying it means it can never earn a first review.
-            global_mean = func.coalesce(_global_mean_rating(), 0)
-            rating_sum = func.coalesce(stats.c.rating_sum, 0)
-            review_count = func.coalesce(stats.c.review_count, 0)
+            # coalesce: no reviews -> score collapses to C, ranking an
+            # unrated property at the global mean (mid-table) rather than
+            # last -- it's unknown, not bad, and burying it means it can
+            # never get a first review.
+            global_mean = func.coalesce(_global_mean_rating(), 0)  # C
+            rating_sum = func.coalesce(stats.c.rating_sum, 0)  # v*R
+            review_count = func.coalesce(stats.c.review_count, 0)  # v
             score = (rating_sum + smoothing_m * global_mean) / (review_count + smoothing_m)
             stmt = stmt.order_by(score.desc(), Property.price_per_night_cents.asc())
         else:
