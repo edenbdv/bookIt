@@ -40,7 +40,7 @@ The ratio of hits to total lookups is the **hit rate**, and it's the number that
 
 So a miss is strictly more expensive than not caching. At a 90% hit rate that's an obvious win. At 20% you've added latency, a moving part, and a staleness bug surface — to make things slower.
 
-**This is the real argument to weigh in BOOK-40's open question.** Every dimension added to a cache key multiplies the key space: `city × guests × min_price × max_price × sort × limit × offset` is already large, and adding `check_in`/`check_out` multiplies it by every date range anyone might type. A key space much larger than your traffic means nearly every lookup is a miss on a key no one will ever request twice — a cache that only ever pays costs. Hit rate, not elegance, is what should decide that ticket — which is exactly what BOOK-88 (the measurement spike blocking BOOK-40) exists to pin down before any code gets written.
+**This was the real argument in BOOK-40's original open question, and BOOK-88's measurement is what actually resolved it.** Every dimension added to a whole-listing cache key multiplies the key space: `city × guests × min_price × max_price × sort × limit × offset × check_in × check_out` is large enough that most lookups would miss a key nobody requests twice — a cache that only ever pays costs. Rather than accept that risk, BOOK-40 ended up scoped to a single global key (`_global_mean_rating()`, see `redis-basics.md` §1) with no filter dimensions at all — sidestepping the key-space problem entirely instead of trying to manage it.
 
 Two more properties worth naming:
 
