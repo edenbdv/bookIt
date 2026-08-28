@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -59,6 +60,8 @@ async def list_properties(
     guests: int | None = Query(default=None, gt=0),
     min_price_cents: int | None = Query(default=None, ge=0),
     max_price_cents: int | None = Query(default=None, ge=0),
+    check_in: date | None = None,
+    check_out: date | None = None,
     # BOOK-77: "recommended" ranks by a Bayesian-smoothed average rating and
     # is now the default, replacing BOOK-29's price ASC placeholder. Note this
     # changes the response order of an existing endpoint for callers that
@@ -68,8 +71,31 @@ async def list_properties(
     sort: PropertySort = "recommended",
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[Property]:
+    # cross-field checks FastAPI's per-param Query(...) validation can't
+    # express -- same rule as ReservationCreate's check_out_after_check_in
+    # validator (app/reservation/schemas.py), enforced here instead since
+    # there's no request-body schema for a GET's query params to live on
+    if (check_in is None) != (check_out is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="check_in and check_out must be provided together",
+        )
+    if check_in is not None and check_out is not None and check_out <= check_in:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="check_out must be after check_in",
+        )
     return await service.list_properties(
-        uow, limit, offset, city, guests, min_price_cents, max_price_cents, sort=sort
+        uow,
+        limit,
+        offset,
+        city,
+        guests,
+        min_price_cents,
+        max_price_cents,
+        check_in,
+        check_out,
+        sort=sort,
     )
 
 

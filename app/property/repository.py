@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Literal
 from uuid import UUID
 
@@ -5,7 +6,7 @@ from sqlalchemy import Subquery, func, select
 
 from app.core.repository import BaseRepository
 from app.property.models import Property, PropertyPhoto
-from app.reservation.models import Reservation
+from app.reservation.models import Reservation, ReservationStatus
 from app.review.models import Review
 
 PropertySort = Literal["price", "recommended"]
@@ -62,6 +63,8 @@ class PropertyRepository(BaseRepository[Property]):
         guests: int | None = None,
         min_price_cents: int | None = None,
         max_price_cents: int | None = None,
+        check_in: date | None = None,
+        check_out: date | None = None,
         # keyword-only and required, no defaults: router.py is the single place
         # the default sort is declared. A default here would be unreachable
         # (every caller passes one) and free to silently drift from the real
@@ -106,6 +109,24 @@ class PropertyRepository(BaseRepository[Property]):
             stmt = stmt.where(Property.price_per_night_cents >= min_price_cents)
         if max_price_cents is not None:
             stmt = stmt.where(Property.price_per_night_cents <= max_price_cents)
+        if check_in is not None and check_out is not None:
+            # a property is available iff no non-cancelled reservation's date
+            # range overlaps the requested one -- same '[)' range and the same
+            # && (overlaps) test as the EXCLUDE constraint that enforces this
+            # at the DB level (app/reservation/models.py:50-56), so "available
+            # here" and "bookable without conflict" can never disagree.
+            overlapping_reservation = (
+                select(Reservation.id)
+                .where(
+                    Reservation.property_id == Property.id,
+                    Reservation.status != ReservationStatus.CANCELLED,
+                    func.daterange(Reservation.check_in, Reservation.check_out, "[)").op("&&")(
+                        func.daterange(check_in, check_out, "[)")
+                    ),
+                )
+                .exists()
+            )
+            stmt = stmt.where(~overlapping_reservation)
 
         # order_by is required for LIMIT/OFFSET to paginate consistently
         # (docs/db/sql-basics.md#5); id is the final tiebreaker in both sorts
