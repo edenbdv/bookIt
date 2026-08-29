@@ -2,7 +2,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import Subquery, func, select
+from sqlalchemy import Select, Subquery, func, select
 
 from app.core.repository import BaseRepository
 from app.property.models import Property, PropertyPhoto
@@ -12,7 +12,7 @@ from app.review.models import Review
 PropertySort = Literal["price", "recommended"]
 
 
-def _review_stats_subquery() -> Subquery:
+def _review_stats_subquery(property_ids: Select | None = None) -> Subquery:
     """Per-property rating sum, average and count, as a joinable subquery.
 
     Reaches property_id through Reservation because Review has no property_id
@@ -20,10 +20,10 @@ def _review_stats_subquery() -> Subquery:
     review OF a guest says nothing about the listing. Same direction filter as
     ReviewRepository.list_by_property_id.
 
-    Measured as list_filtered's biggest cost at scale (BOOK-88) -- fix
-    tracked as BOOK-92, a query/index problem rather than a caching one.
+    property_ids optionally restricts the aggregation to those ids instead
+    of the whole table -- BOOK-92.
     """
-    return (
+    stmt = (
         select(
             Reservation.property_id.label("property_id"),
             func.sum(Review.rating).label("rating_sum"),
@@ -33,9 +33,10 @@ def _review_stats_subquery() -> Subquery:
         .select_from(Review)
         .join(Reservation, Review.reservation_id == Reservation.id)
         .where(Review.author_id == Reservation.guest_id)
-        .group_by(Reservation.property_id)
-        .subquery()
     )
+    if property_ids is not None:
+        stmt = stmt.where(Reservation.property_id.in_(property_ids))
+    return stmt.group_by(Reservation.property_id).subquery()
 
 
 class PropertyRepository(BaseRepository[Property]):
@@ -82,10 +83,7 @@ class PropertyRepository(BaseRepository[Property]):
         # rather than read here so the repository stays pure data access with
         # no config dependency -- service.py owns reading settings.
         smoothing_m: int,
-        # C in the Bayesian formula, precomputed by the caller (cache-aside'd
-        # in service.py, BOOK-40) rather than embedded here as a subquery --
-        # only read below when sort == "recommended". Defaults to 0.0 so
-        # non-"recommended" callers (sort="price") don't need to pass it.
+        # C in the Bayesian formula, cache-aside'd by the caller (BOOK-40)
         global_mean_rating: float = 0.0,
     ) -> list[Property]:
         # every filter is optional -- omit one, it just doesn't narrow the
@@ -93,16 +91,12 @@ class PropertyRepository(BaseRepository[Property]):
         # never surface a delisted property (same reasoning as
         # get_active_by_id above).
         #
-        # LEFT (outer) join, not inner: a property with no reviews must still
-        # appear in the listing, with NULL stats. The aggregate rides along on
-        # the main query rather than being fetched separately like cover_photo
-        # -- sorting by it requires it in this statement.
-        stats = _review_stats_subquery()
-        stmt = (
-            select(Property, stats.c.rating_avg, stats.c.review_count)
-            .outerjoin(stats, Property.id == stats.c.property_id)
-            .where(Property.deleted_at.is_(None))
-        )
+        # Filter Property first so the review aggregation below can be
+        # scoped to the survivors instead of the whole table (BOOK-92).
+        candidate_ids = select(Property.id).where(Property.deleted_at.is_(None))
+        # only worth restricting stats to candidate_ids when it's a real
+        # subset -- a net loss on an unfiltered browse (BOOK-92)
+        has_filters = False
         if city is not None:
             # case-insensitive: a guest typing "tel aviv" should still match
             # a listing stored as "Tel Aviv". This can't use the plain
@@ -110,17 +104,21 @@ class PropertyRepository(BaseRepository[Property]):
             # expression index on lower(city), or the citext extension) --
             # fine at today's data volume, worth revisiting if city search
             # ever shows up slow.
-            stmt = stmt.where(func.lower(Property.city) == city.lower())
+            candidate_ids = candidate_ids.where(func.lower(Property.city) == city.lower())
+            has_filters = True
         if guests is not None:
             # guests = size of the group searching, NOT an upper bound --
             # >= on purpose: a property that fits more than `guests` still
             # works. Same relationship as the reservation-time rule
             # guest_count <= property.max_guests (docs/db/er-diagram.md)
-            stmt = stmt.where(Property.max_guests >= guests)
+            candidate_ids = candidate_ids.where(Property.max_guests >= guests)
+            has_filters = True
         if min_price_cents is not None:
-            stmt = stmt.where(Property.price_per_night_cents >= min_price_cents)
+            candidate_ids = candidate_ids.where(Property.price_per_night_cents >= min_price_cents)
+            has_filters = True
         if max_price_cents is not None:
-            stmt = stmt.where(Property.price_per_night_cents <= max_price_cents)
+            candidate_ids = candidate_ids.where(Property.price_per_night_cents <= max_price_cents)
+            has_filters = True
         if check_in is not None and check_out is not None:
             # a property is available iff no non-cancelled reservation's date
             # range overlaps the requested one -- same '[)' range and the same
@@ -138,7 +136,22 @@ class PropertyRepository(BaseRepository[Property]):
                 )
                 .exists()
             )
-            stmt = stmt.where(~overlapping_reservation)
+            candidate_ids = candidate_ids.where(~overlapping_reservation)
+            has_filters = True
+        candidate_ids = candidate_ids.subquery()
+
+        # LEFT (outer) join, not inner: a property with no reviews must still
+        # appear in the listing, with NULL stats. The aggregate rides along on
+        # the main query rather than being fetched separately like cover_photo
+        # -- sorting by it requires it in this statement.
+        stats = _review_stats_subquery(
+            property_ids=select(candidate_ids.c.id) if has_filters else None
+        )
+        stmt = (
+            select(Property, stats.c.rating_avg, stats.c.review_count)
+            .join(candidate_ids, Property.id == candidate_ids.c.id)
+            .outerjoin(stats, Property.id == stats.c.property_id)
+        )
 
         # order_by is required for LIMIT/OFFSET to paginate consistently
         # (docs/db/sql-basics.md#5); id is the final tiebreaker in both sorts
