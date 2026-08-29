@@ -2,11 +2,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
+from app.core.rate_limit_middleware import RateLimitMiddleware
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
+
+    # BOOK-42: per-IP fixed-window limiting for signup/refresh/properties --
+    # see docs/cache/rate-limiting-basics.md. /auth/login is handled
+    # separately, in its own route (sliding window, per-IP + per-email).
+    app.add_middleware(RateLimitMiddleware)
 
     # dev-only: lets the local React dev server (a different origin/port,
     # Vite's default 5173) call this API from the browser. Tightened to

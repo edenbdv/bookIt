@@ -2,7 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.reservation import service
@@ -17,6 +17,7 @@ async def create_reservation(
     data: ReservationCreate,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
@@ -55,6 +56,7 @@ async def create_reservation(
 async def confirm_reservation(
     reservation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
@@ -72,6 +74,7 @@ async def confirm_reservation(
 async def cancel_reservation(
     reservation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:

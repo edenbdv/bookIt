@@ -57,6 +57,37 @@ A sorted set holds one entry per request, scored by timestamp. `ZCARD` after tri
 
 **Where this lands in the app:** the public-endpoint half of this is middleware, attached in `create_app()` (`app/main.py`) next to the CORS middleware — it applies across modules and runs before routing, unlike cache-aside (`cache-aside-basics.md`) which is a `service.py` concern for one endpoint at a time. The authenticated half is not middleware at all — see the next section for why.
 
+### How the middleware decides what's "public" — a hand-maintained table, not a real check
+
+`RateLimitMiddleware` (`app/core/rate_limit_middleware.py`) runs on **every** request, no exceptions — Starlette middleware has no concept of "only attach this to certain routes." It can't, either: middleware executes before FastAPI has matched the request to a route, so there's no route object yet to ask "does this need auth?" The only things available are the raw method and path.
+
+So `_classify()` is a small, explicitly hand-written lookup, not a real inspection of anything:
+
+```python
+_RULES: dict[tuple[str, str], tuple[str, bool]] = {
+    ("POST", "/auth/signup"): ("auth", True),
+    ("POST", "/auth/refresh"): ("auth", True),
+}
+
+def _classify(request: Request) -> tuple[str, bool] | None:
+    rule = _RULES.get((request.method, request.url.path))
+    if rule is not None:
+        return rule
+    if request.method == "GET" and request.url.path.startswith("/properties"):
+        return _PROPERTIES_GROUP
+    return None
+```
+
+Two exact `(method, path)` entries for signup/refresh, one prefix check for `GET /properties*` (which is why `GET /properties/{id}/reviews` — defined in `review/router.py`, not `property/router.py` — is still covered: the middleware matches on URL path, not on which module defines the route). Anything that doesn't match either rule returns `None`, and `dispatch()` lets it straight through with no check at all:
+
+```python
+classification = _classify(request)
+if classification is None:
+    return await call_next(request)
+```
+
+**The maintenance cost this creates:** the middleware never asks "is this route actually public" (e.g. by checking for the absence of `Depends(get_current_user)`) — it can't, that information doesn't exist at the middleware layer. It only knows what this table says. Add a new public endpoint later and forget to add it here, and it gets **zero** rate limiting — silently, with no error, no warning. Not a security hole (the endpoint's real auth requirements, if any, are still enforced independently, wherever they're checked), just a rate-limiting blind spot that nothing will flag on its own. Keeping this table in sync with the actual set of public routes is a manual step, every time one is added or removed.
+
 ## Client identity: per-IP vs. per-user, and why that's not just a config choice
 
 `ratelimit:<client>` above hides a real decision: what *is* `<client>`?
@@ -73,7 +104,13 @@ So this is two enforcement points sharing the `INCR`/`EXPIRE` mechanism above, n
 
 **Defense in depth, not either/or.** Per-user alone leaves a gap: one account can still push heavy load from a single IP as long as it stays under its own ceiling, and per-user does nothing to slow an attacker spinning up many accounts from one IP (though `/auth/signup` being IP-limited already covers account creation itself). The common production pattern is a per-user limit as the primary, fairness-oriented check, with a coarser per-IP ceiling underneath as a floor — two keys checked in the same dependency, not two separate systems.
 
+**This is not the same IP check as the middleware's, and the two never run on the same request — worth spelling out because it looks like duplication at a glance.** `enforce_user_rate_limit`'s per-IP floor (`app/auth/dependencies.py`) and `RateLimitMiddleware`'s per-IP checks (`app/core/rate_limit_middleware.py`) key on the same *kind* of thing (caller IP), which is what makes it look redundant. But `_classify()` (the section above) only matches `POST /auth/signup`, `POST /auth/refresh`, and `GET /properties*` — every authenticated route (`POST /properties`, `POST /reservations`, `PATCH /properties/{id}`, `POST /reservations/{id}/confirm`, ...) is a method/path the middleware's rules don't match, so `_classify()` returns `None` and the middleware passes it straight through, untouched, via `call_next(request)`. The dependency's IP floor is the *only* IP-based check that ever runs for those routes. The two mechanisms partition the route set — public vs. authenticated — rather than layering on the same routes; no request is ever checked by both.
+
 **Login's optional per-email key is a third case, with its own hazard.** It catches credential stuffing spread across many IPs against one target account — something per-IP alone would never notice, since each IP only makes a couple of attempts. But the counter must not create a response that differs depending on whether the email is actually registered — the exact "no such email" vs. "wrong password" trap `user-enumeration-basics.md` covers for the login check itself. If only existing accounts accumulate a counter (and so only they can ever hit `429`), the `429` itself becomes the leak; the count has to be maintained, and checked, the same way regardless of whether the email resolves to a real user.
+
+**Login's own per-IP check isn't a duplicate of the middleware's either, same reasoning as the authenticated dependency's floor above.** `POST /auth/login` doesn't appear in `_RULES` (`app/core/rate_limit_middleware.py`) at all — only in a comment there explaining it's deliberately excluded. So `_classify()` returns `None` for it too, same as every authenticated route, and `RateLimitMiddleware` passes it straight through untouched. The IP + email checks inside `_enforce_login_rate_limit` (`app/auth/router.py`) are the *only* rate limiting `/auth/login` ever gets. Three groups in total end up partitioning every route between them — login, the authenticated dependency, and the middleware's `_RULES`/`GET /properties*` — each route landing in exactly one, never more than one.
+
+**One shared key across the whole properties group — what that looks like in practice.** `RateLimitMiddleware` (`app/core/rate_limit_middleware.py`) keys every `GET /properties*` route to the *same* counter, `ratelimit:properties:ip:<ip>` — not one counter per route. That's deliberate (one `loose` limit for "public reads" as a group, not four separate ones to tune), but it means the count moves faster than "one request, one increment" suggests. The frontend's `Feed` page (`frontend/src/pages/Feed.tsx`) calls `listProperties()` (`GET /properties`) on load, and `SearchBar` (`frontend/src/components/SearchBar.tsx`) separately calls `listCities()` (`GET /properties/cities`) for its filter dropdown — two distinct endpoints, same shared counter, both incrementing it on a single page load. In dev, React's `StrictMode` (`frontend/src/main.tsx`) double-invokes `useEffect` on mount specifically to surface effect bugs, so those two calls each fire twice — **four increments per browser refresh**, not one. `StrictMode`'s double-invoke doesn't happen in a production build, so that specific multiplier drops to two calls per load there — but the shared-key behavior itself (multiple routes, one counter) is permanent, not a dev-only artifact.
 
 ## Client identity, continued: `X-Forwarded-For` and why "it came through my proxy" isn't enough
 
@@ -183,7 +220,9 @@ Eight pairs, not one shared `RATE_LIMIT` constant — each maps directly to one 
 | Sliding window log | Sorted set of request timestamps, trimmed and counted each request. Exact, no boundary burst, costs more commands and memory |
 | Token bucket | Fixed capacity refilling over time; allows a deliberate burst up to capacity. Needs a Lua script to stay atomic |
 | Per-IP key | Used for public endpoints — no user identity exists yet, so it's the only option, enforced in middleware before routing |
+| `_classify()` / `_RULES` | Hand-maintained method+path lookup table deciding what the middleware rate-limits. Not a real "is this public" check -- middleware runs before routing, so it can't inspect a route's auth requirements. A new public endpoint left out of this table gets no rate limiting, silently |
 | Per-user key | Used behind `get_current_user` — fairness between users, avoids punishing a shared NAT/office IP. Can't live in middleware; must run as a dependency after auth resolves |
+| IP checks in 3 places (middleware, login, user dependency) | Look like duplication (all key on IP) but never overlap — `_classify()` partitions every route into exactly one of the three groups, never more than one |
 | Per-email key (login only) | Catches credential stuffing spread across many IPs at one account. Must not create a response that differs by whether the email is registered — same trap as `user-enumeration-basics.md` |
 | `X-Forwarded-For` | Header a proxy uses to pass along the real client IP. Most proxies *append* to it rather than replace it — an attacker can pre-seed it with a fake IP, which "came through the known proxy" alone won't catch |
 | Fail open vs. fail closed | What a rate limiter does when Redis is unreachable — let traffic through unprotected, or reject it. A deliberate choice, not a default |
