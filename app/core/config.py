@@ -34,6 +34,32 @@ class Settings(BaseSettings):
     # staleness is a non-issue, per cache-aside-basics.md#1.
     global_mean_rating_cache_ttl_seconds: int = 300
 
+    # BOOK-42: rate limiting. (limit, window_seconds) pairs -- see
+    # docs/cache/rate-limiting-basics.md for the algorithm/key/fail-mode
+    # decision behind each group. Do not loosen these per-environment: doing
+    # so means staging never exercises the scenario the limiter exists to
+    # catch, same warning as rating_smoothing_m above.
+
+    # login -- sliding window log, checked per-IP AND per-email
+    rate_limit_login_ip_limit: int = 10
+    rate_limit_login_ip_window_seconds: int = 60
+    rate_limit_login_email_limit: int = 5
+    rate_limit_login_email_window_seconds: int = 60
+
+    # signup, refresh -- fixed window, per-IP
+    rate_limit_auth_ip_limit: int = 20
+    rate_limit_auth_ip_window_seconds: int = 60
+
+    # public property reads -- fixed window, per-IP, loose
+    rate_limit_properties_ip_limit: int = 100
+    rate_limit_properties_ip_window_seconds: int = 60
+
+    # authenticated routes -- fixed window, per-user primary + per-IP floor
+    rate_limit_user_limit: int = 100
+    rate_limit_user_window_seconds: int = 60
+    rate_limit_user_ip_floor_limit: int = 300
+    rate_limit_user_ip_floor_window_seconds: int = 60
+
 
 # lru_cache on a zero-argument function = singleton: .env is parsed once,
 # every caller gets the same cached Settings instance. See core/README.md.

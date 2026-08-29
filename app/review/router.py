@@ -2,7 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.review import service
@@ -21,6 +21,7 @@ async def create_review(
     reservation_id: uuid.UUID,
     data: ReviewCreate,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Review:
     try:

@@ -3,7 +3,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.unit_of_work import UnitOfWork, get_uow
 from app.property import service
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/properties", tags=["properties"])
 async def create_property(
     data: PropertyCreate,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Property:
     return await service.create_property(uow, data, current_user.id)
@@ -104,6 +105,7 @@ async def update_property(
     property_id: uuid.UUID,
     data: PropertyUpdate,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> Property:
     try:
@@ -122,6 +124,7 @@ async def update_property(
 async def delete_property(
     property_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
     # status_code=204 (the status LINE) and -> None (no response_model, so
@@ -146,6 +149,7 @@ async def add_photo(
     property_id: uuid.UUID,
     data: PropertyPhotoCreate,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> PropertyPhoto:
     try:
@@ -166,6 +170,7 @@ async def remove_photo(
     property_id: uuid.UUID,
     photo_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> None:
     try:
@@ -186,6 +191,7 @@ async def reorder_photos(
     property_id: uuid.UUID,
     data: PropertyPhotoReorder,
     current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
     uow: UnitOfWork = Depends(get_uow),
 ) -> list[PropertyPhoto]:
     try:
