@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # will order listings differently.
     rating_smoothing_m: int = 5
 
+    # BOOK-40: TTL for the cached global mean rating (get_global_mean_rating).
+    # A ranking-smoothing constant that changes slowly -- a few minutes of
+    # staleness is a non-issue, per cache-aside-basics.md#1.
+    global_mean_rating_cache_ttl_seconds: int = 300
+
 
 # lru_cache on a zero-argument function = singleton: .env is parsed once,
 # every caller gets the same cached Settings instance. See core/README.md.

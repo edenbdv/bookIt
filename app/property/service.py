@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, date, datetime
 
+from app.core.cache import cache_get, cache_set
 from app.core.config import get_settings
 from app.core.unit_of_work import UnitOfWork
 from app.property.models import Property, PropertyPhoto
@@ -11,6 +12,8 @@ from app.property.schemas import (
     PropertyPhotoReorder,
     PropertyUpdate,
 )
+
+GLOBAL_MEAN_RATING_CACHE_KEY = "bookit:properties:global_mean_rating"
 
 
 class PropertyNotFoundError(Exception):
@@ -53,6 +56,23 @@ async def get_property(uow: UnitOfWork, id: uuid.UUID) -> Property | None:
     return property_
 
 
+async def _get_global_mean_rating(uow: UnitOfWork) -> float:
+    """Cache-aside read of the Bayesian formula's C -- BOOK-40.
+
+    Single global key, no filter dimensions -- see cache-aside-basics.md#2
+    on why a per-filter key space was rejected. TTL bounds staleness; no
+    explicit invalidation for a slow-changing ranking constant.
+    """
+    cached = await cache_get(GLOBAL_MEAN_RATING_CACHE_KEY)
+    if cached is not None:
+        return cached
+    value = await uow.properties.get_global_mean_rating()
+    await cache_set(
+        GLOBAL_MEAN_RATING_CACHE_KEY, value, get_settings().global_mean_rating_cache_ttl_seconds
+    )
+    return value
+
+
 async def list_properties(
     uow: UnitOfWork,
     limit: int,
@@ -68,6 +88,12 @@ async def list_properties(
     *,
     sort: PropertySort,
 ) -> list[Property]:
+    # only "recommended" reads global_mean_rating -- skip the cache lookup
+    # entirely for sort="price", which never uses it
+    global_mean_rating = 0.0
+    if sort == "recommended":
+        global_mean_rating = await _get_global_mean_rating(uow)
+
     properties = await uow.properties.list_filtered(
         limit=limit,
         offset=offset,
@@ -81,6 +107,7 @@ async def list_properties(
         # config lives here, not in the repository -- see get_settings()'s
         # singleton note in core/README.md
         smoothing_m=get_settings().rating_smoothing_m,
+        global_mean_rating=global_mean_rating,
     )
 
     property_ids = [property_.id for property_ in properties]
