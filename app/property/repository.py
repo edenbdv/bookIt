@@ -38,22 +38,6 @@ def _review_stats_subquery() -> Subquery:
     )
 
 
-def _global_mean_rating():
-    """C in the Bayesian formula: mean guest->property rating across all listings.
-
-    Recomputed from scratch on every request (BOOK-88) -- unlike the
-    subquery above, a good caching target: one global, slow-changing
-    scalar, no filter dimensions. Scoped for BOOK-40.
-    """
-    return (
-        select(func.avg(Review.rating))
-        .select_from(Review)
-        .join(Reservation, Review.reservation_id == Reservation.id)
-        .where(Review.author_id == Reservation.guest_id)
-        .scalar_subquery()
-    )
-
-
 class PropertyRepository(BaseRepository[Property]):
     model = Property
 
@@ -62,6 +46,21 @@ class PropertyRepository(BaseRepository[Property]):
         # delisted property shouldn't be fetchable as if it were still live
         stmt = select(Property).where(Property.id == id, Property.deleted_at.is_(None))
         return await self.session.scalar(stmt)
+
+    async def get_global_mean_rating(self) -> float:
+        """C in the Bayesian formula: mean guest->property rating across all listings.
+
+        Executed independently (not embedded in list_filtered's query) so
+        the result can be cache-aside'd at the service layer -- BOOK-40.
+        """
+        stmt = (
+            select(func.avg(Review.rating))
+            .select_from(Review)
+            .join(Reservation, Review.reservation_id == Reservation.id)
+            .where(Review.author_id == Reservation.guest_id)
+        )
+        result = await self.session.scalar(stmt)
+        return float(result) if result is not None else 0.0
 
     async def list_filtered(
         self,
@@ -83,6 +82,11 @@ class PropertyRepository(BaseRepository[Property]):
         # rather than read here so the repository stays pure data access with
         # no config dependency -- service.py owns reading settings.
         smoothing_m: int,
+        # C in the Bayesian formula, precomputed by the caller (cache-aside'd
+        # in service.py, BOOK-40) rather than embedded here as a subquery --
+        # only read below when sort == "recommended". Defaults to 0.0 so
+        # non-"recommended" callers (sort="price") don't need to pass it.
+        global_mean_rating: float = 0.0,
     ) -> list[Property]:
         # every filter is optional -- omit one, it just doesn't narrow the
         # results. deleted_at IS NULL isn't optional: browsing/search should
@@ -153,7 +157,7 @@ class PropertyRepository(BaseRepository[Property]):
             # unrated property at the global mean (mid-table) rather than
             # last -- it's unknown, not bad, and burying it means it can
             # never get a first review.
-            global_mean = func.coalesce(_global_mean_rating(), 0)  # C
+            global_mean = global_mean_rating  # C -- already a plain float, NULL-guarded in get_global_mean_rating
             rating_sum = func.coalesce(stats.c.rating_sum, 0)  # v*R
             review_count = func.coalesce(stats.c.review_count, 0)  # v
             score = (rating_sum + smoothing_m * global_mean) / (review_count + smoothing_m)
