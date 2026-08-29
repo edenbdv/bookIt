@@ -118,6 +118,14 @@ export function listProperties(filters: PropertyFilters): Promise<PropertyListIt
   if (filters.guests) params.set('guests', String(filters.guests))
   if (filters.min_price_cents != null) params.set('min_price_cents', String(filters.min_price_cents))
   if (filters.max_price_cents != null) params.set('max_price_cents', String(filters.max_price_cents))
+  // sent as a pair, unlike the filters above: half a date range is a
+  // guaranteed 422 ("check_in and check_out must be provided together"),
+  // so a partial one is dropped rather than turned into a failed request.
+  // Callers validate first -- SearchBar surfaces the message itself.
+  if (filters.check_in && filters.check_out) {
+    params.set('check_in', filters.check_in)
+    params.set('check_out', filters.check_out)
+  }
   if (filters.sort) params.set('sort', filters.sort)
 
   return request<PropertyListItem[]>(`/properties?${params.toString()}`)

@@ -57,6 +57,12 @@ export interface PropertyFilters {
   guests?: number
   min_price_cents?: number
   max_price_cents?: number
+  // BOOK-90 availability window: ISO yyyy-mm-dd, matching the backend's
+  // `date` params. The API rejects these unless BOTH are present and
+  // check_out is strictly after check_in, so treat them as a pair --
+  // TypeScript can't express that constraint on two optional fields.
+  check_in?: string
+  check_out?: string
   sort?: PropertySort
 }
 
