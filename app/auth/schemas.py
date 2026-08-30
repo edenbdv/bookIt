@@ -46,6 +46,14 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    # same shape as RefreshRequest today, kept separate because they're
+    # different contracts: this token is being surrendered, not exchanged.
+    # Logging out by refresh token (not access token) is what lets the server
+    # kill the long-lived half of the pair -- BOOK-78
+    refresh_token: str
+
+
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
     # no password here -- changing a password is a security-sensitive
