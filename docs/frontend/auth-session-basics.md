@@ -78,7 +78,7 @@ So the honest framing is that httpOnly turns "stolen forever, usable anywhere" i
 
 On page load the SPA calls `/auth/refresh` with no token of its own; the browser attaches the cookie by itself, and a fresh access token lands in memory. Reloads work, and neither token is ever sitting in JS-readable storage. That combination — not the cookie alone — is what Epic 11's BFF is aiming at.
 
-**One thing it does not fix:** the two-tabs refresh race. Each tab still calls `/auth/refresh` independently on load, against the same session, so the server-side grace window described in `refresh-token-rotation-basics.md` §4 stays necessary under any of the three storage choices.
+**One thing it does not fix:** the two-tabs refresh race. Each tab still calls `/auth/refresh` independently on load, against the same session, so the server-side grace window described in `refresh-token-rotation-basics.md` §5 stays necessary under any of the three storage choices.
 
 ## 3. Wiring: why `configureAuth` instead of reading `localStorage`
 

@@ -59,7 +59,7 @@ def create_access_token(user_id: UUID, session_id: str) -> str:
     # its jti is generated but never recorded: access tokens are deliberately
     # NOT checked against Redis (that would be a round-trip on every single
     # request). They stay valid until they expire; revocation acts on the
-    # refresh chain -- rotation-basics.md section 4 covers the tradeoff
+    # refresh chain -- rotation-basics.md section 5 covers the tradeoff
     return _create_token(
         user_id,
         "access",

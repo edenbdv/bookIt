@@ -30,7 +30,7 @@ why BOOK-31 deferred this rather than bolting it on.
 
 ```
 refresh:session:<sid>  →  the jti that is valid right now     TTL = 7 days
-refresh:prev:<sid>     →  the jti just spent (§4's grace)     TTL = 10 seconds
+refresh:prev:<sid>     →  the jti just spent (§5's grace)     TTL = 10 seconds
 refresh:user:<user_id> →  set of that user's live sids        TTL = 7 days
 ```
 
@@ -81,7 +81,7 @@ branches of plain Redis commands:
 | Presented | Outcome |
 |---|---|
 | the stored `jti` | **rotate** — write the new `jti`; the old one is dead the instant we write |
-| the `jti` just spent, within 10s | **grace** — the two-tabs race (§4), not theft. Returns the *current* `jti` |
+| the `jti` just spent, within 10s | **grace** — the two-tabs race (§5), not theft. Returns the *current* `jti` |
 | any other spent `jti` | **theft** — `DELETE` the session key, killing the chain including whatever the thief holds |
 | no session key | **gone** — already logged out, revoked, or expired |
 
@@ -96,7 +96,79 @@ load-bearing choice, and it's what case 3 of the verification script checks: the
 would leave the thief's live one untouched — detection that costs the attacker
 nothing.
 
-## 4. What this deliberately does not do
+## 4. The flow, end to end
+
+### Login
+
+```
+POST /auth/login
+  router.login          → verify email + password
+  service.issue_tokens  → sid = new_id()          ← the session is born here
+                          jti = new_id()
+                          mint access + refresh, both carrying sid
+  token_store.start_session
+                        → SET  refresh:session:<sid> = jti   (7d)
+                          SADD refresh:user:<uid>    = sid
+  ← { access_token, refresh_token }
+```
+
+`issue_tokens` is the **only** place a `sid` is created, and `POST /auth/login` is
+its only caller. Signup issues no tokens, so a new account gets its first `sid`
+on its first login like anyone else.
+
+### Refresh
+
+```
+POST /auth/refresh  { refresh_token }
+  service._decode_refresh  → signature valid? not expired? type == "refresh"?
+                             carries jti + sid?              ← else 401
+  users.get_by_id          → user still exists?              ← else 401
+  token_store.rotate(sid, presented_jti, new_jti)
+```
+
+Note the `sid` is **read out of the presented token**, never regenerated — that's
+what keeps one session on one Redis key across an arbitrarily long refresh chain.
+Inside `rotate`, a single read decides everything:
+
+```
+stored = GET refresh:session:<sid>
+
+stored is None            → None      session gone (logged out / revoked / expired)
+stored == presented       → rotate:   SET session = new_jti
+                                      SET prev    = presented  (grace TTL)
+                                      returns new_jti
+presented == GET prev     → grace:    returns stored   ← two tabs; no rotation
+otherwise                 → theft:    DEL session, DEL prev
+                                      returns None
+```
+
+Back in the service, `None` becomes a `401`; otherwise a new pair is minted
+carrying the returned `jti`. **That returned value is not always `new_jti`** — in
+the grace case it's the session's *current* one, which is precisely what makes
+two racing tabs converge on a single token instead of forking the chain.
+
+### Logout
+
+```
+POST /auth/logout       decode → DEL session, DEL prev, SREM from user set → 204
+POST /auth/logout-all   access token → for each sid in the user's set: DEL → 204
+```
+
+`/auth/logout` takes a refresh token (the long-lived half is the one worth
+killing); `/auth/logout-all` authenticates with an access token instead, so a
+user who has lost a device can trigger it from a session they still hold.
+
+### The through-line
+
+| | |
+|---|---|
+| `sid` | born at login, constant for the session's whole life |
+| `jti` | changes on every rotation |
+| the session key | overwritten, never appended — one key per session, not per token |
+| every rejection | the same `401`, so a thief learns nothing from the response |
+| Redis unreachable | `503` via `router.py`'s `_with_token_store` — fail closed |
+
+## 5. What this deliberately does not do
 
 **Access tokens are not checked against Redis.** They stay valid until they
 expire (15 minutes), so logout kills the refresh chain immediately but leaves a
@@ -168,7 +240,7 @@ It caps the theft and makes it visible; it doesn't prevent it. Neither rotation
 nor an httpOnly cookie stops a script *abusing* the session in place — both
 defend against steal-now-use-later — which is why the BFF is still worth doing.
 
-## 5. Verifying it
+## 6. Verifying it
 
 ```bash
 docker compose up -d db redis

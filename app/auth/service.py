@@ -123,7 +123,7 @@ async def logout(refresh_token: str) -> None:
     """End one session. Its refresh token dies now rather than in up to 7 days.
 
     The access token issued alongside it stays valid until it expires (minutes)
-    -- see rotation-basics.md section 4 for why that's the accepted tradeoff.
+    -- see rotation-basics.md section 5 for why that's the accepted tradeoff.
     """
     payload = _decode_refresh(refresh_token)
     await token_store.revoke_session(payload["sub"], payload["sid"])
