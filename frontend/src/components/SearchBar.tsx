@@ -127,29 +127,44 @@ export function SearchBar({ onSearch }: Props) {
       </datalist>
       {/* type="date" carries no placeholder (the browser renders its own
           format hint), so the label lives in title/aria-label instead */}
-      {/* min greys out impossible days in the picker, but validateDates
-          still re-checks both rules: a date typed straight into the field
+      {/* Visibly labelled, unlike the inputs around them: a bare date field
+          shows only its format hint, so two of them side by side are
+          indistinguishable. Same label-wraps-control shape as Sort below.
+
+          dir="ltr" only normalises where the browser puts the calendar
+          button and how it aligns the text, so these sit consistently with
+          the other fields under an RTL locale. It deliberately does NOT
+          touch the displayed date format -- that stays locale-driven
+          (dd/mm/yyyy here), which is what a local user expects, and the
+          value read back is ISO yyyy-mm-dd either way.
+
+          min greys out impossible days in the picker, but validateDates
+          still re-checks every rule: a date typed straight into the field
           isn't constrained by min in every browser. */}
-      <input
-        className={`${inputClass} w-40`}
-        type="date"
-        title="Check-in"
-        aria-label="Check-in"
-        min={todayIso()}
-        value={checkIn}
-        onChange={(e) => setCheckIn(e.target.value)}
-      />
-      <input
-        className={`${inputClass} w-40`}
-        type="date"
-        title="Check-out"
-        // tracks check-in once it's set, so the picker can't offer a
-        // check-out before it (same-day still reaches validateDates)
-        min={checkIn || todayIso()}
-        aria-label="Check-out"
-        value={checkOut}
-        onChange={(e) => setCheckOut(e.target.value)}
-      />
+      <label className="flex items-center gap-2 text-sm text-gray-500">
+        Check in
+        <input
+          className={`${inputClass} w-36`}
+          type="date"
+          dir="ltr"
+          min={todayIso()}
+          value={checkIn}
+          onChange={(e) => setCheckIn(e.target.value)}
+        />
+      </label>
+      <label className="flex items-center gap-2 text-sm text-gray-500">
+        Check out
+        <input
+          className={`${inputClass} w-36`}
+          type="date"
+          dir="ltr"
+          // tracks check-in once it's set, so the picker can't offer a
+          // check-out before it (same-day still reaches validateDates)
+          min={checkIn || todayIso()}
+          value={checkOut}
+          onChange={(e) => setCheckOut(e.target.value)}
+        />
+      </label>
       <input
         className={`${inputClass} w-24`}
         type="number"
