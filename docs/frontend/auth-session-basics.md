@@ -27,6 +27,59 @@ That is an explicit client-refresh contract. Giving a client a refresh token it 
 
 The alternative is a **BFF** — the browser holds an httpOnly cookie, a server-side component holds the tokens, and the SPA never touches one. That is genuinely more secure (`localStorage` is readable by any XSS on the page) and is on the roadmap as part of Epic 11's gateway/BFF. It would *replace* this code rather than extend it.
 
+### What "httpOnly cookie" actually means
+
+A cookie is a value the browser stores per-domain and **attaches automatically** to every request to that domain — no interceptor, no `Authorization` header, no application code. The server sets one by sending a header back:
+
+```
+Set-Cookie: refresh_token=<value>; HttpOnly; Secure; SameSite=Strict; Path=/auth/refresh
+```
+
+Three flags do the work, and each answers a different question:
+
+| Flag | What it does |
+|---|---|
+| `HttpOnly` | The browser refuses to expose this cookie to JavaScript. `document.cookie` simply cannot see it. |
+| `Secure` | Only ever sent over HTTPS, never plain HTTP. |
+| `SameSite` | Controls whether the browser attaches it on requests originating from *other* sites — the CSRF control. |
+
+**`HttpOnly` is the whole point of the comparison.** `localStorage` is JavaScript-readable by definition — that is what it's *for*, and it's why `configureAuth` in section 3 can hand tokens to `api/client.ts` at all. The consequence is that any script running on the page can read it: not just ours, but anything injected through an XSS hole, a compromised dependency, or a malicious browser extension. An httpOnly cookie removes that read entirely — the token exists in the browser but is unreachable from the page's own code.
+
+**What it protects against: exfiltration.** With `localStorage`, an XSS can read the refresh token and POST it to an attacker's server. From there it works from anywhere, at any time, long after the victim closes the tab.
+
+**What it does not protect against: abuse in place.** If a script is executing on your page, the browser still attaches the cookie to every request that script makes. The attacker can act as the user for as long as the page is open. They just can't take the credential *with* them.
+
+So the honest framing is that httpOnly turns "stolen forever, usable anywhere" into "abusable while you're on the page." That's a large reduction, not immunity.
+
+**Why this can't be a frontend-only switch.** The contract above hands both tokens back in a JSON body and takes the refresh token back in a request body. Cookies invert that: the *server* must send `Set-Cookie` at login and read the cookie on `/auth/refresh` instead of `RefreshRequest`. And because cookies attach automatically, CSRF becomes a live concern that a body-carried token never had — hence `SameSite`, and a narrow `Path` so the refresh cookie isn't sent on every ordinary API call. That's backend work on the auth module's public contract, which is why it sits in Epic 11 rather than being a small change here.
+
+**In the meantime, BOOK-78 narrows the same gap from a different direction.** With rotation (`docs/auth/refresh-token-rotation-basics.md`), a refresh token stolen out of `localStorage` no longer buys silent long-term access: the thief and the real user are now competing to use the same single-use token, and whichever refreshes second past the grace window trips reuse detection and kills the session for both. It doesn't stop the theft — it caps it and makes it *visible*. Note that rotation and httpOnly defend the same thing (steal-now-use-later) and neither one stops a script abusing the session in place, which is why the BFF is still worth doing even now that rotation has shipped.
+
+### The third option: in memory — and why the real answer splits the two tokens
+
+`localStorage` and cookies aren't the only choices. An SPA can hold a token in a plain JS variable or React state and never persist it at all.
+
+| Where | Survives reload | Readable by page scripts |
+|---|---|---|
+| `localStorage` | yes | yes — one line, `localStorage.getItem(...)` |
+| in memory | **no** | yes, but only by a script that hooks into the app |
+| httpOnly cookie | yes | **no** |
+
+**In memory is genuinely better at rest.** Nothing is sitting in storage for a generic XSS payload to scrape; an attacker has to reach into a module closure or component state rather than read a well-known key. That's not a hard security boundary — a script running in the same context can still get there — but it's a real step up from a value any drive-by payload can lift in one line. And it leaves nothing behind when the tab closes.
+
+**The blocker is `F5`.** Hold the *refresh* token only in memory and every page reload logs the user out — precisely the persistence requirement that drove `localStorage` in section 3's `hydrate → setItem` flow.
+
+**So the standard pattern splits the two tokens by lifetime rather than picking one home for both:**
+
+| Token | Where | Why |
+|---|---|---|
+| access | **in memory** | 15 minutes, re-obtainable on demand, so it never needs to survive a reload |
+| refresh | **httpOnly cookie** | must survive a reload, and application code never needs to *read* it — only the browser does, automatically |
+
+On page load the SPA calls `/auth/refresh` with no token of its own; the browser attaches the cookie by itself, and a fresh access token lands in memory. Reloads work, and neither token is ever sitting in JS-readable storage. That combination — not the cookie alone — is what Epic 11's BFF is aiming at.
+
+**One thing it does not fix:** the two-tabs refresh race. Each tab still calls `/auth/refresh` independently on load, against the same session, so the server-side grace window described in `refresh-token-rotation-basics.md` §4 stays necessary under any of the three storage choices.
+
 ## 3. Wiring: why `configureAuth` instead of reading `localStorage`
 
 `api/client.ts` is a plain module — it cannot read React state. The obvious shortcut, reading `localStorage` directly from the client, would give the session **two owners** that must agree on a key name and a shape forever.

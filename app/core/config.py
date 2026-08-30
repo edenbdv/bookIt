@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
+    # BOOK-78: how long a just-spent refresh token is still accepted, answering
+    # with the token that replaced it instead of counting as reuse. This is the
+    # two-open-tabs case -- each tab has its own interceptor and neither knows
+    # the other is refreshing, which no amount of client-side single-flight
+    # fixes. Keep it seconds: it's also the window a genuinely stolen token
+    # stays replayable in. See docs/auth/refresh-token-rotation-basics.md.
+    refresh_reuse_grace_seconds: int = 10
+
     # BOOK-77 ranking tunable: roughly how many reviews a property needs
     # before its own average outweighs the global mean in the "recommended"
     # sort. Raise it to make ranking more conservative (harder for a listing

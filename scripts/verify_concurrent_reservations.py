@@ -33,7 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from app.auth.models import User
-from app.auth.security import create_access_token
+from app.auth.security import create_access_token, new_id
 from app.payment.models import Payment  # noqa: F401
 from app.property.models import Property
 from app.reservation.models import Reservation  # noqa: F401
@@ -86,7 +86,9 @@ async def fire_concurrent_bookings(guest_id: UUID, property_id: UUID) -> list[ht
     only), so one token for all requests is enough; see the chat discussion
     this script came out of for why that doesn't weaken the test.
     """
-    token = create_access_token(guest_id)
+    # throwaway sid (BOOK-78): access tokens aren't checked against the refresh
+    # store, so this needs no session in Redis -- it just has to be well-formed
+    token = create_access_token(guest_id, new_id())
     headers = {"Authorization": f"Bearer {token}"}
     reservation_body = {
         "property_id": str(property_id),
