@@ -45,53 +45,81 @@ visibility the other half has.
 **Revisit if:** the email and retry tickets are dropped or deferred indefinitely. Then a
 loop is the correct, smaller answer and this is over-built.
 
-## 2. arq, not Celery — *provisional*
+## 2. Celery + RabbitMQ, not arq + Redis — *revised, supersedes the original §2/§3*
 
-**Chosen:** arq.
+**Chosen:** Celery, with RabbitMQ as broker.
 
-- **Async-native.** The app is async end to end (FastAPI, async SQLAlchemy). Celery is
-  sync-first and needs a bridge to call async code; arq doesn't.
-- **Scheduling is built into the worker.** Celery needs a separate `celery beat`
-  process purely to enqueue timed jobs — two process types to deploy and watch instead
-  of one, and beat does not deduplicate itself, so "run exactly one" becomes a rule you
-  have to remember. arq's cron runs inside the worker.
-- **Smaller surface** to read and understand, which matters more here than feature
-  breadth.
+**Original reasoning (kept for the record, and it wasn't wrong on its own terms):**
+async-native, scheduling built into the worker instead of a separate `beat` process,
+and a smaller surface to read. All still true of arq. None of it is why this changed.
 
-**What Celery is genuinely better at,** so this isn't a one-sided comparison: a much
-larger ecosystem, far more production mileage, richer routing and monitoring, and
-broker flexibility. If this project ever needs workflow primitives (chains, chords,
-groups) or a mature monitoring story, Celery is the stronger choice.
+**Why revised:** this project is meant to demonstrate depth, not just ship a working
+queue. arq + Redis is a fully legitimate architecture for a smaller async app — the
+switch isn't "arq is unreliable." It's that Celery + RabbitMQ is the more conventional
+broker + task-framework pairing, and building it means learning mechanisms arq
+abstracts away entirely: queue semantics, acknowledgements, redelivery, routing,
+dead-lettering. That's worth more here than the smaller surface arq offered.
 
-**Revisit if:** we need multi-step workflow orchestration, or arq's smaller community
-becomes a problem when debugging something obscure.
+**What this buys, stated precisely — this is the part worth being exact about, because
+it's easy to overclaim:**
 
-## 3. Redis for the task broker — and it need not match the event bus
+- **RabbitMQ owns message *delivery*.** It holds a task until a worker acks it, and
+  redelivers if a worker dies mid-processing before acking. That's broker-level fault
+  tolerance for an **infrastructure failure** (worker crash, dropped connection).
+- **Celery owns task *execution and retry policy*.** Whether a task that was delivered
+  fine but failed for a business reason (the email provider timed out) should be
+  retried, how many times, with what backoff — that's an **application-level** decision,
+  made by Celery, not RabbitMQ. RabbitMQ redelivering an un-acked message and Celery
+  retrying a failed-but-acked task are different mechanisms for different failure modes.
+- **RabbitMQ does not "provide retries."** Celery's retry/backoff API
+  (`autoretry_for`, `retry_backoff`, `max_retries`) works the same way regardless of
+  broker — Celery-on-Redis gets it too. The reason to pick Celery over arq is a more
+  mature retry/workflow API; the reason to pick RabbitMQ over Redis is delivery
+  guarantees. They're two separate axes, not one bundled justification.
 
-**Chosen:** Redis, which arq requires anyway. Redis is already running for caching and
-rate limiting.
+**What we give up, honestly:**
 
-**Correcting an earlier assumption:** it seemed natural to pick RabbitMQ here because
-it's already in `docker-compose.yml` and the event-driven work will use it. That
-reasoning conflated two different things:
+- **Async-native simplicity.** Celery is sync-first; the app is async end to end. A
+  worker needs its own way to get a database session — `get_db()` is request-scoped and
+  doesn't apply outside a request. arq's answer would have been "just use
+  `UnitOfWork()` directly, nothing new needed"; Celery's answer isn't that simple and is
+  now the most important open question in §6.
+- **A second process type.** Celery needs `celery beat` for the scheduled expiry job
+  (BOOK-46) — arq would have run scheduling inside the worker itself. Two process types
+  to run and monitor instead of one, and beat does not deduplicate itself.
 
-- **A task queue** — "run *this function* later." The library owns the queue; there is
-  no topology to design.
-- **An event bus** — "*this happened*." Exchanges, routing keys, bindings, several
-  independent subscribers per event. The topology *is* the work.
+**Revisit if:** the sync/async bridge costs meaningfully more than the learning is
+worth, or `celery beat` deployment friction is disproportionate to two jobs.
 
-An event bus will need RabbitMQ whether or not tasks run on Redis. They don't have to
-share a broker, and using each for what it suits is a normal arrangement rather than a
-smell. What the event work genuinely reuses from here is the **worker process** — event
-consumers need something long-running outside HTTP to listen in — not the queue.
+## 3. RabbitMQ for the task queue; Kafka for the event bus — two brokers, deliberately
 
-**Implementation note (provisional):** point arq at a *different logical Redis database*
-from the cache (`redis://localhost:6379/1`). Cache keys are disposable and jobs are not;
-keeping them apart means a cache flush can never take pending jobs with it, and makes
-`redis-cli` inspection far easier to reason about.
+**Chosen:** RabbitMQ is the Celery broker here (Epic 6). Epic 7's event bus
+(BOOK-48) uses **Kafka**, not RabbitMQ. Redis stays for caching, rate limiting, and
+distributed locks — it is not used for jobs or events.
 
-**Revisit if:** we ever want a single broker for operational simplicity, or need routing
-features Redis can't express.
+This means the project runs three messaging-adjacent components, each doing the thing
+it's actually suited to, rather than one broker stretched across two purposes:
+
+- **RabbitMQ / Celery — task queue.** "Run *this function* later." Celery owns the
+  queue; there's no topology to design beyond what Celery creates. Strong at routing,
+  per-message ack/nack, and dead-lettering a single failed job.
+- **Kafka — event bus.** "*This happened*," published once, replayable, read by
+  however many independent consumers want it at their own pace. This is what BOOK-48
+  designs — topics and partitions, not exchanges and bindings — and it's what makes the
+  **outbox pattern** (Epic 7) natural: the relay reads an append-only log instead of
+  publishing into a broker that doesn't retain what's already been consumed.
+- **Redis — cache, rate limiting, locks.** Fast, disposable, ephemeral state. Never a
+  queue for anything that must not be lost.
+
+Because these are two genuinely separate brokers rather than one broker shared for two
+purposes, there's no topology-collision risk to design around here — no vhost, no
+shared exchange namespace. `docker-compose.yml` simply runs both `rabbitmq` and `kafka`
+as independent services.
+
+**Revisit if:** running a third piece of infrastructure (Kafka) purely for the event
+bus turns out to be more operational overhead than the learning is worth, in which case
+collapsing the event bus onto the existing RabbitMQ (per BOOK-48's original title) is
+the fallback — but that would need the vhost/namespace separation this version avoids.
 
 ## 4. One worker, many jobs
 
@@ -122,13 +150,16 @@ against a real job that can fail than in the abstract.
 
 ## 6. Open questions for `BOOK-44`
 
-- **How does a job get a database session?** `get_db()` (`core/db.py`) is a
-  request-scoped FastAPI dependency and there is no request in a worker. Needs an
-  answer before any real job is written.
-- **Confirm arq's cron deduplication.** It should derive a deterministic job id per
-  firing so only one worker's attempt is accepted, which is what makes scheduled jobs
-  safe under multiple instances. Verify rather than assume — it's the difference
-  between one expiry run and N.
+- **How does a Celery task get a database session, given the app is async?**
+  `get_db()` (`core/db.py`) is a request-scoped, async FastAPI dependency and Celery
+  tasks are sync by default. Needs a concrete answer — e.g. a separate sync
+  SQLAlchemy engine/session for the worker, or running the async `UnitOfWork` via
+  `asyncio.run()` per task — before any real job is written. This is the main cost of
+  choosing Celery over arq and should be resolved first.
+- **Confirm `celery beat`'s scheduling deduplication.** Unlike arq's in-worker cron,
+  beat is a separate process; if more than one instance of it ever runs, the expiry
+  job fires more than once. Needs an explicit answer for "run exactly one beat," not
+  an assumption.
 - **Does the worker ship in the same image as the app?** Same `Dockerfile` with a
   different command is the simpler default.
 
@@ -139,8 +170,8 @@ against a real job that can fail than in the abstract.
 | Decision | Choice | Revisit when |
 |---|---|---|
 | Where work runs | A worker process on a queue | Triggered work and retries both get dropped |
-| Library | arq (provisional) | Multi-step workflows, or community size bites |
-| Task broker | Redis, separate logical DB from the cache | Need one broker, or routing Redis can't express |
-| Task broker vs event bus | Independent; they need not match | — |
+| Library | Celery (revised from arq) | Sync/async bridge cost outweighs the learning goal |
+| Task broker | RabbitMQ (revised from Redis) | Delivery/redelivery guarantees stop being worth the ops cost |
+| Task broker vs event bus | Different brokers — RabbitMQ (tasks) vs. Kafka (events) | Running Kafka costs more than the event-bus learning is worth |
 | Worker count | One worker, many jobs; scale with copies | Head-of-line blocking, resources, scaling, blast radius, priority |
 | First job | The expiry job — idempotent, no external deps | — |
