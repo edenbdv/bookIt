@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.core.repository import BaseRepository
+from app.core.db.repository import BaseRepository
 from app.reservation.models import Reservation
 from app.review.models import Review
 

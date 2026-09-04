@@ -43,7 +43,7 @@ async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.U
     return property_
 ```
 
-This is deliberately the *one* layer allowed to contain business rules — contrast with `repository.py`, which `core/repository.py`'s own docstring says explicitly must not ("Data access only, no business rules"). `create_property` doesn't have an interesting rule to enforce yet (it's close to a pure passthrough), but this is where one would go — the AC's own example from `BOOK-28`, `guest_count <= property.max_guests`, will live in `reservation/service.py`'s eventual create-reservation function, not in `ReservationRepository`.
+This is deliberately the *one* layer allowed to contain business rules — contrast with `repository.py`, which `core/db/repository.py`'s own docstring says explicitly must not ("Data access only, no business rules"). `create_property` doesn't have an interesting rule to enforce yet (it's close to a pure passthrough), but this is where one would go — the AC's own example from `BOOK-28`, `guest_count <= property.max_guests`, will live in `reservation/service.py`'s eventual create-reservation function, not in `ReservationRepository`.
 
 **Why the `flush()` matters here, concretely:** `Property.created_at` is a server-side default — it doesn't exist in Python until the `INSERT` actually runs. `commit()` doesn't happen until the whole request finishes (`get_uow()`'s `__aexit__`, after this function has already returned). Without the `flush()`, `PropertyRead`'s response would have to build with an empty `created_at`, which isn't allowed by the schema. `flush()` runs the `INSERT` now, populates `property_.created_at` in Python, without ending the transaction.
 

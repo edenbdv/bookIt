@@ -2,8 +2,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.core.db import get_engine
-from app.core.redis_client import get_redis_client
+from app.core.cache.redis_client import get_redis_client
+from app.core.db.engine import get_engine
 
 router = APIRouter(tags=["core"])
 

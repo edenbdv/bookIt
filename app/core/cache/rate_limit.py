@@ -2,7 +2,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from app.core.redis_client import get_redis_client
+from app.core.cache.redis_client import get_redis_client
 
 
 @dataclass
@@ -16,7 +16,7 @@ class RateLimitResult:
 async def check_fixed_window(key: str, limit: int, window_seconds: int) -> RateLimitResult:
     """INCR/EXPIRE fixed-window check -- see docs/cache/rate-limiting-basics.md.
 
-    Unlike cache_get/cache_set (core/cache.py), this does NOT catch Redis
+    Unlike cache_get/cache_set (core/cache/cache_aside.py), this does NOT catch Redis
     errors itself: whether a Redis outage should fail open or fail closed
     differs by endpoint group (see that doc's "Decision" table), so the
     caller decides -- this primitive just lets the error propagate.

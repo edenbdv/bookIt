@@ -1,6 +1,6 @@
 """Seed the local dev database with realistic sample data.
 
-Run with: uv run python -m app.core.seed
+Run with: uv run python -m app.core.db.seed
 Safe to re-run: every seeded row has a fixed, hardcoded UUID (0000...0001-style),
 so re-running looks each one up by primary key first and skips it if already
 present, instead of inserting a duplicate.
@@ -13,8 +13,8 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User, UserRole
-from app.core.models import Base
-from app.core.unit_of_work import UnitOfWork
+from app.core.db.models import Base
+from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus

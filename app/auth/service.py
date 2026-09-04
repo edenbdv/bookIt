@@ -12,7 +12,7 @@ from app.auth.security import (
     new_id,
     verify_password,
 )
-from app.core.unit_of_work import UnitOfWork
+from app.core.db.unit_of_work import UnitOfWork
 
 
 class EmailAlreadyExistsError(Exception):

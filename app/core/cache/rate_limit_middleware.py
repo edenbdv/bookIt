@@ -4,8 +4,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.core.cache.rate_limit import check_fixed_window
 from app.core.config import get_settings
-from app.core.rate_limit import check_fixed_window
 
 logger = logging.getLogger(__name__)
 

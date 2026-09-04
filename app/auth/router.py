@@ -14,9 +14,9 @@ from app.auth.schemas import (
     UserLogin,
     UserRead,
 )
+from app.core.cache.rate_limit import check_sliding_window
 from app.core.config import get_settings
-from app.core.rate_limit import check_sliding_window
-from app.core.unit_of_work import UnitOfWork, get_uow
+from app.core.db.unit_of_work import UnitOfWork, get_uow
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

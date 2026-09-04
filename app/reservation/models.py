@@ -7,7 +7,7 @@ from sqlalchemy import CheckConstraint, Date, DateTime, Enum, ForeignKey, func
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.models import Base
+from app.core.db.models import Base
 
 if TYPE_CHECKING:
     from app.auth.models import User

@@ -17,7 +17,7 @@ Split out of `repository-pattern.md` while working on BOOK-26: none of this is a
 
 The cookie-cutter framing is the part worth holding onto: making the cutter doesn't make any cookies. You make the cutter **once** and keep reusing it; you press it down **fresh, every time**, to get a new cookie.
 
-That's exactly why `get_engine()` and `get_session_factory()` in [`core/db.py`](../../app/core/db.py) are both wrapped in `@lru_cache` (build once, reuse forever) while *calling* the factory is never cached:
+That's exactly why `get_engine()` and `get_session_factory()` in [`core/db/engine.py`](../../app/core/db/engine.py) are both wrapped in `@lru_cache` (build once, reuse forever) while *calling* the factory is never cached:
 
 ```python
 @lru_cache

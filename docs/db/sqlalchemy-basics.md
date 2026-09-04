@@ -1,6 +1,6 @@
 # SQLAlchemy / Postgres basics — A to Z
 
-A reference for the concepts behind `app/core/db.py` and every `models.py`. Written for someone comfortable with REST APIs (`fetch()`, request/response) but new to talking to a database directly.
+A reference for the concepts behind `app/core/db/engine.py` and every `models.py`. Written for someone comfortable with REST APIs (`fetch()`, request/response) but new to talking to a database directly.
 
 ## 1. Who's who: three separate things
 
@@ -18,10 +18,10 @@ Before you can save anything, SQLAlchemy needs to know what your tables look lik
 
 ## 2. `DeclarativeBase` and `Base` — the parent every model shares
 
-`DeclarativeBase` is SQLAlchemy's base class for turning a Python class into a mapped database table. You don't use it directly — you subclass it **exactly once**, and that subclass (we call it `Base`, in `app/core/models.py`) is what every model in the whole app inherits from:
+`DeclarativeBase` is SQLAlchemy's base class for turning a Python class into a mapped database table. You don't use it directly — you subclass it **exactly once**, and that subclass (we call it `Base`, in `app/core/db/models.py`) is what every model in the whole app inherits from:
 
 ```python
-# app/core/models.py
+# app/core/db/models.py
 from sqlalchemy.orm import DeclarativeBase
 
 class Base(DeclarativeBase):
@@ -30,7 +30,7 @@ class Base(DeclarativeBase):
 
 ```python
 # app/auth/models.py
-from app.core.models import Base
+from app.core.db.models import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -429,12 +429,12 @@ But it's still not final. Think of it like a server accepting your form and givi
 
 **Actually needed for:**
 1. **Server-computed values** — `created_at` (via `server_default=func.now()`, section 18) only becomes a real Python value after an actual round-trip; nothing client-side can produce it.
-2. **Cross-process visibility** — the identity-map shortcut above only helps *within* one running process. Re-running [`app/core/seed.py`](../../app/core/seed.py) starts a **fresh process with an empty identity map**, so its `session.get()` calls genuinely have to query Postgres — which only finds a prior run's rows if that earlier run actually flushed/committed them.
+2. **Cross-process visibility** — the identity-map shortcut above only helps *within* one running process. Re-running [`app/core/db/seed.py`](../../app/core/db/seed.py) starts a **fresh process with an empty identity map**, so its `session.get()` calls genuinely have to query Postgres — which only finds a prior run's rows if that earlier run actually flushed/committed them.
 3. **Precise, immediate error attribution** — flushing per-entity means a constraint violation surfaces right when that specific object is written, clearly tied to it — rather than surfacing as one large batched error at the very end, covering many pending objects at once, that's harder to trace back to which row actually caused it.
 
 **The identity map cuts both ways — it can also hand back stale data.** It only ever avoids a query by returning an object *already sitting in memory* — it never checks whether that object still matches the current row in Postgres. If `get(Property, id)` loads a row once, and something else — another request, another process, a raw SQL update — changes that row afterward, calling `get()` again *in the same session* returns the same unchanged Python object. No re-query happens, and nothing warns you the data may be out of date.
 
-This project sets `expire_on_commit=False` when building the session factory ([`core/db.py`](../../app/core/db.py)) — the default (`True`) would at least force a fresh load the *next* time you access an object's attributes after your own `commit()`. With it off, that safety net is disabled too: even post-commit, an already-loaded object stays exactly as it was when first loaded, until something forces a real reload. If staleness within a session genuinely matters, `await session.refresh(obj)` forces a real round-trip, bypassing the identity map on purpose.
+This project sets `expire_on_commit=False` when building the session factory ([`core/db/engine.py`](../../app/core/db/engine.py)) — the default (`True`) would at least force a fresh load the *next* time you access an object's attributes after your own `commit()`. With it off, that safety net is disabled too: even post-commit, an already-loaded object stays exactly as it was when first loaded, until something forces a real reload. If staleness within a session genuinely matters, `await session.refresh(obj)` forces a real round-trip, bypassing the identity map on purpose.
 
 **`IntegrityError` — a constraint violation, caught after `flush()`.** Item 3 above in practice: `app/review/service.py`'s `create_review` relies on the DB's `UNIQUE (reservation_id, author_id)` constraint to catch a duplicate review, instead of checking-then-inserting (which would race under concurrent requests). `flush()` is what sends the `INSERT` and gives Postgres the chance to reject it; SQLAlchemy wraps that rejection as `sqlalchemy.exc.IntegrityError`. It's broader than just `UNIQUE` — the same exception type wraps `NOT NULL`, `CHECK`, and foreign-key violations too, so catching it means "the database refused this for *some* integrity reason," not specifically the one you had in mind.
 
@@ -458,7 +458,7 @@ await session.commit()   # still succeeds
 
 This commits successfully even though the child (`Property`, which references `host_id`) was added *before* its parent (`User`) — proven live by actually running it. If `INSERT` statements were sent in `add()` order, this would fail with a foreign-key violation, since `host_id` wouldn't exist yet when `Property`'s row was written.
 
-**What actually determines the order:** during `flush()`, SQLAlchemy's Unit of Work looks at the real `ForeignKey` constraints declared in the table metadata (`Base.metadata`, from section 3) — `Property.host_id` has `ForeignKey("users.id")` — and builds a dependency graph from that: "a `Property` row depends on its `User` row existing first." It then runs a **topological sort** over that graph to decide the actual `INSERT` sequence. The ordering comes from the schema's real foreign-key structure, not from the order any Python code happened to run in — which is exactly what lets [`app/core/seed.py`](../../app/core/seed.py) freely mix related rows together without manually sequencing every `add()` call by hand.
+**What actually determines the order:** during `flush()`, SQLAlchemy's Unit of Work looks at the real `ForeignKey` constraints declared in the table metadata (`Base.metadata`, from section 3) — `Property.host_id` has `ForeignKey("users.id")` — and builds a dependency graph from that: "a `Property` row depends on its `User` row existing first." It then runs a **topological sort** over that graph to decide the actual `INSERT` sequence. The ordering comes from the schema's real foreign-key structure, not from the order any Python code happened to run in — which is exactly what lets [`app/core/db/seed.py`](../../app/core/db/seed.py) freely mix related rows together without manually sequencing every `add()` call by hand.
 
 **`session.delete(obj)` is `async` for a related reason: it may need to load a relationship just to know what's related.** Concretely: `Property` has `reservations: Mapped[list["Reservation"]] = relationship(back_populates="property")`. Call `await session.delete(some_property)`, and SQLAlchemy walks every relationship defined on `Property` to apply that relationship's cascade rule — but to apply a rule to "the related reservations," it first has to know which rows those are. If `some_property.reservations` hasn't already been loaded (the normal case — relationships are lazy by default), that's a real query, hence a real `await`. Compare `add()`, which never needs to look anything up — it only ever stages the one object handed to it, nothing about its relationships.
 
@@ -546,7 +546,7 @@ So: migrations are fundamentally about structure, same as Part A — but *applyi
 | Term | One-line meaning |
 |---|---|
 | `DeclarativeBase` | SQLAlchemy's base for mapped classes; subclass it exactly once |
-| `Base` | Our one shared subclass (`core/models.py`) — every model inherits from this, not from `DeclarativeBase` directly |
+| `Base` | Our one shared subclass (`core/db/models.py`) — every model inherits from this, not from `DeclarativeBase` directly |
 | `metadata` | The catalog of every table your models define; what Alembic reads to generate migrations |
 | `Mapped[T]` | Left side — the Python-facing type of an attribute |
 | `mapped_column(...)` | Right side — the actual database column's configuration |

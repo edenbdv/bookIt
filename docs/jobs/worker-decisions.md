@@ -151,7 +151,7 @@ against a real job that can fail than in the abstract.
 ## 6. Open questions for `BOOK-44`
 
 - **How does a Celery task get a database session, given the app is async?**
-  `get_db()` (`core/db.py`) is a request-scoped, async FastAPI dependency and Celery
+  `get_db()` (`core/db/engine.py`) is a request-scoped, async FastAPI dependency and Celery
   tasks are sync by default. Needs a concrete answer — e.g. a separate sync
   SQLAlchemy engine/session for the worker, or running the async `UnitOfWork` via
   `asyncio.run()` per task — before any real job is written. This is the main cost of

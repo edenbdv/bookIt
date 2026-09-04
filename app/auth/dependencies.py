@@ -5,9 +5,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.models import User
 from app.auth.security import TokenError, decode_token
+from app.core.cache.rate_limit import check_fixed_window
 from app.core.config import get_settings
-from app.core.rate_limit import check_fixed_window
-from app.core.unit_of_work import UnitOfWork, get_uow
+from app.core.db.unit_of_work import UnitOfWork, get_uow
 
 # HTTPBearer, not OAuth2PasswordBearer -- our /auth/login takes a JSON body
 # (UserLogin), not OAuth2's form-encoded grant, so HTTPBearer's plain

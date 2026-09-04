@@ -43,6 +43,7 @@ services:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
       REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
     ports:
       - "8000:8000"
     depends_on:
@@ -61,6 +62,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # BOOK-44: same image as `app`, different command -- a separate process/
+  # container so it scales and restarts independently of the API. See
+  # docs/jobs/worker-decisions.md section 6 ("does the worker ship in the
+  # same image as the app?") and docs/jobs/background-jobs-basics.md's
+  # "worker on a queue" section for why this isn't run inside `app` instead.
+  #
+  # Only CELERY_BROKER_URL for now -- BOOK-44's task (`ping`) touches no
+  # database and no cache. DATABASE_URL/REDIS_URL get added here once
+  # BOOK-45/BOOK-46 land real jobs that need them.
+  worker:
+    build: .
+    command: celery -A app.worker worker --loglevel=info
+    environment:
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
 
 volumes:
   pgdata:

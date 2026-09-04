@@ -188,7 +188,7 @@ Every DB `CheckConstraint`/`UniqueConstraint`/`ExcludeConstraint` in this codeba
 | `User.email` unique | Unique index | 3 | ❌ not possible — needs every *other* user row |
 | `Review` unique per `(reservation_id, author_id)` | `UniqueConstraint` | 3 | ❌ not possible — needs every *other* review row |
 
-**Why keep the DB constraint even where the schema already checks the same thing (tiers 1–2)?** Defense in depth, not redundancy: the schema check only runs for requests that go through this particular FastAPI route. The DB constraint is the backstop that holds regardless of how a row gets written — `scripts/verify_no_overlapping_reservations.py`, `core/seed.py`, a future admin script, or a bug in `service.py` that bypasses the schema entirely. The schema check exists purely for a *better error, earlier* (section 2) — it's never the only thing standing between bad data and the table.
+**Why keep the DB constraint even where the schema already checks the same thing (tiers 1–2)?** Defense in depth, not redundancy: the schema check only runs for requests that go through this particular FastAPI route. The DB constraint is the backstop that holds regardless of how a row gets written — `scripts/verify_no_overlapping_reservations.py`, `core/db/seed.py`, a future admin script, or a bug in `service.py` that bypasses the schema entirely. The schema check exists purely for a *better error, earlier* (section 2) — it's never the only thing standing between bad data and the table.
 
 ## 3.6 The reverse direction: `model_dump()` builds an ORM instance from a schema
 

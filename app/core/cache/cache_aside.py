@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Any
 
-from app.core.redis_client import get_redis_client
+from app.core.cache.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 

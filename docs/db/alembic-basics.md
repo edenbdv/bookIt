@@ -36,7 +36,7 @@ Migrations form a **chain**, not an unordered pile: each one records its own rev
 - **`env.py`** — an actual Python script Alembic runs every time, which decides two things: **which database to connect to**, and **what the "correct" schema looks like** (called `target_metadata`, normally set to `Base.metadata` — the same registry from `sqlalchemy-basics.md` sections 2–3).
 
 This is the file we'll need to edit for two things specific to this project:
-1. Import every model module (`app.auth.models`, `app.property.models`, etc.) so they're actually registered on `Base.metadata` before Alembic looks at it — this is the exact gap `core/models.py`'s own docstring flags: *"A model only reaches the catalog if its module is imported... Alembic needs somewhere that imports all of them (see BOOK-23)."*
+1. Import every model module (`app.auth.models`, `app.property.models`, etc.) so they're actually registered on `Base.metadata` before Alembic looks at it — this is the exact gap `core/db/models.py`'s own docstring flags: *"A model only reaches the catalog if its module is imported... Alembic needs somewhere that imports all of them (see BOOK-23)."*
 2. Read the database URL from `get_settings().database_url` (the app's real config) instead of `alembic.ini`'s hardcoded string — so migrations always target whatever database the app itself is actually configured to use.
 
 ## 4. `autogenerate` — Alembic writes the migration for you, but isn't magic
