@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
-from app.core.unit_of_work import UnitOfWork, get_uow
+from app.core.db.unit_of_work import UnitOfWork, get_uow
 from app.review import service
 from app.review.models import Review
 from app.review.schemas import ReviewCreate, ReviewRead

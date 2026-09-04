@@ -1,13 +1,13 @@
 """Bulk realistic-volume data for BOOK-88's measurement spike.
 
-app/core/seed.py's handful of fixed rows is deliberately tiny and readable --
+app/core/db/seed.py's handful of fixed rows is deliberately tiny and readable --
 fine for exercising code paths, useless for measuring query cost, since
 everything fits in a single Postgres page and every plan looks instant.
 This script exists purely to make BOOK-88's EXPLAIN ANALYZE / endpoint
 latency numbers mean something: ~1000 properties, ~50 reservations (and one
 guest review each) per property, ~50k reviews total, one photo per property.
 
-Idempotent like app/core/seed.py, but via a different mechanism: individual
+Idempotent like app/core/db/seed.py, but via a different mechanism: individual
 get_or_create() round-trips don't scale to tens of thousands of rows, so
 every id here is a deterministic uuid5 (same input -> same id every run) and
 inserts use ON CONFLICT DO NOTHING instead of a SELECT-then-insert per row.
@@ -36,7 +36,7 @@ from app.review.models import Review
 DATABASE_URL = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
 
 # a fixed namespace so uuid5(NAMESPACE, "<anything>") is stable across runs --
-# same technique as app/core/seed.py's hardcoded UUIDs, just generated instead
+# same technique as app/core/db/seed.py's hardcoded UUIDs, just generated instead
 # of hand-typed since there are tens of thousands of them here
 NAMESPACE = uuid.UUID("11111111-1111-1111-1111-111111111111")
 

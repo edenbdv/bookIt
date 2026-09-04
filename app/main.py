@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.cache.rate_limit_middleware import RateLimitMiddleware
 from app.core.config import get_settings
-from app.core.rate_limit_middleware import RateLimitMiddleware
 
 
 def create_app() -> FastAPI:

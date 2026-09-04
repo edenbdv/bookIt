@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
     redis_url: str = "redis://localhost:6379/0"
 
+    # BOOK-44: Celery's broker. RabbitMQ, not Redis -- see
+    # docs/jobs/worker-decisions.md section 2 for why this project uses Celery
+    # on RabbitMQ instead of arq on Redis.
+    celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
+
     # dev-only default -- every real deployment must override this via .env,
     # since anyone who knows it can forge a valid access token for any user
     secret_key: str = "dev-secret-change-me"

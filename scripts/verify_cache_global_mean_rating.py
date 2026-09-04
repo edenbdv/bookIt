@@ -20,10 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from redis.asyncio import Redis
 
-from app.core.cache import cache_get, cache_set
+from app.core.cache.cache_aside import cache_get, cache_set
+from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
-from app.core.redis_client import get_redis_client
-from app.core.unit_of_work import UnitOfWork
+from app.core.db.unit_of_work import UnitOfWork
 from app.property.service import GLOBAL_MEAN_RATING_CACHE_KEY, _get_global_mean_rating
 
 
@@ -72,7 +72,7 @@ async def main() -> None:
     # 4. Redis unreachable -- must degrade to a direct DB read, never raise.
     #    Nothing listens on this port, so the connection fails fast.
     broken_client = Redis.from_url("redis://localhost:1/0")
-    with patch("app.core.cache.get_redis_client", return_value=broken_client):
+    with patch("app.core.cache.cache_aside.get_redis_client", return_value=broken_client):
         miss = await cache_get(GLOBAL_MEAN_RATING_CACHE_KEY)
         print(
             f"4a. cache_get with Redis unreachable -- returned {miss!r} -- "

@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.models import Base
+from app.core.db.models import Base
 
 
 class BaseRepository[ModelT: Base]:

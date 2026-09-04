@@ -3,7 +3,7 @@ from types import TracebackType
 from typing import Self
 
 from app.auth.repository import UserRepository
-from app.core.db import get_session_factory
+from app.core.db.engine import get_session_factory
 from app.payment.repository import PaymentRepository
 from app.property.repository import PropertyPhotoRepository, PropertyRepository
 from app.reservation.repository import ReservationRepository

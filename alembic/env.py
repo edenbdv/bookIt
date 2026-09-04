@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # imported for their side effect: registering each table on Base.metadata.
 # Alembic only sees a table if its module has actually been imported --
-# see core/models.py's docstring and BOOK-23.
+# see core/db/models.py's docstring and BOOK-23.
 import app.auth.models
 import app.payment.models
 import app.property.models
@@ -20,7 +20,7 @@ import app.reservation.models
 import app.review.models  # noqa: F401
 from alembic import context
 from app.core.config import get_settings
-from app.core.models import Base
+from app.core.db.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

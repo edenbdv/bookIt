@@ -6,7 +6,7 @@ Written alongside the actual BOOK-27 work (unlike some of the other docs in this
 
 ## 1. The problem: nothing currently guarantees "both writes or neither"
 
-`get_db()` ([`core/db.py`](../../app/core/db.py)) hands out one `AsyncSession` per request, but a `Session` by itself has no opinion about *when* to commit. If a service function does two writes through that session — e.g. creating a `Reservation` and its first `Payment` (Epic 8's saga) — nothing stops one succeeding while the other fails, unless every caller remembers to wrap its own `try`/`except`/`rollback()` by hand, every time.
+`get_db()` ([`core/db/engine.py`](../../app/core/db/engine.py)) hands out one `AsyncSession` per request, but a `Session` by itself has no opinion about *when* to commit. If a service function does two writes through that session — e.g. creating a `Reservation` and its first `Payment` (Epic 8's saga) — nothing stops one succeeding while the other fails, unless every caller remembers to wrap its own `try`/`except`/`rollback()` by hand, every time.
 
 **Concretely, without `UnitOfWork`, every place doing a multi-repository write repeats this by hand:**
 
@@ -55,7 +55,7 @@ A standard pattern (from Fowler's *Patterns of Enterprise Application Architectu
 * an exception propagated → roll back everything, as if none of it happened
 
 ```python
-# app/core/unit_of_work.py
+# app/core/db/unit_of_work.py
 class UnitOfWork:
     async def __aenter__(self) -> Self:
         self.session = get_session_factory()()
@@ -91,11 +91,11 @@ Unit of Work is standard practice; most ORMs already implement it under the hood
 * **Spring's `@Transactional`** — closer to automatic: one annotation on a method, and Spring wraps the entire call with begin/commit/rollback via a proxy, no explicit block in your code at all.
 * **EF Core's `SaveChanges()`** — still an explicit call you make yourself, the same as calling `session.commit()`.
 
-**Why SQLAlchemy doesn't ship one:** it's a toolkit, not an opinionated full-stack framework — it has no opinion on *where* a transaction boundary belongs (one HTTP request? one service call? a background job spanning several DB calls?). Django and Spring already made that call for you (per-request, or per-annotated-method). SQLAlchemy leaves it to the app to decide. `UnitOfWork` (`core/unit_of_work.py`) is us making that decision ourselves — "one unit of work = one block of business logic" — since nothing upstream of us already made it.
+**Why SQLAlchemy doesn't ship one:** it's a toolkit, not an opinionated full-stack framework — it has no opinion on *where* a transaction boundary belongs (one HTTP request? one service call? a background job spanning several DB calls?). Django and Spring already made that call for you (per-request, or per-annotated-method). SQLAlchemy leaves it to the app to decide. `UnitOfWork` (`core/db/unit_of_work.py`) is us making that decision ourselves — "one unit of work = one block of business logic" — since nothing upstream of us already made it.
 
 ## 4. Why this works with zero changes to `BaseRepository`
 
-Every repository attribute (`uow.reservations`, `uow.payments`, ...) is constructed from the *same* `self.session` object. A SQLAlchemy transaction belongs to the `Session`, not to any individual repository — so `uow.reservations.add(...)` and `uow.payments.add(...)` are automatically part of the same transaction without either repository knowing the other exists. `BaseRepository` ([`core/repository.py`](../../app/core/repository.py)) already just takes "an existing session" per its own docstring — `UnitOfWork` is simply the thing constructing and owning that session now, instead of `get_db()` or a script doing it ad hoc.
+Every repository attribute (`uow.reservations`, `uow.payments`, ...) is constructed from the *same* `self.session` object. A SQLAlchemy transaction belongs to the `Session`, not to any individual repository — so `uow.reservations.add(...)` and `uow.payments.add(...)` are automatically part of the same transaction without either repository knowing the other exists. `BaseRepository` ([`core/db/repository.py`](../../app/core/db/repository.py)) already just takes "an existing session" per its own docstring — `UnitOfWork` is simply the thing constructing and owning that session now, instead of `get_db()` or a script doing it ad hoc.
 
 ## 5. Why `__aenter__`/`__aexit__` specifically
 
@@ -187,7 +187,7 @@ ValueError: boom
 
 ## 8. What replaced what
 
-`app/core/seed.py`'s `main()` used to build its own engine, open a bare `AsyncSession`, call `seed()`, commit, then dispose the engine by hand:
+`app/core/db/seed.py`'s `main()` used to build its own engine, open a bare `AsyncSession`, call `seed()`, commit, then dispose the engine by hand:
 
 ```python
 # before
@@ -216,11 +216,11 @@ The AC's last line — "`service.py` functions receive a `UnitOfWork` ... instea
 
 ## 10. BOOK-27 status
 
-1. ✅ `UnitOfWork` in `app/core/unit_of_work.py` — wraps one session, exposes `users`/`properties`/`reservations`/`payments`/`reviews`.
+1. ✅ `UnitOfWork` in `app/core/db/unit_of_work.py` — wraps one session, exposes `users`/`properties`/`reservations`/`payments`/`reviews`.
 2. ✅ Async context manager — commit on clean exit, rollback on exception, always closes.
 3. ✅ One instance = one transaction = one session, by construction (fresh session built in `__aenter__`).
 4. `service.py` receiving a `UnitOfWork` — deferred until a real one exists (see section 8).
-5. ✅ `app/core/seed.py` refactored to use `UnitOfWork` instead of its own engine/session/commit/dispose sequence.
+5. ✅ `app/core/db/seed.py` refactored to use `UnitOfWork` instead of its own engine/session/commit/dispose sequence.
 
 ---
 
@@ -229,7 +229,7 @@ The AC's last line — "`service.py` functions receive a `UnitOfWork` ... instea
 | Term | One-line meaning |
 |---|---|
 | Unit of Work | One transaction, one `Session`, coordinating writes across any number of repositories |
-| `UnitOfWork` | `core/unit_of_work.py` — async context manager wrapping a session + every module's repository |
+| `UnitOfWork` | `core/db/unit_of_work.py` — async context manager wrapping a session + every module's repository |
 | `__aenter__` / `__aexit__` | Async context-manager protocol: setup, caller's code, guaranteed cleanup (commit or rollback) |
 | `uow.session` | Public, like `BaseRepository.session` — needed by generic helpers (e.g. `seed.py`'s `get_or_create`) that aren't scoped to one repository |
 | One instance = one transaction | Every `UnitOfWork()` builds a fresh session in `__aenter__` — no accidental reuse across units of work |

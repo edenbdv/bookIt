@@ -44,7 +44,7 @@ A model only gets picked up by autogenerate if its module is imported somewhere 
 ### Seed data
 
 ```bash
-uv run python -m app.core.seed
+uv run python -m app.core.db.seed
 ```
 
 Idempotent — every seeded row has a fixed id, so re-running finds existing rows instead of duplicating them. Needs `alembic upgrade head` run first.
@@ -75,7 +75,7 @@ uv run python scripts/verify_no_overlapping_reservations.py
 Each domain module (`app/auth/`, `app/property/`, `app/reservation/`, `app/payment/`, `app/review/`) is a self-contained vertical slice with the identical internal shape:
 
 - `models.py` — SQLAlchemy ORM (the DB table)
-- `repository.py` — data access only; inherits `BaseRepository` (`core/repository.py`) for generic CRUD (`get_by_id`, `list`, `add`, `delete`), adds only module-specific queries
+- `repository.py` — data access only; inherits `BaseRepository` (`core/db/repository.py`) for generic CRUD (`get_by_id`, `list`, `add`, `delete`), adds only module-specific queries
 - `schemas.py` — Pydantic `*Create`/`*Read`/`*Update` classes (the API contract — deliberately **not** the same shape as `models.py`; see [docs/domain-layer/pydantic-schemas-basics.md](docs/domain-layer/pydantic-schemas-basics.md))
 - `service.py` — business logic, HTTP-independent
 - `router.py` — thin FastAPI `APIRouter`

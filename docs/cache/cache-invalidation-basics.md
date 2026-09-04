@@ -22,7 +22,7 @@ BOOK-41 has to choose among these (plus prefix-`SCAN`, which is really (2) done 
 
 ### Two things that hold whichever you pick
 
-**Invalidate *after* the commit, never before.** The write happens inside the UoW transaction, which commits in `__aexit__` (`app/core/unit_of_work.py:29`). Delete the cache key mid-service and a concurrent read can miss, re-query, and repopulate the cache from a transaction that then *rolls back* — leaving a cached value that never existed in the database. Ordering here isn't a nicety.
+**Invalidate *after* the commit, never before.** The write happens inside the UoW transaction, which commits in `__aexit__` (`app/core/db/unit_of_work.py:29`). Delete the cache key mid-service and a concurrent read can miss, re-query, and repopulate the cache from a transaction that then *rolls back* — leaving a cached value that never existed in the database. Ordering here isn't a nicety.
 
 **It can never be atomic with Postgres.** Two systems, two connections, no shared transaction. A crash between "Postgres committed" and "Redis deleted" leaves a stale entry, and no amount of reordering fixes it — reordering only changes which side loses. This is precisely why (1) still matters after you've implemented (2) or (3): **the TTL is what makes every invalidation failure temporary instead of permanent.**
 

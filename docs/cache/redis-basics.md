@@ -61,7 +61,7 @@ The whole section in one table:
 Very little, deliberately:
 
 ```python
-# app/core/redis_client.py -- the entire file
+# app/core/cache/redis_client.py -- the entire file
 @lru_cache
 def get_redis_client() -> Redis:
     return Redis.from_url(get_settings().redis_url)
@@ -86,7 +86,7 @@ Connections are created **lazily, on demand**. Issue commands one after another 
 
 **Why `@lru_cache` is doing real work here.** Without it, every call to `get_redis_client()` builds a *new pool*. Pools don't share connections with each other, so a call per request means a pool per request, each opening its own connections and none of them ever reused — climbing toward Redis's `maxclients` (default 10000) until it starts refusing new ones. The decorator is what makes it one pool for the process's lifetime.
 
-**Where the Postgres parallel stops.** `get_engine()` (`app/core/db.py:15`) is the same shape — an engine holding a pool. But Postgres has sessions and transactions, so `db.py` needs a second layer: `get_db()`/`get_uow()` hand out a *request-scoped* `AsyncSession`, because a transaction is stateful and must never be shared across requests. Redis has no equivalent. Commands are independent — no session, no transaction spanning them by default — so the shared client is used directly from anywhere, with no per-request object to manage and no dependency to write.
+**Where the Postgres parallel stops.** `get_engine()` (`app/core/db/engine.py:15`) is the same shape — an engine holding a pool. But Postgres has sessions and transactions, so `db.py` needs a second layer: `get_db()`/`get_uow()` hand out a *request-scoped* `AsyncSession`, because a transaction is stateful and must never be shared across requests. Redis has no equivalent. Commands are independent — no session, no transaction spanning them by default — so the shared client is used directly from anywhere, with no per-request object to manage and no dependency to write.
 
 **Three things that will matter later:**
 
@@ -147,7 +147,7 @@ Following the module layout in `app/README.md` and `app/core/README.md`:
 
 - **The Redis client and a generic cache helper belong in `core/`** — cross-cutting infrastructure with no domain knowledge, alongside `db.py` and `unit_of_work.py`. A helper that knows what a `Property` is has been written in the wrong place.
 - **Cache-aside reads go in `service.py`**, not `repository.py`. Repositories are pure data access; a repository that sometimes doesn't hit the database is no longer that. Not `router.py` either — caching is behaviour, not HTTP. Details: `cache-aside-basics.md`.
-- **Invalidation is a service concern too**, and must happen *after* the transaction commits. The UoW commits in `__aexit__` (`app/core/unit_of_work.py:29`), so invalidating mid-service lets a concurrent read repopulate the cache from a transaction that then rolls back. There's no post-commit hook today — BOOK-41 has to add one or call out after the UoW exits. Details: `cache-invalidation-basics.md`.
+- **Invalidation is a service concern too**, and must happen *after* the transaction commits. The UoW commits in `__aexit__` (`app/core/db/unit_of_work.py:29`), so invalidating mid-service lets a concurrent read repopulate the cache from a transaction that then rolls back. There's no post-commit hook today — BOOK-41 has to add one or call out after the UoW exits. Details: `cache-invalidation-basics.md`.
 - **Rate limiting is middleware**, attached in `create_app()` (`app/main.py`) next to the CORS middleware — it applies across modules and runs before routing. Details: `rate-limiting-basics.md`.
 
 ---

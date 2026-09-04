@@ -23,7 +23,7 @@ That's it — you don't need to install Python packages globally, and you don't 
 After a fresh `alembic upgrade head` (schema exists but every table is empty), run:
 
 ```bash
-uv run python -m app.core.seed
+uv run python -m app.core.db.seed
 ```
 
 This inserts a small set of realistic sample data — hosts, guests, properties, reservations (including one cancelled, so the `EXCLUDE` constraint's `WHERE status <> 'cancelled'` behavior is visible), payments, and reviews — so there's something to look at in DBeaver or call through the API without inserting rows by hand.

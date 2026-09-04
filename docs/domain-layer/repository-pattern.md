@@ -12,12 +12,12 @@ That's not wrong, exactly, but it fuses two different concerns into one function
 
 ## 2. What a repository actually is
 
-One class per module, holding the query methods for that module's models — named for what's being asked, not how it's fetched. The truly generic CRUD (`get_by_id`, `list`, `add`, `delete`) lives once in `BaseRepository` ([`core/repository.py`](../../app/core/repository.py) — see section 3); each module's repository inherits that and adds only what's actually specific to it:
+One class per module, holding the query methods for that module's models — named for what's being asked, not how it's fetched. The truly generic CRUD (`get_by_id`, `list`, `add`, `delete`) lives once in `BaseRepository` ([`core/db/repository.py`](../../app/core/db/repository.py) — see section 3); each module's repository inherits that and adds only what's actually specific to it:
 
 ```python
 # app/property/repository.py
 from sqlalchemy import select
-from app.core.repository import BaseRepository
+from app.core.db.repository import BaseRepository
 from app.property.models import Property
 
 class PropertyRepository(BaseRepository[Property]):
@@ -41,7 +41,7 @@ class PropertyRepository(BaseRepository[Property]):
 
 This is the same "package by feature, not by layer" reasoning [`app/README.md`](../../app/README.md) already makes for `models.py`/`schemas.py`/`service.py`/`router.py`: a `PropertyRepository` belongs in `app/property/`, a `ReservationRepository` in `app/reservation/`, and so on — not a single `app/repositories.py` holding every domain's queries mixed together. Same motivation both times: each domain's code stays in one place, and extracting a module later (Epic 11) doesn't mean untangling a shared file first.
 
-That's a different thing from `BaseRepository` (`app/core/repository.py`). It's not "one repository for every domain" — it's a shared *base class* holding only what's identical across all of them (`get_by_id`, `list`, `add`, `delete`), so `PropertyRepository`/`ReservationRepository`/etc. don't each retype the same four methods. It carries zero domain knowledge — only "the model has an `id`" — so it belongs in `core/` the same way `Base` (`core/models.py`) and `get_db()` (`core/db.py`) do: generic infrastructure every module already depends on, not a new kind of coupling *between* modules. `property/` still doesn't know `reservation/` exists.
+That's a different thing from `BaseRepository` (`app/core/db/repository.py`). It's not "one repository for every domain" — it's a shared *base class* holding only what's identical across all of them (`get_by_id`, `list`, `add`, `delete`), so `PropertyRepository`/`ReservationRepository`/etc. don't each retype the same four methods. It carries zero domain knowledge — only "the model has an `id`" — so it belongs in `core/` the same way `Base` (`core/db/models.py`) and `get_db()` (`core/db/engine.py`) do: generic infrastructure every module already depends on, not a new kind of coupling *between* modules. `property/` still doesn't know `reservation/` exists.
 
 **Bare shell now, methods added later — this isn't unusual.** Every module that owns a model (`UserRepository`, `ReservationRepository`, `PaymentRepository`, `ReviewRepository`, alongside `PropertyRepository`) already exists as a bare `BaseRepository[Model]` subclass with no domain-specific methods yet — those get added only once that module's `service.py` actually needs a specific query. This mirrors how other stacks do it: Spring Data JPA scaffolds `interface FooRepository extends JpaRepository<Foo, UUID> {}` the moment `Foo` is an entity, empty at first; EF Core's generic repository pattern and Django's model manager (`Foo.objects`) work the same way. The scaffolding is cheap and defined upfront; the real query logic is added lazily, per caller.
 
@@ -57,9 +57,9 @@ This is about each module's *own* methods, not `BaseRepository`'s four generic o
 
 ## 6. The missing piece first: there's no session to inject yet
 
-Every repository method above takes `session: AsyncSession` — but nothing in this codebase currently constructs one. [`core/db.py`](../../app/core/db.py) only has `get_engine()`, an `lru_cache`d `AsyncEngine`; the one place a DB connection is used today ([`core/router.py`](../../app/core/router.py)'s `/health`) opens a raw `engine.connect()` directly, not a `Session`.
+Every repository method above takes `session: AsyncSession` — but nothing in this codebase currently constructs one. [`core/db/engine.py`](../../app/core/db/engine.py) only has `get_engine()`, an `lru_cache`d `AsyncEngine`; the one place a DB connection is used today ([`core/router.py`](../../app/core/router.py)'s `/health`) opens a raw `engine.connect()` directly, not a `Session`.
 
-FastAPI's usual answer is a `yield`-based dependency, now in [`core/db.py`](../../app/core/db.py):
+FastAPI's usual answer is a `yield`-based dependency, now in [`core/db/engine.py`](../../app/core/db/engine.py):
 
 ```python
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -79,8 +79,8 @@ A repository's job ends at "read/write this module's rows." It says nothing abou
 
 ## 8. BOOK-26 status
 
-1. ✅ `get_db()` in `core/db.py` (section 6) — the session dependency every repository needs.
-2. ✅ `BaseRepository[ModelT]` in `core/repository.py` (section 3) — `get_by_id`, `list`, `add`, `delete`.
+1. ✅ `get_db()` in `core/db/engine.py` (section 6) — the session dependency every repository needs.
+2. ✅ `BaseRepository[ModelT]` in `core/db/repository.py` (section 3) — `get_by_id`, `list`, `add`, `delete`.
 3. ✅ `PropertyRepository` in `app/property/repository.py`, inheriting the base, adding `get_active_by_id` and `list_filtered` for `BOOK-29`.
 4. ✅ `UserRepository`, `ReservationRepository`, `PaymentRepository`, `ReviewRepository` — bare `BaseRepository[Model]` shells (`app/auth/repository.py`, `app/reservation/repository.py`, `app/payment/repository.py`, `app/review/repository.py`), matching the AC's "one repository class per module that owns a model." Module-specific methods (beyond the inherited four) still only get added once that module's epic actually needs a query — the epics aren't organized per-module (checked: none of the 13 epics is "the Review epic"), so waiting for one to "naturally" prompt each repository isn't reliable.
 5. No behavior changes to verify yet — this ticket is structural. The real test is BOOK-29 successfully calling `PropertyRepository` instead of touching `select()` directly.
@@ -92,7 +92,7 @@ A repository's job ends at "read/write this module's rows." It says nothing abou
 | Term | One-line meaning |
 |---|---|
 | Repository | One class per module, wrapping that module's models' queries behind business-named methods |
-| `BaseRepository[ModelT]` | Shared base (`core/repository.py`) providing `get_by_id`/`list`/`add`/`delete` — generic, no domain knowledge, inherited by every module's repository |
+| `BaseRepository[ModelT]` | Shared base (`core/db/repository.py`) providing `get_by_id`/`list`/`add`/`delete` — generic, no domain knowledge, inherited by every module's repository |
 | `service.py` | Calls the repository; never imports `select` or touches `AsyncSession` query-building itself |
 | `get_db()` | The `yield`-based FastAPI dependency that hands each request a request-scoped `AsyncSession` — doesn't exist yet, first thing BOOK-26 needs. Mechanics: [`dependency-injection-basics.md`](../db/dependency-injection-basics.md) |
 | Unit of Work (BOOK-27) | The separate concern of transactional boundaries spanning one or more repositories — not part of the repository itself |

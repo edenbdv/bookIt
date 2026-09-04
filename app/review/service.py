@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy.exc import IntegrityError
 
-from app.core.unit_of_work import UnitOfWork
+from app.core.db.unit_of_work import UnitOfWork
 from app.reservation.models import ReservationStatus
 from app.review.models import Review
 from app.review.schemas import ReviewCreate

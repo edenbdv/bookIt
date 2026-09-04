@@ -51,7 +51,7 @@ class ReservationCreate(BaseModel):
         # check_out needs no check of its own: it's already > check_in.
         #
         # Only guards creation. Existing past-dated rows stay valid, which
-        # is what lets the seed's COMPLETED stay (app/core/seed.py) and any
+        # is what lets the seed's COMPLETED stay (app/core/db/seed.py) and any
         # real completed booking keep their history.
         earliest = datetime.now(UTC).date() - timedelta(days=BOOKING_PAST_SLACK_DAYS)
         if self.check_in < earliest:

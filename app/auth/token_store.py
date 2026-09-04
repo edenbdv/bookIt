@@ -15,12 +15,12 @@ Only ids are ever stored, never token strings: a `jti` is inert without
 docs/auth/refresh-token-rotation-basics.md.
 
 Redis errors are deliberately NOT caught here -- same contract as
-core/rate_limit.py's primitives. Refresh IS the security control, so the caller
+core/cache/rate_limit.py's primitives. Refresh IS the security control, so the caller
 fails closed (503) rather than falling back to honouring any signed token.
 """
 
+from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
-from app.core.redis_client import get_redis_client
 
 
 def _session_key(session_id: str) -> str:
