@@ -10,6 +10,8 @@ does, and docs/jobs/rabbitmq-basics.md for what happens underneath it once a
 message reaches RabbitMQ.
 """
 
+import time
+
 from app.core.jobs.celery_app import app
 
 
@@ -22,4 +24,8 @@ def ping() -> str:
     plumbing -- same reasoning as choosing the expiry job first in
     docs/jobs/worker-decisions.md section 5, one step earlier.
     """
+    # TEMPORARY (not committed): slowed down on purpose so the ack window
+    # is visible in RabbitMQ's UI as "Unacked: 1" for a few seconds. Revert
+    # to `return "pong"` right after.
+    time.sleep(10)
     return "pong"

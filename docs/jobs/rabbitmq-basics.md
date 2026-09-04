@@ -180,9 +180,41 @@ hot path.
 Everything above is raw AMQP. A library like Celery hides most of it — which is exactly
 why it's worth knowing what's underneath before relying on the defaults:
 
-- **Celery creates its own exchange and queue automatically** for the common case — you
-  don't hand-design exchange/binding topology just to run background tasks. That
+- **Celery creates its own queue automatically** for the common case — you don't
+  hand-design exchange/binding topology just to run background tasks. That
   hand-designed topology is what an *event bus* needs (§3), not a task queue.
+
+  **Worth checking the real exchange used, rather than trusting the worker's own
+  startup banner.** A worker's log prints something like
+  `.> celery exchange=celery(direct) key=celery`, which reads as "a direct exchange
+  named `celery`." But inspecting an actual published message (RabbitMQ's management
+  UI → the `celery` queue → "Get messages") shows `Exchange: (AMQP default)` — the
+  message was actually published through RabbitMQ's **nameless default exchange**
+  (every queue is auto-bound to it under its own name, per §2), not a named `celery`
+  exchange at all. The banner is Celery/kombu's own internal display convention for its
+  `Queue` object; the message you can actually pull off the wire is ground truth. When
+  the two disagree, believe the message.
+
+  That same message also confirms other things from earlier sections concretely rather
+  than abstractly: `Redelivered` is unset on a first delivery (§4's redelivery flag,
+  made visible), `delivery_mode: 2` is AMQP's code for *persistent* (§5 — Celery sets
+  this by default, though the queue itself must also be durable for it to matter), and
+  `correlation_id` carries the task's ID (Celery reuses AMQP's standard property for
+  it rather than inventing a new one).
+
+  **It also creates more than just that one queue — open the management UI after
+  starting a worker and there are three, not one:**
+
+  | Queue | What it's for |
+  |---|---|
+  | `celery` | The actual task queue — this is the one carrying real work (`ping`, `send_email`, etc.) |
+  | `celery@<hostname>.celery.pidbox` | **Control plane**, one per running worker. Not a task queue at all — it's how remote-control commands reach that specific worker: `celery inspect ping`, `celery control shutdown`, revoking a task, adjusting rate limits at runtime. `AD` (auto-delete) means it disappears the moment that worker disconnects. |
+  | `celeryev.<uuid>` | **Event/gossip traffic** between workers — the mechanism behind `mingle: searching for neighbors` in a worker's startup log, plus periodic heartbeats, plus what a monitoring tool like Flower would consume. A steady small message rate here is normal even with zero tasks ever enqueued, and even without Celery's `-E` flag — `-E` only controls *task*-level events (task-sent, task-succeeded), not this worker-to-worker channel, which runs regardless. |
+
+  None of these three come from anything you configure — they're Celery's own internal
+  machinery, created automatically the moment any worker starts, independent of what
+  tasks actually exist. Seeing three queues after enqueueing exactly one task type
+  isn't a sign anything is misconfigured.
 - **`task_acks_late`** is Celery's on/off switch for §4's ack timing, and it **defaults
   to off** (ack-early). If the entire reason for choosing RabbitMQ was crash-safe
   redelivery, this setting is not optional — it must be turned on explicitly, or the
