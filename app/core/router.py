@@ -4,6 +4,7 @@ from sqlalchemy import text
 
 from app.core.cache.redis_client import get_redis_client
 from app.core.db.engine import get_engine
+from app.worker import ping
 
 router = APIRouter(tags=["core"])
 
@@ -34,3 +35,13 @@ async def health() -> JSONResponse:
 
     healthy = all(status == "ok" for status in checks.values())
     return JSONResponse(status_code=200 if healthy else 503, content=checks)
+
+
+# BOOK-44: temporary proof that enqueue -> execute works end to end through
+# Celery/RabbitMQ. Not a real feature -- delete once BOOK-45 (the real email
+# job) exists and can serve as the actual end-to-end proof instead. See
+# docs/jobs/celery-basics.md section 2 for what .delay() actually does.
+@router.post("/jobs/ping")
+async def enqueue_ping() -> dict[str, str]:
+    result = ping.delay()
+    return {"task_id": result.id}

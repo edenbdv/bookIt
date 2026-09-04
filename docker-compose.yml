@@ -74,7 +74,7 @@ services:
   # BOOK-45/BOOK-46 land real jobs that need them.
   worker:
     build: .
-    command: celery -A app.worker worker --loglevel=info
+    command: uv run --no-dev celery -A app.worker worker --loglevel=info
     environment:
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
     depends_on:
