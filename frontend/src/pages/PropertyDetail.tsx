@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError, getProperty, getPropertyReviews } from '../api/client'
+import { BookingForm } from '../components/BookingForm'
 import { PhotoCarousel } from '../components/PhotoCarousel'
 import { ReviewList } from '../components/ReviewList'
 import type { PropertyDetail as PropertyDetailType, Review } from '../types'
+import { formatPrice } from '../utils/format'
 
 type LoadState =
   | { status: 'loading' }
@@ -16,10 +18,6 @@ type ReviewsState =
   | { status: 'loading' }
   | { status: 'error' }
   | { status: 'ready'; reviews: Review[] }
-
-function formatPrice(cents: number): string {
-  return `$${(cents / 100).toFixed(0)}`
-}
 
 export function PropertyDetail() {
   const { id } = useParams<{ id: string }>()
@@ -106,6 +104,10 @@ export function PropertyDetail() {
 
       <div className="mt-6 border-t border-gray-200 pt-5 text-lg">
         <span className="text-xl font-bold">{formatPrice(property.price_per_night_cents)}</span> / night
+      </div>
+
+      <div className="mt-6 border-t border-gray-200 pt-6">
+        <BookingForm property={property} />
       </div>
 
       <div className="mt-8 border-t border-gray-200 pt-6">

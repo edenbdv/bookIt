@@ -1,9 +1,6 @@
 import { Link } from 'react-router-dom'
 import type { PropertyListItem } from '../types'
-
-function formatPrice(cents: number): string {
-  return `$${(cents / 100).toFixed(0)}`
-}
+import { formatPrice } from '../utils/format'
 
 export function PropertyCard({ property }: { property: PropertyListItem }) {
   return (
