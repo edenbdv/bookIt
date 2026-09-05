@@ -30,6 +30,15 @@ function formatExpiry(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+// visually distinct per status so "confirmed" reads as a positive outcome
+// and "cancelled" as a settled, de-emphasized one at a glance, not just text
+const STATUS_STYLES: Record<Reservation['status'], { container: string; badge: string }> = {
+  pending: { container: 'border-amber-200 bg-amber-50', badge: 'bg-amber-100 text-amber-800' },
+  confirmed: { container: 'border-green-200 bg-green-50', badge: 'bg-green-100 text-green-800' },
+  cancelled: { container: 'border-gray-200 bg-gray-50', badge: 'bg-gray-200 text-gray-600' },
+  completed: { container: 'border-blue-200 bg-blue-50', badge: 'bg-blue-100 text-blue-800' },
+}
+
 export function BookingForm({ property }: Props) {
   const { session } = useAuth()
   const [checkIn, setCheckIn] = useState('')
@@ -111,11 +120,15 @@ export function BookingForm({ property }: Props) {
 
   if (state.kind === 'reservation') {
     const { reservation, action, actionError } = state
+    const styles = STATUS_STYLES[reservation.status]
     return (
-      <div className="rounded-lg border border-gray-200 p-5">
+      <div className={`rounded-lg border p-5 ${styles.container}`}>
         <p className="text-sm text-gray-700">
-          Reservation <span className="font-semibold">{reservation.status}</span> &middot;{' '}
-          {reservation.check_in} &rarr; {reservation.check_out} &middot; {reservation.guest_count} guest
+          Reservation{' '}
+          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${styles.badge}`}>
+            {reservation.status}
+          </span>{' '}
+          &middot; {reservation.check_in} &rarr; {reservation.check_out} &middot; {reservation.guest_count} guest
           {reservation.guest_count === 1 ? '' : 's'} &middot; {formatPrice(reservation.total_cents)} total
         </p>
 
