@@ -329,6 +329,28 @@ residual risk is accepted for good, not deferred to a future ticket: losing one
 "request received" email to a crash landing in a vanishingly narrow window is low-stakes
 enough that it doesn't justify Kafka + an outbox table + a relay on its own.
 
+**A second, separate gap `on_commit()` doesn't cover either — confirmed by actually
+stopping RabbitMQ and watching it happen:** `on_commit()` only guarantees the callback
+*runs*, not that the `.delay()` call inside it *succeeds*. With the broker down,
+`.delay()` raised `kombu.exceptions.OperationalError`; the hardened `__aexit__` (below)
+caught and logged it, so the request still returned `201` and the reservation stayed
+committed — but the message was never published, and nothing retries that. That
+reservation's guest never gets a confirmation email, silently, with only a log line as a
+record. This is a **third distinct failure mode**, not the same as either gap above:
+
+| | What fails | What's already handled |
+|---|---|---|
+| Ordering (fixed) | Enqueuing before the transaction commits | `on_commit()` |
+| Crash durability (accepted gap) | Process dies between commit and the callback running | Nothing — needs an outbox |
+| **Publish failure (accepted gap, newly confirmed)** | **The broker is unreachable when `.delay()` is called** | **Nothing — logged, not retried** |
+
+**Why this matters for BOOK-47 specifically:** a task-level `autoretry_for` decorator
+(BOOK-47's stated mechanism) only retries a task that already exists in Celery's
+registry and started running — it does nothing for a `.delay()` call that never
+successfully published in the first place, since no task was ever created to retry.
+BOOK-47 needs to explicitly account for the *publish* step failing, not only the *task
+body* failing — two different call sites, two different try/except blocks needed.
+
 **Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka:**
 those are tied to Epic 8's real payment state changes, where durability has more at
 stake and other consumers plausibly matter. Notification consumes those as a Kafka

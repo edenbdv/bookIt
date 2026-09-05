@@ -10,6 +10,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.committed = False
         self.rolled_back = False
+        self.closed = False
 
     async def commit(self) -> None:
         self.committed = True
@@ -18,7 +19,7 @@ class FakeSession:
         self.rolled_back = True
 
     async def close(self) -> None:
-        pass
+        self.closed = True
 
 
 def _uow_with_fake_session() -> tuple[UnitOfWork, FakeSession]:
@@ -56,3 +57,29 @@ async def test_on_commit_callback_does_not_fire_on_rollback() -> None:
 
     assert session.rolled_back
     assert fired == []
+
+
+# a failing callback (e.g. .delay() hitting an unreachable broker) must not
+# turn an already-committed transaction into a raised exception, and must
+# not stop the session from closing or unrelated callbacks from running
+@pytest.mark.anyio
+async def test_a_failing_callback_does_not_propagate_or_skip_close() -> None:
+    uow, session = _uow_with_fake_session()
+    uow.on_commit(lambda: (_ for _ in ()).throw(RuntimeError("broker down")))
+
+    await uow.__aexit__(None, None, None)  # must not raise
+
+    assert session.committed
+    assert session.closed
+
+
+@pytest.mark.anyio
+async def test_a_failing_callback_does_not_block_the_next_one() -> None:
+    uow, _session = _uow_with_fake_session()
+    fired = []
+    uow.on_commit(lambda: (_ for _ in ()).throw(RuntimeError("broker down")))
+    uow.on_commit(lambda: fired.append("second"))
+
+    await uow.__aexit__(None, None, None)
+
+    assert fired == ["second"]

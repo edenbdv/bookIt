@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncGenerator, Callable
 from types import TracebackType
 from typing import Self
@@ -8,6 +9,8 @@ from app.payment.repository import PaymentRepository
 from app.property.repository import PropertyPhotoRepository, PropertyRepository
 from app.reservation.repository import ReservationRepository
 from app.review.repository import ReviewRepository
+
+logger = logging.getLogger(__name__)
 
 
 class UnitOfWork:
@@ -41,13 +44,22 @@ class UnitOfWork:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if exc_type is None:
-            await self.session.commit()
-            for callback in self._on_commit:
-                callback()
-        else:
-            await self.session.rollback()
-        await self.session.close()
+        try:
+            if exc_type is None:
+                await self.session.commit()
+                # each isolated: a broker outage in one callback (e.g.
+                # send_reservation_received_email.delay() failing) must not
+                # turn an already-committed reservation into a 500 for the
+                # guest, and must not stop unrelated callbacks from running
+                for callback in self._on_commit:
+                    try:
+                        callback()
+                    except Exception:
+                        logger.exception("on_commit callback failed: %r", callback)
+            else:
+                await self.session.rollback()
+        finally:
+            await self.session.close()
 
 
 # FastAPI dependency: one UnitOfWork per request -- commits when the route
