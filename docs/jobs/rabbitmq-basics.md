@@ -115,6 +115,41 @@ silently with no redelivery to save it. Ack late and the window is "the entire t
 a crash anywhere in it leaves the message unacked, and the broker redelivers
 automatically.
 
+**"No ack" alone doesn't trigger redelivery — the broker also has to *notice* the
+consumer is gone.** An unacked message isn't sitting back in the visible queue,
+waiting; it's parked in a distinct state, tied to the specific connection/channel it
+was delivered to:
+
+```
+Ready (in the queue, unclaimed)
+   │  delivered to a consumer
+   ▼
+Unacked (claimed by that connection, not yet confirmed)
+   │
+   ├─ ack arrives ──────────────▶ deleted, done
+   │
+   └─ broker detects the connection is gone ──▶ moved back to Ready,
+                                                  delivered again (redelivery)
+```
+
+**Two ways the broker actually detects "the connection is gone":**
+
+- **The TCP connection closes.** A clean crash (the process exits, gets killed) closes
+  its sockets — the OS sends the closing packets. RabbitMQ sees the connection close
+  immediately and requeues everything that was unacked on it, right then.
+- **AMQP heartbeats, for the cases where TCP doesn't cleanly close.** A silent
+  failure — network partition, power loss, a firewall dropping packets without
+  resetting the connection — leaves no TCP close event for RabbitMQ to observe at all.
+  Client and broker exchange small heartbeat frames periodically for exactly this
+  reason; if the broker doesn't see one (or any traffic) within roughly twice the
+  negotiated heartbeat interval, it decides the connection is dead, closes it from its
+  own side, and requeues everything left unacked on it — same outcome as a clean crash,
+  just detected differently.
+
+Either way, the message that comes back around has its **`redelivered` flag set** —
+visible on the message itself in RabbitMQ's management UI (`Redelivered: •` instead of
+empty) — a durable record that this specific delivery isn't the first one.
+
 **A direct consequence: at-least-once, not exactly-once.** A worker can finish the work
 and crash *before* the ack reaches the broker — the work happened, but the broker
 doesn't know that, and redelivers. So every consumer must be safe to run twice.

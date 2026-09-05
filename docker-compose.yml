@@ -69,12 +69,41 @@ services:
   # same image as the app?") and docs/jobs/background-jobs-basics.md's
   # "worker on a queue" section for why this isn't run inside `app` instead.
   #
-  # Only CELERY_BROKER_URL for now -- BOOK-44's task (`ping`) touches no
-  # database and no cache. DATABASE_URL/REDIS_URL get added here once
-  # BOOK-45/BOOK-46 land real jobs that need them.
+  # DATABASE_URL added for BOOK-46 (the expiry job) -- REDIS_URL still
+  # unneeded, since nothing here touches the cache yet.
   worker:
     build: .
     command: uv run --no-dev celery -A app.worker worker --loglevel=info
+    environment:
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      # BOOK-46: the first real DB-touching job landed, so this is now needed
+      # -- see the comment this replaces, above the `app` service.
+      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
+
+  # BOOK-46. Only enqueues on a schedule (app.conf.beat_schedule,
+  # core/jobs/celery_app.py) -- never executes anything itself, `worker`
+  # still does that (docs/jobs/celery-basics.md section 9). Needs the
+  # broker, not the database.
+  #
+  # Run exactly one instance -- never `docker compose up --scale beat=N`.
+  # Unlike `worker`, beat is not safe to scale: it has no deduplication, so
+  # two instances would each independently decide "it's time" and both
+  # enqueue, firing the same scheduled task twice.
+  #
+  # --schedule points beat's own state file (last-run timestamps) at /tmp,
+  # inside the container -- not the bind-mounted repo -- so it doesn't leave
+  # an untracked file in the actual working directory on the host.
+  beat:
+    build: .
+    command: uv run --no-dev celery -A app.worker beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     environment:
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
     depends_on:

@@ -181,6 +181,64 @@ ValueError: boom
 
 `__aenter__` creates a **brand-new** session every time it runs (`get_session_factory()()`). There's no way to accidentally reuse a session across two separate units of work, and no way to start writing through `uow.reservations` before `__aenter__` has run — `self.session` and the repository attributes don't exist until you're inside the `async with` block.
 
+**Think of one `UnitOfWork` as a box around exactly one business operation:**
+
+```
+UnitOfWork
+┌─────────────────────┐
+│ one business op      │
+│                       │
+│ read                  │
+│ update                │
+│ update                │
+│                       │
+│ COMMIT ✅ / ROLLBACK ❌│
+└─────────────────────┘
+```
+
+**Why a fresh box every time, rather than one reused across many operations —
+concretely, what breaks if you don't:** say some job runs twice, back to back:
+
+```
+Correct -- a new UnitOfWork each run:
+
+  Run #1 → UnitOfWork #1 → transaction #1 → COMMIT ✅
+  Run #2 → UnitOfWork #2 → transaction #2 → ROLLBACK ❌
+
+  Run #1's commit already happened and is final by the time
+  run #2 even starts -- run #2 failing changes nothing about it.
+```
+
+```
+Broken -- reusing one UnitOfWork across both runs:
+
+  Run #1 ─┐
+          ├─→ the SAME UnitOfWork → the SAME transaction
+  Run #2 ─┘
+
+  Run #2 failing means __aexit__ calls rollback() on the shared
+  session -- which undoes run #1's changes too, even though run #1
+  already succeeded and had nothing to do with run #2's failure.
+```
+
+There's a second, independent reason beyond that blast-radius problem: an
+`AsyncSession` isn't safe for two operations to use *at the same time* — it holds one
+checked-out connection and one in-flight transaction. Two concurrent callers sharing
+one instance would be fighting over that single connection/transaction, not just
+risking a confusing rollback.
+
+**This is exactly why every caller — API or worker — constructs its own `UnitOfWork`,
+never a shared one:**
+
+| | Who constructs it | How |
+|---|---|---|
+| API route | FastAPI, via `Depends(get_uow)` | `get_uow()` is a thin `async with UnitOfWork() as uow: yield uow` wrapper — same class, shaped as a generator so `Depends()` knows how to call it and clean up after the response |
+| Celery task (`docs/jobs/worker-decisions.md` §5) | The task function itself | `async with UnitOfWork() as uow:` written directly in the task body — there's no request, so nothing plays the role `Depends()` plays in a route |
+
+Same rule either way: **one independent operation, one `UnitOfWork`, constructed fresh
+inside that operation** — never hoisted out to somewhere it could get reused across
+more than one.
+
 ## 7. `uow.session` is public, on purpose
 
 `seed.py`'s `get_or_create` helper is generic across *any* model (`model: type[ModelT]` is a parameter) — it isn't "the reservation module's queries," so it doesn't fit inside any one repository. It needs the raw session directly, which is why `UnitOfWork.session` is a public attribute (`self.session`, not `self._session`) — matching `BaseRepository.session`'s own public convention, not a special case.

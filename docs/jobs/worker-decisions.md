@@ -148,6 +148,65 @@ the mail transport simultaneously, with no way to tell which is broken.
 Retries come before email for a related reason: a retry policy is much easier to design
 against a real job that can fail than in the abstract.
 
+**Implementation note, now that this is built — where each piece actually lives:**
+
+```
+app/
+├── worker.py
+│   └── expire_pending_reservations()   ← the Celery task itself
+│
+├── reservation/
+│   ├── repository.py
+│   │   └── list_expired_pending()      ← DB query, SELECT ... FOR UPDATE
+│   └── service.py
+│       └── transition_to()             ← state-machine legality check
+│
+└── core/
+    ├── db/
+    │   └── unit_of_work.py             ← UnitOfWork, session, commit/rollback
+    └── jobs/
+        └── celery_app.py
+            ├── app = Celery(...)
+            └── async_task(...)         ← sync/async bridge (§2's open question)
+```
+
+Deliberately spread across existing module boundaries rather than gathered into one
+"jobs" file: `list_expired_pending()` sits with the rest of `ReservationRepository`
+because it's a query about reservations, not about jobs; `transition_to()` was already
+`reservation/service.py`'s job before this ticket existed. The task itself
+(`worker.py`) is the one place that's genuinely *about* being a scheduled job — it just
+calls out to code that already knew how to do the actual work.
+
+**The call flow, end to end:**
+
+```
+Celery Beat (fires on schedule, §2/§9)
+     │
+     ▼
+expire_pending_reservations()            -- app/worker.py, the task
+     │
+     ▼
+async with UnitOfWork()                  -- opens one transaction
+     │
+     ▼
+repository.list_expired_pending()        -- SELECT ... FOR UPDATE, locks matching rows
+     │
+     ▼
+for each Reservation:
+  transition_to(reservation, CANCELLED)  -- in-memory only; no DB write yet
+     │
+     ▼
+UnitOfWork.__aexit__ -> session.commit() -- the only DB write: flushes every
+                                             changed .status at once, then COMMIT
+                                             ends the transaction, releasing every
+                                             lock acquired above, together
+```
+
+The locks from `FOR UPDATE` aren't released row-by-row as each is processed — they're
+all held until this single commit at the very end of the loop. Safe here because
+`transition_to()` is pure Python with no I/O; holding a lock across a slow *external*
+call is the case `concurrency-basics.md` §6 warns about, and doesn't apply to this job.
+
 ## 6. Open questions for `BOOK-44`
 
 - **How does a Celery task get a database session, given the app is async?**

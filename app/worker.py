@@ -10,9 +10,9 @@ does, and docs/jobs/rabbitmq-basics.md for what happens underneath it once a
 message reaches RabbitMQ.
 """
 
-import time
-
-from app.core.jobs.celery_app import app
+from app.core.db.unit_of_work import UnitOfWork
+from app.core.jobs.celery_app import app, async_task
+from app.reservation import service
 
 
 @app.task
@@ -24,8 +24,19 @@ def ping() -> str:
     plumbing -- same reasoning as choosing the expiry job first in
     docs/jobs/worker-decisions.md section 5, one step earlier.
     """
-    # TEMPORARY (not committed): slowed down on purpose so the ack window
-    # is visible in RabbitMQ's UI as "Unacked: 1" for a few seconds. Revert
-    # to `return "pong"` right after.
-    time.sleep(10)
     return "pong"
+
+
+@app.task
+@async_task
+async def expire_pending_reservations() -> None:
+    """BOOK-46: cancel PENDING reservations past their expires_at.
+
+    Thin wrapper only -- constructs the real UnitOfWork (there's no request
+    here for Depends(get_uow) to do it), then delegates to
+    reservation/service.py's uow-accepting function, same shape the router
+    uses for cancel_reservation/confirm_reservation. Keeps the actual logic
+    testable with a FakeUnitOfWork, no DB needed.
+    """
+    async with UnitOfWork() as uow:
+        await service.expire_pending_reservations(uow)
