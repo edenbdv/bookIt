@@ -206,4 +206,14 @@ async def create_reservation_idempotent(
     reservation = await create_reservation(uow, data, guest_id)
     key_row.status = IdempotencyKeyStatus.COMPLETED
     key_row.reservation_id = reservation.id
+
+    # BOOK-45. Lives here, not the router: only this branch is a genuinely
+    # new reservation -- a retried request returns the existing one above,
+    # so it can't double-send. on_commit() (not a direct .delay()) fires
+    # only after the transaction commits (worker-decisions.md §9). Local
+    # import to dodge a circular import -- worker.py imports this module too.
+    from app.worker import send_reservation_received_email
+
+    uow.on_commit(lambda: send_reservation_received_email.delay(str(reservation.id)))
+
     return reservation

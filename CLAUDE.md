@@ -15,13 +15,13 @@ uv sync
 cp .env.example .env
 ```
 
-`uv sync` reads `pyproject.toml` + `uv.lock` into `.venv` — no global Python packages needed. Infra (Postgres, Redis, RabbitMQ) always runs in Docker, never installed natively.
+`uv sync` reads `pyproject.toml` + `uv.lock` into `.venv` — no global Python packages needed. Infra (Postgres, Redis, RabbitMQ, MailHog) always runs in Docker, never installed natively.
 
 ### Day-to-day development
 
 ```bash
-docker compose up -d db redis rabbitmq     # infra only
-uv run uvicorn app.main:app --reload       # app on the host, auto-reload
+docker compose up -d db redis rabbitmq mailhog worker beat   # infra + worker/beat (no --reload to gain from the host)
+uv run uvicorn app.main:app --reload                         # app on the host, auto-reload
 ```
 
 The app reads `.env`, which points at `localhost` (infra ports are published by docker-compose). To instead run the whole stack — app included — in Docker (matches production, uses the `Dockerfile`, no auto-reload-on-save from host edits):
@@ -31,6 +31,8 @@ docker compose up --build
 ```
 
 Here `docker-compose.yml` overrides `DATABASE_URL`/`REDIS_URL` to use container hostnames (`db`, `redis`) instead of `localhost`, since the app container reaches infra containers by service name, not `localhost`.
+
+After editing `worker`/`beat` code, `docker compose restart worker` picks it up (bind-mounted). After editing `docker-compose.yml` itself (env vars, command), `restart` is not enough — it doesn't re-read that file; use `docker compose up -d worker` to recreate the container. See [README.md](README.md#workflow-a--active-development-recommended-day-to-day) for the full explanation.
 
 ### Migrations
 

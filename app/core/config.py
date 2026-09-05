@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     # on RabbitMQ instead of arq on Redis.
     celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
 
+    # BOOK-45: MailHog, a local SMTP test double, not a real mail server --
+    # see docs/jobs/email-basics.md and docs/jobs/worker-decisions.md section
+    # 8. Only `worker` ever reads this (see docker-compose.yml's override to
+    # the `mailhog` hostname there) -- `app` never sends mail directly.
+    smtp_host: str = "localhost"
+    smtp_port: int = 1025
+
     # dev-only default -- every real deployment must override this via .env,
     # since anyone who knows it can forge a valid access token for any user
     secret_key: str = "dev-secret-change-me"

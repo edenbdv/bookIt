@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from types import TracebackType
 from typing import Self
 
@@ -24,7 +24,16 @@ class UnitOfWork:
         self.reservations = ReservationRepository(self.session)
         self.payments = PaymentRepository(self.session)
         self.reviews = ReviewRepository(self.session)
+        self._on_commit: list[Callable[[], None]] = []
         return self
+
+    def on_commit(self, callback: Callable[[], None]) -> None:
+        """Run `callback` only if this transaction commits (worker-decisions.md §9).
+
+        In-memory only, not durable -- a crash right after commit() still
+        loses it silently. BOOK-50's outbox pattern is the durable version.
+        """
+        self._on_commit.append(callback)
 
     async def __aexit__(
         self,
@@ -34,6 +43,8 @@ class UnitOfWork:
     ) -> None:
         if exc_type is None:
             await self.session.commit()
+            for callback in self._on_commit:
+                callback()
         else:
             await self.session.rollback()
         await self.session.close()
