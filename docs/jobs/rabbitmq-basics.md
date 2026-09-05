@@ -89,13 +89,50 @@ happens.** Two designs are possible, and they produce very different failure mod
 | | When it acks | What a mid-task crash does |
 |---|---|---|
 | **Ack early** | The instant the message is received, before doing any work | Message is already gone — a crash mid-task **loses the work silently** |
-| **Ack late** | Only after the work finishes successfully | A crash mid-task leaves the message un-acked — broker **redelivers it** |
+| **Ack late** | Only after the work stops running | A crash mid-task leaves the message un-acked — broker **redelivers it** |
 
 Ack-early is faster and simpler, but it throws away the one thing a message broker is
 for. Ack-late is what "RabbitMQ gives you crash recovery" actually refers to — and it
 isn't automatic; whatever client library you use has to be configured to do it. Getting
 this wrong is invisible until the day a worker actually crashes mid-task, which is what
 makes it worth understanding before writing any code, not after.
+
+**"Stops running" is doing real work in that sentence — worth being precise about it,
+since "finishes" invites reading it as "finishes successfully."** Ack-late acks once the
+task *stops executing*, for any reason: it returned normally, or it raised an exception
+and failed, or it called a client-side retry that raises internally. All three are "the
+code stopped running, in an orderly way, with the process still alive" — which is a
+different bar from "succeeded." What ack-late actually protects against is narrower and
+more specific than "any failure": **the process crashing while a message is still in
+flight** — power loss, the worker getting killed, a segfault. A task that runs to
+completion and then fails with an ordinary exception never triggers redelivery at all,
+by design — it acked, cleanly, exactly as ack-late intends. Only a task that never
+reaches "stopped running" — because the whole process died first — leaves the message
+unacked for the broker to redeliver.
+
+**Redelivery vs. a task framework's own retry (Celery's `autoretry_for`, say) — same
+end result, opposite cause, worth never conflating:**
+
+```
+Redelivery (broker decides)               Retry (application decides)
+
+Worker receives the message               Worker receives the message
+        │                                         │
+   💥 worker dies before acking               the task runs, and fails
+        │                                         │
+   broker sees no ack at all                 the framework says: try again
+        │                                         │
+   broker resends the SAME message           a NEW message is sent to the broker
+        │                                         │
+        ▼                                         ▼
+   worker receives it again                  worker receives it again
+```
+
+Redelivery fires when the broker gets **no verdict at all** — the connection just
+vanished. Retry fires when the application **did** deliver a verdict — "this failed,
+send another attempt" — and chose to act on it, with its own timing. That's the whole
+reason `retry-basics.md` §5 treats them as genuinely different mechanisms rather than
+two flavors of the same thing: only one of them is a broker feature at all.
 
 **These are two separate decisions, made by two separate parties — worth keeping
 straight:**
@@ -190,6 +227,29 @@ queue A (main work)
 DLX ──▶ queue B (dead letters)
 ```
 
+**All three triggers happen to a message already sitting in a queue — worth being
+precise about what that excludes.** Two things that sound like "the message failed" but
+are *not* what DLX reacts to:
+
+- **A message that never made it into the queue at all** — a producer's publish call
+  itself failing (the broker unreachable, say) has nothing to dead-letter, because
+  nothing was ever accepted into any queue in the first place. DLX operates entirely on
+  the consumer side of a message's life, never the producer side.
+- **A message a consumer received, ran, and failed on — without nacking it.** Nack is an
+  explicit, protocol-level refusal: the consumer got the message and told the broker
+  "I won't accept this." That's different from "the consumer accepted delivery
+  (acked), then its own internal code failed at the job." From the broker's point of
+  view, an ack is an ack — it has no visibility into what happened after, and nothing
+  here fires unless the consumer explicitly nacks. A task framework that always acks,
+  regardless of whether the work it did afterward succeeded (Celery does — §4 above,
+  and `retry-basics.md`'s notes on this), never trips a queue-level DLX, no matter how
+  many times or how badly its own jobs fail.
+
+So DLX answers one specific question — "did this message get a definitive, negative
+verdict at the delivery level" — not the broader "did whatever happen with this message
+count as a failure." A message can fail in every way that matters to a business and
+still never touch a DLX, if the thing consuming it never nacks.
+
 **The same mechanism doubles as a delayed-retry trick.** Give a message a short TTL and
 a DLX pointing back at the original queue: it "expires" after N seconds and is
 redelivered — a poor man's "retry in 30 seconds" with no extra scheduler. This is a
@@ -278,6 +338,6 @@ guarantees you actually care about are one config flag away, not the default.
 | At-least-once | A crash before ack means redelivery — so every consumer must be idempotent |
 | Prefetch | How many un-acked messages one consumer can hold at once |
 | Durable (queue/exchange) + Persistent (message) | Both required for data to survive a broker restart |
-| DLX (dead-letter exchange) | Fallback destination for messages nothing successfully consumes |
+| DLX (dead-letter exchange) | Fallback destination for a message that's nacked, expires, or is dropped for space — never for a publish that failed, or a consumer that acked and then failed internally |
 | TTL + DLX | Broker-native delayed-retry, with no extra scheduler |
 | Connection vs. channel | One real TCP connection per process; many cheap channels multiplexed on it |

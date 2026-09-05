@@ -11,8 +11,11 @@ RabbitMQ redelivering it. See docs/jobs/rabbitmq-basics.md §4.
 import asyncio
 import functools
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from celery import Celery
+from celery.signals import task_failure
+from kombu import Queue
 
 from app.core.config import get_settings
 from app.core.db.engine import get_engine
@@ -20,6 +23,48 @@ from app.core.db.engine import get_engine
 app = Celery("bookit", broker=get_settings().celery_broker_url)
 
 app.conf.task_acks_late = True
+
+# BOOK-47. RabbitMQ's native DLX doesn't apply here -- Celery ACKs a task
+# even on failure, never nacks, so a queue-level DLX never triggers.
+# task_failure fires once a task is *finally* failed (autoretry_for
+# exhausted or not), which is what actually catches this. worker-decisions.md §10.
+_DEAD_LETTER_QUEUE = Queue("notifications.dlq", durable=True)
+
+
+@task_failure.connect
+def _send_to_dead_letter(
+    sender=None,
+    task_id=None,
+    exception=None,
+    args=None,
+    kwargs=None,
+    einfo=None,
+    **_extra,
+) -> None:
+    # retries: sender.request is still the live task context at this point
+    # (the signal fires from inside the failed task's own execution).
+    # einfo.traceback: Celery's own pre-formatted string, not the raw
+    # traceback object the signal also carries -- that one needs the stdlib
+    # `traceback` module to format, einfo already did it.
+    request = getattr(sender, "request", None)
+    with app.connection_for_write() as connection:
+        connection.Producer().publish(
+            {
+                "task": getattr(sender, "name", str(sender)),
+                "task_id": task_id,
+                "args": args,
+                "kwargs": kwargs,
+                "exception": str(exception),
+                "traceback": einfo.traceback if einfo else None,
+                "retries": getattr(request, "retries", None),
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            routing_key=_DEAD_LETTER_QUEUE.name,
+            declare=[_DEAD_LETTER_QUEUE],
+            serializer="json",
+            retry=True,
+        )
+
 
 # BOOK-46. Task referenced by name (string), not import -- importing
 # app.worker here would be circular. Needs exactly one `celery beat`

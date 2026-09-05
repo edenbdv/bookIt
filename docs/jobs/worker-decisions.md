@@ -350,6 +350,42 @@ registry and started running — it does nothing for a `.delay()` call that neve
 successfully published in the first place, since no task was ever created to retry.
 BOOK-47 needs to explicitly account for the *publish* step failing, not only the *task
 body* failing — two different call sites, two different try/except blocks needed.
+BOOK-47's own resolution for this: don't retry it at all (retrying here would run
+*inside* the guest's request — retry-basics.md §6 — turning a broker blip into the
+guest waiting on their `201`, exactly what this ticket exists to prevent). Caught,
+logged, request unaffected — final, not a placeholder.
+
+**The crash-durability and publish-failure gaps can't be dead-lettered either, structurally
+— not an oversight, an actual ceiling.** `notifications.dlq` (BOOK-47 §10 above) is
+itself a RabbitMQ queue. If the reason `.delay()` failed is "RabbitMQ is unreachable,"
+publishing a dead-letter record to another RabbitMQ queue fails for the identical
+reason — there's no broker-based fix for a broker-down failure. The only thing that
+could give either gap real durability is writing the intent somewhere that isn't
+RabbitMQ at all — the database, in the same transaction as the reservation — which is
+exactly what an outbox is. There is no intermediate option here between "accept the
+gap" and "build an outbox"; nothing smaller closes it.
+
+**Why accepting both gaps for this job, specifically, holds up — the complete case:**
+
+1. **What's actually lost is small.** The guest already has their `201`; the reservation
+   is real and visible to them. The only casualty is a secondary courtesy email
+   confirming what they already know happened.
+2. **The probability is narrow.** Needs the broker down in the *exact* window of one
+   request's `.delay()` call, or a crash in a window measured in milliseconds — not "the
+   broker is flaky," but a precise, rare overlap for a single, health-checked service.
+3. **The real fix costs real, standing infrastructure.** A table, a relay process, its
+   own dedup logic, and a new thing to monitor for health — not a small addition.
+4. **Even with an outbox, nothing is perfectly durable** — the failure point just moves
+   to "is the relay itself healthy." Diminishing returns on an already low-severity risk.
+5. **Consistent with how this whole project draws this line, not a one-off excuse.**
+   BOOK-44's worker waited for two real jobs to justify it; retry (BOOK-47) targeted
+   email, not expiry, because expiry didn't actually need it. Same rule here: build
+   infrastructure once what it protects is worth protecting, not ahead of that.
+6. **The contrast makes the line legible.** `BookingConfirmed`/`BookingCancelled` *do*
+   get an outbox (BOOK-50) — those carry real payment-adjacent consequences (Epic 8), where
+   a silently-lost event is a genuine consistency problem. A missed "we got your
+   request" email carries none of that weight. Same tool, applied only where the stakes
+   clear the bar.
 
 **Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka:**
 those are tied to Epic 8's real payment state changes, where durability has more at
@@ -361,6 +397,74 @@ in progress.
 **Revisit if:** a second real consumer of "a reservation was created" actually gets
 planned — at that point the coupling cost (not the ordering gap, which `on_commit()`
 already handles) would justify moving this specific trigger to the event bus too.
+
+## 10. BOOK-47: retry the task body, deliberately not the publish call
+
+**Chosen, following retry-basics.md's job-retry-vs-enqueue-retry distinction (§5):**
+only the first of the two failure modes §9 identified gets a retry policy.
+
+**Task-body retry** (`app/worker.py`, on `send_reservation_received_email`):
+
+```python
+@app.task(
+    autoretry_for=_TRANSIENT_SMTP_ERRORS,  # OSError, SMTPConnectError,
+                                            # SMTPServerDisconnected, SMTPHeloError
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    max_retries=5,
+)
+```
+
+**Which (transient vs permanent), concretely:** `OSError` (covers connection refused,
+timeout, and DNS failure — all three showed up as `gaierror`, an `OSError` subclass, in
+testing) plus `SMTPConnectError`/`SMTPServerDisconnected`/`SMTPHeloError`.
+`SMTPRecipientsRefused`/`SMTPSenderRefused` (a bad address) are deliberately excluded —
+retrying doesn't fix a bad address, per retry-basics.md §1.
+
+**Verified live, not just read from the decorator:** stopped MailHog, created a
+reservation, watched the same task ID retry with growing, jittered backoff, then
+started MailHog back up:
+
+```
+13:13:27  retry: Retry in 1s   (attempt 1, MailHog still down)
+13:13:36  retry: Retry in 0s   (attempt 2, jitter shrank the wait)
+13:13:44  retry: Retry in 0s   (attempt 3)
+13:13:52  retry: Retry in 4s   (attempt 4, backoff growing)
+13:13:56  succeeded            (attempt 5, MailHog back — sent)
+```
+
+Same task ID throughout (Celery's own log line includes it) — one task retrying, not
+five separate ones.
+
+**What happens once `max_retries` is exhausted — and a real surprise building it.**
+The first instinct is `rabbitmq-basics.md` §6's dead-letter exchange — broker-native,
+nothing custom to build. **It doesn't actually apply here, and that's worth being
+precise about:** RabbitMQ's DLX only fires on a *nack* (or TTL/queue-length), and Celery
+**ACKs a task the moment it finishes running, success or failure** — exhausting
+`max_retries` still ends in an ordinary ACK, not a nack. A queue-level DLX would sit
+there forever unused; there's nothing to trigger it. This is the same category of
+mismatch as `rabbitmq-basics.md` §4's "RabbitMQ does not provide retries" — two features
+that sound like they'd compose and don't, because they're solving different layers
+(broker-level delivery vs. application-level task outcome).
+
+**What actually works: Celery's `task_failure` signal** (`core/jobs/celery_app.py`) —
+fires exactly once a task's outcome is *finally* failure, whether that's an exception
+outside `autoretry_for` or every retry used up. The handler manually publishes task
+name, id, args/kwargs, exception, full traceback, retry count, and a timestamp to a
+plain durable queue (`notifications.dlq`) via the same RabbitMQ connection Celery
+already holds — inspectable in the management UI, no new system. Verified live: stopped
+MailHog, let all 5 retries exhaust, and found the exact reservation id (plus a full
+traceback and `"retries": 5`) sitting in `notifications.dlq`.
+
+**Publish-call failure — deliberately not retried, not a gap left by oversight.** Per §9's
+"third failure mode": retrying `.delay()` itself would mean retrying *inside*
+`on_commit()`'s callback, which runs as part of the guest's own request
+(retry-basics.md §6 — retry that blocks). Adding retries there would make a broker
+outage turn into the guest waiting several seconds-to-tens-of-seconds for their `201`,
+which is exactly what BOOK-45 exists to prevent. The existing behavior (caught, logged,
+not retried, request unaffected) stays as-is — confirmed separately in §9 by actually
+stopping RabbitMQ.
 
 ---
 
@@ -378,3 +482,6 @@ already handles) would justify moving this specific trigger to the event bus too
 | Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
 | BOOK-45 trigger reliability | `uow.on_commit()`, not a direct `.delay()` — fixes ordering, not crash durability | A second real consumer of "reservation created" is planned before Epic 7 lands |
 | `BookingCreated`'s trigger, long-term | Stays on Celery permanently — never migrates to Kafka | A second real consumer of "reservation created" actually gets planned |
+| BOOK-47 task-body retry | `autoretry_for` on connection-level errors, backoff+jitter, max_retries=5 — verified live | Never — this is the settled policy for this task |
+| BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
+| BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |
