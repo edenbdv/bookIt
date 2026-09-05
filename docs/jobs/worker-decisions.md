@@ -284,63 +284,61 @@ revisited — same "only the trigger changes" boundary as §2, applied one layer
 developer receives the email — at that point MailHog stops being sufficient, not
 because it broke, but because it was never meant to deliver anything.
 
-## 9. BOOK-45's trigger: a direct Celery call now, not Kafka — and what actually justifies moving it later
+## 9. BOOK-45's trigger: a direct Celery call, permanently — `BookingCreated` never goes to Kafka
 
-**Chosen:** `create_reservation()` enqueues the email via a direct `.delay()` call to
-Celery, the same shape as every other Epic 6 job. `notification/service.py` stays
-unaware of Kafka, topics, or events — none of that exists yet.
+**Chosen:** `create_reservation_idempotent()` enqueues the email via `UnitOfWork.on_commit()`
+firing a Celery `.delay()` call, the same shape as every other Epic 6 job. **This is the
+permanent mechanism for this job, not a placeholder** — unlike the original version of
+this section, `BookingCreated` does not migrate to Kafka when Epic 7 lands. Only
+`BookingConfirmed`/`BookingCancelled` do (BOOK-48/51).
 
 **The coupling this creates, honestly:** a direct call means `reservation/service.py`
-(or its router) imports and calls into `app.worker` by name — Reservation "knows about"
-Notification. That's fine for exactly one consumer, but it doesn't scale: every future
-consumer of "a reservation was created" would mean another line added to Reservation's
-code, not a new independent listener. That's the concrete cost behind `worker-decisions.md`
-§3's "multiple independent consumers" argument for an event bus in general.
+imports and calls into `app.worker` by name — Reservation "knows about" Notification.
+Real, but proportionate: exactly one consumer exists for "a reservation was created,"
+checked against the actual backlog (Epic 7 through Epic 9) — BOOK-48's "future
+consumers (analytics, audit log, whatever comes later)" is a capability kept open, not a
+planned ticket.
 
-**What does *not* justify migrating this specific trigger to Kafka later:** checked the
-actual backlog (Epic 7 through Epic 9) for a second real consumer of "a reservation was
-created" — there isn't one. BOOK-48's "future consumers (analytics, audit log, whatever
-comes later)" is a capability being kept open, not a planned ticket. So "multiple
-independent consumers," while the real reason event buses exist, isn't what's actually
-driving this migration.
+**Why not Kafka anyway, once Epic 7 exists — this is the actual, final answer, not a
+temporary one:** sending one transactional email in reaction to one action is the
+textbook case for a task queue, not an event bus — standard industry practice (Stripe,
+Shopify, and most systems trigger transactional email via a direct background-job
+enqueue, not an event pipeline). Routing this through Kafka anyway, purely so
+Notification is architecturally "pure" (one trigger mechanism for every job), is the
+well-known anti-pattern of forcing every side effect through an event bus just because
+one exists elsewhere in the system. An event bus earns its cost where multiple
+independent things need to react to a fact; a single email doesn't have that shape, and
+manufacturing hypothetical future consumers to justify the migration isn't a real reason
+(see the "does not justify" point above).
 
-**What does justify it, concretely:**
+**The ordering gap this raised, and how it's actually closed:** `get_uow()`
+(`core/db/unit_of_work.py`) commits the reservation *after* the route handler returns,
+so a naive `.delay()` fired from inside `create_reservation()` would always precede that
+commit. `UnitOfWork.on_commit()` fixes this: it's a hand-rolled version of a standard,
+named pattern — Django's `transaction.on_commit()`, Rails' `after_commit`, SQLAlchemy's
+own session-commit events all exist for exactly this reason. It queues a callback that
+only fires once `session.commit()` succeeds, so the email can no longer be enqueued for
+a reservation that failed to commit.
 
-- **It durably fixes the ordering gap this direct-call version has.** `get_uow()`
-  (`core/db/unit_of_work.py`) commits the reservation *after* the route handler
-  returns, so a naive `.delay()` fired from inside `create_reservation()` would always
-  precede that commit. BOOK-50's outbox pattern closes this for good: the event row is
-  written in the *same* transaction as the reservation, so a failed commit means the
-  event was never written either, even across a process crash.
-- **Consistency once Notification is "a pure event consumer" (BOOK-51).** Once
-  `BookingConfirmed`/`BookingCancelled` go through Kafka, leaving `BookingCreated` on a
-  separate direct-call mechanism means two different reliability models living in the
-  same module permanently, for reasons nobody will want to re-derive later.
+**What `on_commit()` still doesn't cover, accepted permanently for this job:** the
+callback lives only in this process's memory — a crash in the narrow window between
+commit succeeding and the callback running still loses it silently, with no record. A
+durable outbox (the fact written in the same transaction, a relay publishing it
+separately) is the only thing that closes that. For `BookingCreated` specifically, that
+residual risk is accepted for good, not deferred to a future ticket: losing one
+"request received" email to a crash landing in a vanishingly narrow window is low-stakes
+enough that it doesn't justify Kafka + an outbox table + a relay on its own.
 
-**Ordering fixed now, durability deferred to BOOK-50.** `UnitOfWork.on_commit()`
-(`core/db/unit_of_work.py`) queues a callback that only runs after `session.commit()`
-succeeds — `create_reservation_idempotent()` uses it instead of a direct `.delay()`, so
-the email can no longer be enqueued for a reservation that failed to commit. What this
-*doesn't* cover: the callback lives only in this process's memory, so a crash in the
-narrow window between commit succeeding and the callback running still loses it
-silently, with no record. Only BOOK-50's outbox table (the fact written durably, in the
-same transaction) closes that remaining gap — `on_commit()` is a real improvement, not
-a substitute for it.
+**Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka:**
+those are tied to Epic 8's real payment state changes, where durability has more at
+stake and other consumers plausibly matter. Notification consumes those as a Kafka
+consumer group; `BookingCreated` is never published as a Kafka event at all. These are
+two genuinely different, permanent mechanisms for two different jobs — not a migration
+in progress.
 
-**What "only the trigger changes" does *not* mean:** Celery isn't kept around underneath
-and simply called from Kafka instead of from Reservation. `notification/service.py`'s
-send function (plain async, no `@app.task`, no `.delay()`) is the only thing that
-survives unchanged. The `@app.task` wrapper in `worker.py` and the `.delay()` call site
-are BOOK-45-specific infrastructure, and BOOK-51 removes both for this job — a Kafka
-consumer calls the send function directly, in-process. Stacking Kafka on top of Celery
-here would mean two queues doing the same job (buffering, redelivery) that Kafka's
-consumer groups already do alone. Celery/RabbitMQ stays in the project for jobs that are
-actually scheduled/triggered-and-not-an-event, like `expire_pending_reservations` — it
-just stops being part of *this* job's path.
-
-**Revisit if:** a second real consumer of "a reservation was created" gets planned
-before Epic 7 lands — at that point the coupling cost, not just the ordering gap, starts
-to bite, and moving the trigger earlier would be worth it on its own.
+**Revisit if:** a second real consumer of "a reservation was created" actually gets
+planned — at that point the coupling cost (not the ordering gap, which `on_commit()`
+already handles) would justify moving this specific trigger to the event bus too.
 
 ---
 
@@ -357,3 +355,4 @@ to bite, and moving the trigger earlier would be worth it on its own.
 | Retry policy target | Email (BOOK-45), not expiry (BOOK-46) | The expiry job gains a non-idempotent or partially-committing step |
 | Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
 | BOOK-45 trigger reliability | `uow.on_commit()`, not a direct `.delay()` — fixes ordering, not crash durability | A second real consumer of "reservation created" is planned before Epic 7 lands |
+| `BookingCreated`'s trigger, long-term | Stays on Celery permanently — never migrates to Kafka | A second real consumer of "reservation created" actually gets planned |
