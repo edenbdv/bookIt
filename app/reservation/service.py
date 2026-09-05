@@ -16,10 +16,9 @@ from app.reservation.schemas import ReservationCreate
 # docs/db/idempotency-basics.md's ~24h window
 IDEMPOTENCY_KEY_TTL_HOURS = 24
 
-# how long a PENDING reservation holds its dates before Epic 6's expiry job
-# would clear an abandoned one -- no expiry job exists yet, so nothing
-# actually enforces this window today; it's set now so that job has a real
-# value to filter on once it exists (er-diagram.md's Reservation.expires_at)
+# how long a PENDING reservation holds its dates before BOOK-46's scheduled
+# job (app/worker.py's expire_pending_reservations) cancels an abandoned
+# one -- see docs/jobs/worker-decisions.md section 5.
 PENDING_HOLD_MINUTES = 15
 
 
@@ -102,6 +101,17 @@ async def cancel_reservation(
         raise NotReservationGuestError
     transition_to(reservation, ReservationStatus.CANCELLED)
     return reservation
+
+
+# BOOK-46. Called from app/worker.py's scheduled task, which owns
+# constructing the real UnitOfWork -- kept here, uow-first like every other
+# service function, so it's testable with a FakeUnitOfWork (no DB), same as
+# cancel_reservation/confirm_reservation above.
+async def expire_pending_reservations(uow: UnitOfWork) -> int:
+    reservations = await uow.reservations.list_expired_pending(datetime.now(UTC))
+    for reservation in reservations:
+        transition_to(reservation, ReservationStatus.CANCELLED)
+    return len(reservations)
 
 
 async def create_reservation(

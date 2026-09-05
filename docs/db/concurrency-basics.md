@@ -73,9 +73,95 @@ This is a genuine cycle — each process ended up waiting on the *other* — whi
 
 **Why a Postgres lock and not a Redis one (`BOOK-43`):** the shortest version is that the window needing protection is `INSERT`→`COMMIT` *inside a Postgres transaction* — a boundary only Postgres can observe, and one `pg_advisory_xact_lock` tracks for free with no TTL to guess. `docs/cache/distributed-lock-basics.md` has the full argument, along with the general rule for when a Redis lock is the right tool and when it isn't.
 
-## 5. `SELECT ... FOR UPDATE` — a lock the database itself enforces
+## 5. `UPDATE ... WHERE` — atomic without your code ever requesting a lock
 
-**Not used anywhere in this codebase today** — every invariant so far (double-booking, idempotency keys, payment dedup) turned out to be expressible as a single-table constraint instead, which section 6 explains is the better default when that's possible. Reach for `FOR UPDATE` directly when it *isn't* possible — the rule needs a multi-step read-then-decide-then-write sequence to happen atomically (not just one row's uniqueness at insert time), or spans multiple rows in a way no single constraint can express.
+**The trap in the word "atomic": it does not mean "no lock is involved."** It means
+Postgres's own internal locking collapses a check-and-write into one indivisible
+statement, *without your application code ever asking for a lock*. That distinction —
+who's responsible for the lock existing — is the entire point of this section, and
+it's easy to misread "atomic" as "lock-free" when it really means "the lock is
+Postgres's problem, not yours."
+
+**The scenario this solves (BOOK-46's exact case):** a scheduled job wants to cancel a
+reservation that's still `pending` and past its `expires_at` — but a payment could
+confirm that same reservation in the moment between reading its status and writing the
+cancellation. The naive version has a real gap:
+
+```
+1. SELECT -- is status = 'pending'?
+2. if yes -- UPDATE status = 'cancelled'
+```
+
+Between step 1 and step 2, nothing stops another transaction from committing a change
+to that exact row. The fix is to never let that gap exist as two separate statements:
+
+```sql
+UPDATE reservations
+SET status = 'cancelled'
+WHERE id = 123
+  AND status = 'pending';
+```
+
+**This is one statement, not "check, then decide, then write."** You're not asking
+Postgres "is it pending?" and then separately telling it to update — you're telling it
+"update this row, but only if it's still pending *at the moment you actually touch it*,"
+and letting Postgres itself perform that check as an inseparable part of the write.
+
+**Walking through both possible orderings, with a concurrent payment confirmation:**
+
+```
+If the payment commits first:
+
+  reservation: PENDING
+        │
+   Payment UPDATE  ──▶  CONFIRMED
+        │
+   Expiry UPDATE ... WHERE status = 'PENDING'
+        │                       ↑
+        │                 no longer true
+        ▼
+   0 rows affected — Postgres itself refused the write,
+   because the WHERE clause no longer matches anything
+```
+
+```
+If the expiry job commits first:
+
+  reservation: PENDING
+        │
+   Expiry UPDATE  ──▶  CANCELLED
+        │
+   Payment's own logic now has to handle
+   "this reservation is already cancelled" —
+   a different problem, but not a silent data-corruption one
+```
+
+**The critical property: there is no moment where the expiry job says "I checked, it
+was pending" and then acts on that stale belief later.** The check *is* the write —
+they're not two steps with a gap between them for something else to happen in.
+
+**Why this still counts as "atomic" even though nobody wrote `FOR UPDATE`:** Postgres
+uses its own internal row-level locking to execute any `UPDATE` safely under
+concurrency — that machinery doesn't disappear just because your code didn't ask for
+it by name. The difference between this section and the next one isn't "locked vs.
+unlocked":
+
+| | `UPDATE ... WHERE` | `SELECT ... FOR UPDATE` (§6) |
+|---|---|---|
+| Is a lock involved? | Yes — Postgres's own, internal, automatic | Yes — explicitly requested by your code |
+| Who manages it? | Postgres, for the duration of one statement | Your code, for as long as the transaction holds it |
+| What it protects | One conditional write | A whole read-decide-write sequence, possibly spanning multiple statements or an external call |
+| How you detect you lost the race | Check the affected-row count — `0` means someone else got there first | You don't race at all — the second transaction just waits its turn |
+
+**One consequence worth stating plainly: "0 rows affected" is a real result you must
+check, not an edge case you can ignore.** If the expiry job's code doesn't inspect how
+many rows the `UPDATE` actually touched, it has no way to know the difference between
+"successfully cancelled" and "skipped because someone else changed it first" — both
+look like a statement that ran without raising an exception.
+
+## 6. `SELECT ... FOR UPDATE` — a lock the database itself enforces
+
+**Not used anywhere in this codebase today** — every invariant so far (double-booking, idempotency keys, payment dedup) turned out to be expressible as a single-table constraint instead, which section 7 explains is the better default when that's possible. Reach for `FOR UPDATE` directly when it *isn't* possible — the rule needs a multi-step read-then-decide-then-write sequence to happen atomically (not just one row's uniqueness at insert time), or spans multiple rows in a way no single constraint can express.
 
 **A real future case: refund totals (Epic 8 / `BOOK-76`).** "Never refund more than a reservation was actually charged" is a sum across multiple `Payment` rows, not one row's uniqueness — a constraint can't express it. Two concurrent refund attempts could each sum the existing rows, both see the same amount still refundable, and both insert a refund that fits *individually* but doesn't together. `FOR UPDATE` on the reservation while summing, deciding, and inserting closes that gap the same way it does for the `Payment` example below.
 
@@ -146,7 +232,7 @@ Compare that to what the codebase actually has: [`app/payment/models.py`](../../
 - **It only works if every code path that touches the locked resource remembers to take the lock, in the right order, inside a transaction.** A webhook handler, a retry job, a future endpoint, a one-off data-fix script — miss it once anywhere, and the protection silently stops applying to that path, while looking identical to the paths that do it correctly.
 - **Holding it across an external call is expensive and risky.** If a charge attempt needs a network round-trip to a payment provider, holding a row lock open for that entire duration blocks every other operation on that row (cancellation, another read) for as long as the external call takes — which can be seconds, or much longer if the provider is slow.
 
-## 6. Why a database constraint is preferred for correctness-critical invariants
+## 7. Why a database constraint is preferred for correctness-critical invariants
 
 **Both of these are enforced by Postgres, not Python — that's not the axis they differ on.** `FOR UPDATE` really does block a second transaction, exactly as advertised; there's no sense in which the *blocking itself* is weaker or less real than what a constraint does. The difference is **who is responsible for making the protection apply to a given write, and when that decision gets made:**
 
@@ -161,7 +247,7 @@ Compare that to what the codebase actually has: [`app/payment/models.py`](../../
 
 A constraint isn't "safer" because it invokes some stronger enforcement than a lock does — both are just Postgres. It's safer because it's declared **once, on the table**, instead of being something a developer has to actively choose to invoke correctly on every single query that touches the data, forever. This is the same reasoning behind [`CheckConstraint`](sqlalchemy-basics.md#7-checkconstraint--rules-postgres-enforces-not-just-your-app) in this codebase: enforcement that doesn't depend on which code wrote the row is strictly more robust than enforcement that does.
 
-## 7. Is this actually how real systems are built?
+## 8. Is this actually how real systems are built?
 
 Yes — "stateless app tier, stateful data tier" is a standard, load-bearing pattern in backend engineering, not something specific to this project. It's the default assumption behind Kubernetes deployments, load-balanced container fleets, and serverless functions: application instances are cheap, interchangeable, and disposable; the database (or a dedicated coordination service, for things that truly need one) is the one thing treated as authoritative. The corollary is equally standard: **don't rely on in-process state for correctness that must hold system-wide** — it silently stops working the moment there's more than one process, which happens almost immediately in real deployments, often invisibly (a second worker, a second replica added for capacity, without anyone touching the "business logic").
 
@@ -176,7 +262,9 @@ Yes — "stateless app tier, stateful data tier" is a standard, load-bearing pat
 | Stateless app tier | App processes hold nothing essential in memory; any one is disposable/replaceable |
 | Stateful data tier | The database is the one thing every process/replica actually shares |
 | In-process lock | Only coordinates code in the same process's memory — invisible to any other process |
+| `UPDATE ... WHERE` (conditional update) | Check-and-write as one statement — atomic via Postgres's own internal locking, no explicit lock in your code. Check the affected-row count; `0` means you lost the race |
 | `SELECT ... FOR UPDATE` | A row-level lock Postgres itself enforces — works across processes, but only if every writer remembers to use it |
+| "Atomic" ≠ "no lock" | Atomicity can come from Postgres's own internal locking (conditional `UPDATE`) just as validly as from a lock your code explicitly requests (`FOR UPDATE`) — the difference is who's responsible for it existing, not whether one exists |
 | DB constraint / unique index | Enforced by Postgres on every write, regardless of which code path wrote it — no discipline required |
 | `UNIQUE` (B-tree) can't deadlock this way | One physical slot per key — the write itself serializes, so a wait can only ever point one direction |
 | `EXCLUDE` (GiST) can deadlock | Overlapping rows are separate physical entries, both can land uncommitted at once, and each can discover + wait on the other — a real cycle (`BOOK-39` hit this on `Reservation`) |
