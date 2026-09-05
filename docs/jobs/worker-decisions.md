@@ -222,6 +222,125 @@ call is the case `concurrency-basics.md` §6 warns about, and doesn't apply to t
 - **Does the worker ship in the same image as the app?** Same `Dockerfile` with a
   different command is the simpler default.
 
+## 7. BOOK-47 reordered after BOOK-45 — the expiry job turned out not to need retry
+
+**Original plan (§5): retry before email**, so the policy would be designed against a
+real job rather than in the abstract. Once BOOK-46 actually existed, that reasoning
+didn't hold up:
+
+**The expiry job already self-heals via its own schedule, for free.** A transient
+failure (the DB briefly unreachable, say) commits nothing — so the exact same
+reservations (still `pending`, still past `expires_at`) match the query again on the
+*next* beat tick, 60 seconds later, with no retry code involved at all. This falls out
+of three properties the job already has: it's **idempotent**, it's **independently
+re-triggered** (each tick is its own attempt, not a continuation), and a failure
+**never partially commits**. Adding `autoretry_for`/backoff on top of that wouldn't add
+real robustness — it would be infrastructure solving a problem the schedule already
+solves.
+
+**Email has the opposite shape.** It's triggered once, per booking — there's no "next
+tick" that naturally re-attempts a failed send. Without retry, a failed send is simply
+gone forever; nothing else in the system will ever try again. That's a real gap
+BOOK-46 never had.
+
+**So BOOK-47 moves after BOOK-45, and gets designed against email instead of expiry** —
+the job that actually needs retry protection, and that has genuine external failure
+modes (SMTP timeout, provider errors) to build against instead of synthetic/injected
+ones.
+
+**One limit worth naming, so it isn't confused with what retry actually fixes:** this
+self-healing argument only covers *transient* failures. A genuine bug (a broken query,
+a bad migration) fails every tick identically forever — retry wouldn't help there
+either, per BOOK-47's own rule ("retry transient failures, not permanent ones"), and
+neither would dead-lettering, since there's no burst of failed attempts to catch, just
+a steady one every 60 seconds. That's a monitoring/alerting problem (Epic 9), not a
+retry-policy one.
+
+**Revisit if:** the expiry job ever gains a step that isn't idempotent or that partially
+commits — at that point the self-healing argument stops applying and a real retry
+policy would be worth adding here too.
+
+## 8. Mail transport for BOOK-45: MailHog now, a provider later — never a self-hosted server
+
+**Chosen:** MailHog (or Mailpit) as a local SMTP test double for now. A real
+transactional provider (SES, Postmark, SendGrid) is deferred until this project needs
+something to run in an actual deployment. Full background: `email-basics.md`.
+
+**Why the code doesn't need to know which one it's talking to:** `notification/service.py`
+owns "compose and send" as one function; whether that function opens an SMTP connection
+to a local container or calls a provider's API is contained entirely inside it. Neither
+`app/worker.py` (the task) nor whatever triggers it changes when this decision is
+revisited — same "only the trigger changes" boundary as §2, applied one layer over.
+
+**Rejected, with the reason it doesn't fit:**
+
+| | Why not |
+|---|---|
+| A self-hosted SMTP server (Postfix, etc.) | Starts every deliverability problem from zero — no sending reputation, no SPF/DKIM/DMARC set up — and it's ongoing operational work unrelated to what this app does. `email-basics.md` §2 |
+| A real provider, right now | Needs an account and an API key/secret in `.env`, and every dev-loop test send would count against a rate limit. Also makes triggering a failure on demand (needed for BOOK-47) harder than stopping a local container |
+| Sending to a real inbox (e.g. personal Gmail) during development | Needs a real recipient per test run, and personal-account SMTP is rate-limited and not meant for automated app sending |
+
+**Revisit if:** this project ever needs a real deployment where someone other than the
+developer receives the email — at that point MailHog stops being sufficient, not
+because it broke, but because it was never meant to deliver anything.
+
+## 9. BOOK-45's trigger: a direct Celery call now, not Kafka — and what actually justifies moving it later
+
+**Chosen:** `create_reservation()` enqueues the email via a direct `.delay()` call to
+Celery, the same shape as every other Epic 6 job. `notification/service.py` stays
+unaware of Kafka, topics, or events — none of that exists yet.
+
+**The coupling this creates, honestly:** a direct call means `reservation/service.py`
+(or its router) imports and calls into `app.worker` by name — Reservation "knows about"
+Notification. That's fine for exactly one consumer, but it doesn't scale: every future
+consumer of "a reservation was created" would mean another line added to Reservation's
+code, not a new independent listener. That's the concrete cost behind `worker-decisions.md`
+§3's "multiple independent consumers" argument for an event bus in general.
+
+**What does *not* justify migrating this specific trigger to Kafka later:** checked the
+actual backlog (Epic 7 through Epic 9) for a second real consumer of "a reservation was
+created" — there isn't one. BOOK-48's "future consumers (analytics, audit log, whatever
+comes later)" is a capability being kept open, not a planned ticket. So "multiple
+independent consumers," while the real reason event buses exist, isn't what's actually
+driving this migration.
+
+**What does justify it, concretely:**
+
+- **It fixes a real ordering gap this direct-call version has.** `get_uow()`
+  (`core/db/unit_of_work.py`) commits the reservation *after* the route handler
+  returns, so a `.delay()` fired from inside `create_reservation()` (or its router)
+  always precedes that commit. A commit failure after that point — rare, but real —
+  would leave an email enqueued for a reservation that was never actually persisted.
+  BOOK-50's outbox pattern is the actual fix: the event row is written in the *same*
+  transaction as the reservation, so a failed commit means the event row was never
+  written either. No orphaned email, by construction, not by care taken at the call
+  site.
+- **Consistency once Notification is "a pure event consumer" (BOOK-51).** Once
+  `BookingConfirmed`/`BookingCancelled` go through Kafka, leaving `BookingCreated` on a
+  separate direct-call mechanism means two different reliability models living in the
+  same module permanently, for reasons nobody will want to re-derive later.
+
+**Known limitation, accepted for now:** the ordering gap above is real today and is
+*not* fixed in BOOK-45. It's small — a DB commit failing after the service function
+already returned successfully is rare — and the real fix needs infrastructure (outbox +
+relay) that doesn't exist until BOOK-50. Fixing it early here would mean half-building
+Epic 7 inside an Epic 6 ticket.
+
+**What "only the trigger changes" does *not* mean:** Celery isn't kept around underneath
+and simply called from Kafka instead of from Reservation. `notification/service.py`'s
+send function (plain async, no `@app.task`, no `.delay()`) is the only thing that
+survives unchanged. The `@app.task` wrapper in `worker.py` and the `.delay()` call site
+are BOOK-45-specific infrastructure, and BOOK-51 removes both for this job — a Kafka
+consumer calls the send function directly, in-process. Stacking Kafka on top of Celery
+here would mean two queues doing the same job (buffering, redelivery) that Kafka's
+consumer groups already do alone. Celery/RabbitMQ stays in the project for jobs that are
+actually scheduled/triggered-and-not-an-event, like `expire_pending_reservations` — it
+just stops being part of *this* job's path.
+
+**Revisit if:** a second real consumer of "a reservation was created" gets planned
+before Epic 7 lands — at that point the coupling cost, not just the ordering gap, starts
+to bite, and moving the trigger earlier would be worth it on its own.
+
 ---
 
 ## Cheat sheet
@@ -234,3 +353,6 @@ call is the case `concurrency-basics.md` §6 warns about, and doesn't apply to t
 | Task broker vs event bus | Different brokers — RabbitMQ (tasks) vs. Kafka (events) | Running Kafka costs more than the event-bus learning is worth |
 | Worker count | One worker, many jobs; scale with copies | Head-of-line blocking, resources, scaling, blast radius, priority |
 | First job | The expiry job — idempotent, no external deps | — |
+| Retry policy target | Email (BOOK-45), not expiry (BOOK-46) | The expiry job gains a non-idempotent or partially-committing step |
+| Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
+| BOOK-45 trigger reliability | Direct `.delay()` call; the enqueue-before-commit gap is accepted, not fixed | A second real consumer of "reservation created" is planned before Epic 7 lands |

@@ -36,6 +36,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # BOOK-45: local SMTP test double, not a real mail server -- see
+  # docs/jobs/email-basics.md section 3 and docs/jobs/worker-decisions.md
+  # section 8. Catches every message `worker` sends and shows it at
+  # http://localhost:8025 -- nothing here is ever actually delivered.
+  # Only `worker` depends on this: `app` never touches mail directly, it
+  # only enqueues the job (the whole point of BOOK-45).
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "1025:1025"   # SMTP -- what `worker` sends to
+      - "8025:8025"   # web UI -- where you look at what was "sent"
+
   app:
     build: .
     environment:
@@ -79,11 +91,16 @@ services:
       # BOOK-46: the first real DB-touching job landed, so this is now needed
       # -- see the comment this replaces, above the `app` service.
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-45: container networking needs the service name, not `localhost`
+      # -- same reason DATABASE_URL above isn't Settings' own default either.
+      SMTP_HOST: mailhog
     depends_on:
       rabbitmq:
         condition: service_healthy
       db:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     volumes:
       - .:/code
       - /code/.venv
