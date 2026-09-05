@@ -5,12 +5,24 @@
 Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md §2.
 """
 
+import smtplib
 import uuid
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.jobs.celery_app import app, async_task
 from app.notification import service as notification_service
 from app.reservation import service as reservation_service
+
+# BOOK-47: transient only (docs/jobs/retry-basics.md §1) -- connection-level
+# failures (OSError covers refused/timeout/DNS) and a bad greeting/mid-send
+# disconnect are worth retrying. SMTPRecipientsRefused/SMTPSenderRefused
+# (bad address) are deliberately excluded: retrying won't fix a bad address.
+_TRANSIENT_SMTP_ERRORS = (
+    OSError,
+    smtplib.SMTPConnectError,
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPHeloError,
+)
 
 
 @app.task
@@ -31,15 +43,27 @@ async def expire_pending_reservations() -> None:
         await reservation_service.expire_pending_reservations(uow)
 
 
-@app.task
+@app.task(
+    autoretry_for=_TRANSIENT_SMTP_ERRORS,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    max_retries=5,
+)
 @async_task
 async def send_reservation_received_email(reservation_id: str) -> None:
-    """BOOK-45: notify the guest their reservation request arrived.
+    """BOOK-45/47: notify the guest their reservation request arrived.
 
     `reservation_id` is a string -- task args are JSON-serialized
     (celery-basics.md §6). Thin wrapper; logic lives in
     notification/service.py, the part BOOK-51 keeps unchanged when this
     trigger becomes a Kafka consumer (worker-decisions.md §9).
+
+    Retries only cover *this* task actually running and failing -- not the
+    .delay() publish call that enqueues it in the first place, which fails
+    before any task exists to retry. That failure mode is deliberately not
+    retried (worker-decisions.md §9's "publish failure" gap, retry-basics.md
+    §5's job-retry-vs-enqueue-retry distinction).
     """
     async with UnitOfWork() as uow:
         await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))

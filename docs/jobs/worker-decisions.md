@@ -362,6 +362,62 @@ in progress.
 planned — at that point the coupling cost (not the ordering gap, which `on_commit()`
 already handles) would justify moving this specific trigger to the event bus too.
 
+## 10. BOOK-47: retry the task body, deliberately not the publish call
+
+**Chosen, following retry-basics.md's job-retry-vs-enqueue-retry distinction (§5):**
+only the first of the two failure modes §9 identified gets a retry policy.
+
+**Task-body retry** (`app/worker.py`, on `send_reservation_received_email`):
+
+```python
+@app.task(
+    autoretry_for=_TRANSIENT_SMTP_ERRORS,  # OSError, SMTPConnectError,
+                                            # SMTPServerDisconnected, SMTPHeloError
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    max_retries=5,
+)
+```
+
+**Which (transient vs permanent), concretely:** `OSError` (covers connection refused,
+timeout, and DNS failure — all three showed up as `gaierror`, an `OSError` subclass, in
+testing) plus `SMTPConnectError`/`SMTPServerDisconnected`/`SMTPHeloError`.
+`SMTPRecipientsRefused`/`SMTPSenderRefused` (a bad address) are deliberately excluded —
+retrying doesn't fix a bad address, per retry-basics.md §1.
+
+**Verified live, not just read from the decorator:** stopped MailHog, created a
+reservation, watched the same task ID retry with growing, jittered backoff, then
+started MailHog back up:
+
+```
+13:13:27  retry: Retry in 1s   (attempt 1, MailHog still down)
+13:13:36  retry: Retry in 0s   (attempt 2, jitter shrank the wait)
+13:13:44  retry: Retry in 0s   (attempt 3)
+13:13:52  retry: Retry in 4s   (attempt 4, backoff growing)
+13:13:56  succeeded            (attempt 5, MailHog back — sent)
+```
+
+Same task ID throughout (Celery's own log line includes it) — one task retrying, not
+five separate ones.
+
+**Not yet built: what happens once `max_retries` is exhausted.** Right now, a task that
+fails all 5 attempts just ends up `FAILED` in Celery — visible in the worker's own logs,
+but not routed anywhere durable or inspectable afterward. `rabbitmq-basics.md` §6's
+dead-letter exchange is the broker-native mechanism for this (nothing custom needed to
+build), but it isn't wired up yet — the queue isn't declared with a DLX, and nothing
+consumes one. This is the "how many, then what" half of retry-basics.md §0's mental
+model, still open.
+
+**Publish-call failure — deliberately not retried, not a gap left by oversight.** Per §9's
+"third failure mode": retrying `.delay()` itself would mean retrying *inside*
+`on_commit()`'s callback, which runs as part of the guest's own request
+(retry-basics.md §6 — retry that blocks). Adding retries there would make a broker
+outage turn into the guest waiting several seconds-to-tens-of-seconds for their `201`,
+which is exactly what BOOK-45 exists to prevent. The existing behavior (caught, logged,
+not retried, request unaffected) stays as-is — confirmed separately in §9 by actually
+stopping RabbitMQ.
+
 ---
 
 ## Cheat sheet
@@ -378,3 +434,6 @@ already handles) would justify moving this specific trigger to the event bus too
 | Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
 | BOOK-45 trigger reliability | `uow.on_commit()`, not a direct `.delay()` — fixes ordering, not crash durability | A second real consumer of "reservation created" is planned before Epic 7 lands |
 | `BookingCreated`'s trigger, long-term | Stays on Celery permanently — never migrates to Kafka | A second real consumer of "reservation created" actually gets planned |
+| BOOK-47 task-body retry | `autoretry_for` on connection-level errors, backoff+jitter, max_retries=5 — verified live | Never — this is the settled policy for this task |
+| BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
+| BOOK-47 dead-lettering | Not yet wired — exhausted retries just end up `FAILED`, nowhere durable | Before relying on this in anything beyond local dev |
