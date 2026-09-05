@@ -13,10 +13,8 @@ from app.core.jobs.celery_app import app, async_task
 from app.notification import service as notification_service
 from app.reservation import service as reservation_service
 
-# BOOK-47: transient only (docs/jobs/retry-basics.md §1) -- connection-level
-# failures (OSError covers refused/timeout/DNS) and a bad greeting/mid-send
-# disconnect are worth retrying. SMTPRecipientsRefused/SMTPSenderRefused
-# (bad address) are deliberately excluded: retrying won't fix a bad address.
+# BOOK-47: transient only (retry-basics.md §1). Excludes
+# SMTPRecipientsRefused/SMTPSenderRefused -- a bad address won't fix itself.
 _TRANSIENT_SMTP_ERRORS = (
     OSError,
     smtplib.SMTPConnectError,
@@ -55,15 +53,11 @@ async def send_reservation_received_email(reservation_id: str) -> None:
     """BOOK-45/47: notify the guest their reservation request arrived.
 
     `reservation_id` is a string -- task args are JSON-serialized
-    (celery-basics.md §6). Thin wrapper; logic lives in
-    notification/service.py, the part BOOK-51 keeps unchanged when this
-    trigger becomes a Kafka consumer (worker-decisions.md §9).
+    (celery-basics.md §6). Thin wrapper; logic lives in notification/service.py.
 
-    Retries only cover *this* task actually running and failing -- not the
-    .delay() publish call that enqueues it in the first place, which fails
-    before any task exists to retry. That failure mode is deliberately not
-    retried (worker-decisions.md §9's "publish failure" gap, retry-basics.md
-    §5's job-retry-vs-enqueue-retry distinction).
+    Retries cover this task running and failing -- not the .delay() publish
+    itself failing, which happens before any task exists (deliberately not
+    retried, worker-decisions.md §9/§10).
     """
     async with UnitOfWork() as uow:
         await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))

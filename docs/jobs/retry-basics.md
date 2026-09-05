@@ -133,6 +133,37 @@ the first case completely and does *nothing* for the second — the failure it w
 to catch happens one layer earlier, at the call that tries to hand the job to the queue
 in the first place.
 
+**A related pair that looks identical from the outside but comes from opposite
+directions: your own retry vs. the broker's redelivery.** Both end with the worker
+receiving the job again — but *who decided that*, and *why*, are completely different:
+
+```
+Your retry (application decides)          Broker redelivery (broker decides)
+
+Worker receives the job                   Worker receives the job
+        │                                         │
+   job fails                                 💥 worker dies before acking
+        │                                         │
+   framework says: retry                     broker sees no ack
+        │                                         │
+   a NEW attempt is sent to the broker        broker resends the SAME message
+        │                                         │
+        ▼                                         ▼
+   worker receives it again                  worker receives it again
+```
+
+The outcome looks the same (the worker gets the job again) — but the cause is opposite:
+**your retry means the framework explicitly decided the work needs another attempt**
+(it ran, it failed, try again); **redelivery means the broker never got confirmation the
+first attempt happened at all** (no verdict on the work — just a missing acknowledgment).
+This is exactly why *your* retry can have backoff, jitter, and a max-attempts count —
+the framework is choosing to send a new attempt and can pace it however it wants.
+Redelivery has none of that: the broker isn't evaluating whether the work succeeded, it's
+reacting to silence, and it hands the same message back with no concept of "wait a bit
+first." (This project's specific instance: `rabbitmq-basics.md` §4's ack-late mechanism
+is the redelivery side; Celery's `autoretry_for` is the retry side — same-looking
+outcome, opposite triggers.)
+
 ## 6. Retry that blocks vs. retry that doesn't — where you retry changes what it costs
 
 Not all retry loops cost the same. The deciding question: **who is waiting while the
@@ -165,4 +196,5 @@ just tried to create the job, which may or may not be a request handler.
 | Dead-letter queue (DLQ) | Where a job goes after exhausting retries — visible and inspectable, not silently gone |
 | Idempotency (for retry) | Running the job twice must be harmless — at-least-once delivery means it might |
 | Retrying a running job vs. retrying to start one | Two different failures, two different fixes — a task-level retry decorator only covers the first |
+| Your retry vs. broker redelivery | Same-looking outcome (job runs again), opposite cause: you decided it needs another attempt vs. the broker never got an ack |
 | Retry that blocks | Retrying inside a synchronous call path costs the caller directly — check where the retry actually lives |
