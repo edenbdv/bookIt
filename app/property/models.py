@@ -23,7 +23,7 @@ class Property(Base):
     host_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     title: Mapped[str]
     description: Mapped[str]
-    # indexed: filtered on directly in availability search (BOOK-40)
+    # indexed: filtered on directly in availability search (BOOK-90)
     city: Mapped[str] = mapped_column(index=True)
     country: Mapped[str]
     max_guests: Mapped[int]

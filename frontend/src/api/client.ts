@@ -1,4 +1,13 @@
-import type { PropertyDetail, PropertyFilters, PropertyListItem, Review, Tokens, User } from '../types'
+import type {
+  PropertyDetail,
+  PropertyFilters,
+  PropertyListItem,
+  Reservation,
+  ReservationCreate,
+  Review,
+  Tokens,
+  User,
+} from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 
@@ -141,4 +150,32 @@ export function getPropertyReviews(propertyId: string): Promise<Review[]> {
 
 export function listCities(): Promise<string[]> {
   return request<string[]>('/properties/cities')
+}
+
+// BOOK-83. Kept separate from confirmReservationStub below -- two distinct
+// calls, not one "book it" action -- so Epic 8 only ever has to change the
+// second one. idempotencyKey is caller-supplied (a fresh UUID per attempt,
+// reused only when retrying that exact attempt) since it's a request-level
+// concern, not something this client should silently generate on retry.
+export function createReservation(
+  data: ReservationCreate,
+  idempotencyKey: string,
+): Promise<Reservation> {
+  return request<Reservation>('/reservations', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+}
+
+// TODO(BOOK-10 / Epic 8): this is a stand-in for a real payment step -- the
+// backend endpoint itself is a manual trigger with no payment behind it yet
+// (app/reservation/service.py). Replace this function's body with a real
+// payment redirect; nothing else in the booking flow should need to change.
+export function confirmReservationStub(id: string): Promise<Reservation> {
+  return request<Reservation>(`/reservations/${id}/confirm`, { method: 'POST' })
+}
+
+export function cancelReservation(id: string): Promise<Reservation> {
+  return request<Reservation>(`/reservations/${id}/cancel`, { method: 'POST' })
 }

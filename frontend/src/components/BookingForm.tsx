@@ -1,0 +1,247 @@
+import { useState, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
+import { ApiError, cancelReservation, confirmReservationStub, createReservation } from '../api/client'
+import { useAuth } from '../context/useAuth'
+import type { PropertyDetail, Reservation } from '../types'
+import { formatPrice } from '../utils/format'
+import { todayIso } from '../utils/dates'
+
+interface Props {
+  property: PropertyDetail
+}
+
+// BOOK-83: a reservation is either being set up (the form), or it exists and
+// the user can act on it (confirm the stub / cancel). `action` tracks an
+// in-flight sub-request against an existing reservation, separate from the
+// reservation's own `status` -- e.g. status stays 'pending' the entire time
+// a confirm request is in flight.
+type BookingState =
+  | { kind: 'form' }
+  | { kind: 'submitting' }
+  | { kind: 'reservation'; reservation: Reservation; action: 'idle' | 'confirming' | 'cancelling'; actionError?: string }
+  | { kind: 'error'; message: string }
+
+function nightsBetween(checkIn: string, checkOut: string): number {
+  const oneDayMs = 24 * 60 * 60 * 1000
+  return Math.round((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / oneDayMs)
+}
+
+function formatExpiry(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+// visually distinct per status so "confirmed" reads as a positive outcome
+// and "cancelled" as a settled, de-emphasized one at a glance, not just text
+const STATUS_STYLES: Record<Reservation['status'], { container: string; badge: string }> = {
+  pending: { container: 'border-amber-200 bg-amber-50', badge: 'bg-amber-100 text-amber-800' },
+  confirmed: { container: 'border-green-200 bg-green-50', badge: 'bg-green-100 text-green-800' },
+  cancelled: { container: 'border-gray-200 bg-gray-50', badge: 'bg-gray-200 text-gray-600' },
+  completed: { container: 'border-blue-200 bg-blue-50', badge: 'bg-blue-100 text-blue-800' },
+}
+
+export function BookingForm({ property }: Props) {
+  const { session } = useAuth()
+  const [checkIn, setCheckIn] = useState('')
+  const [checkOut, setCheckOut] = useState('')
+  const [guestCount, setGuestCount] = useState('1')
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const [state, setState] = useState<BookingState>({ kind: 'form' })
+
+  if (!session) {
+    return (
+      <p className="text-sm text-gray-600">
+        <Link to="/login" className="font-semibold text-gray-900 underline">
+          Log in
+        </Link>{' '}
+        to book this property.
+      </p>
+    )
+  }
+
+  // mirrors GET /properties' own two rules (app/property/router.py) and
+  // POST /reservations' guest_count check (app/reservation/service.py) --
+  // client-side validation, server stays authoritative either way
+  function validate(): string | null {
+    if (!checkIn || !checkOut) return 'Pick both a check-in and a check-out date.'
+    if (checkIn < todayIso()) return 'Check-in cannot be in the past.'
+    if (checkOut <= checkIn) return 'Check-out must be after check-in.'
+    const guests = Number(guestCount)
+    if (!Number.isInteger(guests) || guests < 1) return 'Guest count must be at least 1.'
+    if (guests > property.max_guests) return `This property sleeps at most ${property.max_guests} guests.`
+    return null
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    const error = validate()
+    setValidationError(error)
+    if (error) return
+
+    setState({ kind: 'submitting' })
+    try {
+      // fresh per attempt -- reused only if this exact attempt were retried,
+      // which this form doesn't currently do automatically (BOOK-83)
+      const idempotencyKey = crypto.randomUUID()
+      const reservation = await createReservation(
+        { property_id: property.id, check_in: checkIn, check_out: checkOut, guest_count: Number(guestCount) },
+        idempotencyKey,
+      )
+      setState({ kind: 'reservation', reservation, action: 'idle' })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Could not create this reservation.'
+      setState({ kind: 'error', message })
+    }
+  }
+
+  // TODO(BOOK-10 / Epic 8): this button is where a real payment redirect
+  // replaces confirmReservationStub -- everything above this component stays
+  // the same.
+  async function confirm(reservation: Reservation) {
+    setState({ kind: 'reservation', reservation, action: 'confirming' })
+    try {
+      const confirmed = await confirmReservationStub(reservation.id)
+      setState({ kind: 'reservation', reservation: confirmed, action: 'idle' })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Could not confirm this reservation.'
+      setState({ kind: 'reservation', reservation, action: 'idle', actionError: message })
+    }
+  }
+
+  async function cancel(reservation: Reservation) {
+    setState({ kind: 'reservation', reservation, action: 'cancelling' })
+    try {
+      const cancelled = await cancelReservation(reservation.id)
+      setState({ kind: 'reservation', reservation: cancelled, action: 'idle' })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Could not cancel this reservation.'
+      setState({ kind: 'reservation', reservation, action: 'idle', actionError: message })
+    }
+  }
+
+  if (state.kind === 'reservation') {
+    const { reservation, action, actionError } = state
+    const styles = STATUS_STYLES[reservation.status]
+    return (
+      <div className={`rounded-lg border p-5 ${styles.container}`}>
+        <p className="text-sm text-gray-700">
+          Reservation{' '}
+          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${styles.badge}`}>
+            {reservation.status}
+          </span>{' '}
+          &middot; {reservation.check_in} &rarr; {reservation.check_out} &middot; {reservation.guest_count} guest
+          {reservation.guest_count === 1 ? '' : 's'} &middot; {formatPrice(reservation.total_cents)} total
+        </p>
+
+        {reservation.status === 'pending' && reservation.expires_at && (
+          <p className="mt-2 text-sm text-amber-700">
+            Held until {formatExpiry(reservation.expires_at)} -- confirm before then or it's released
+            automatically.
+          </p>
+        )}
+
+        {actionError && (
+          <p role="alert" className="mt-2 text-sm text-red-700">
+            {actionError}
+          </p>
+        )}
+
+        <div className="mt-4 flex gap-3">
+          {reservation.status === 'pending' && (
+            <button
+              type="button"
+              disabled={action !== 'idle'}
+              onClick={() => confirm(reservation)}
+              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {action === 'confirming' ? 'Confirming...' : 'Confirm booking'}
+            </button>
+          )}
+          {(reservation.status === 'pending' || reservation.status === 'confirmed') && (
+            <button
+              type="button"
+              disabled={action !== 'idle'}
+              onClick={() => cancel(reservation)}
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {action === 'cancelling' ? 'Cancelling...' : 'Cancel'}
+            </button>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const nights = checkIn && checkOut && checkOut > checkIn ? nightsBetween(checkIn, checkOut) : 0
+  const submitting = state.kind === 'submitting'
+
+  return (
+    // noValidate: this form has its own validate() with friendlier, styled
+    // messages -- without it, the browser's native constraint validation
+    // (triggered by the date/number inputs' min/max) intercepts submit
+    // before onSubmit ever runs, silently, with no visible error and no
+    // network call. Found by testing an out-of-range guest count.
+    <form onSubmit={submit} noValidate className="rounded-lg border border-gray-200 p-5">
+      <h2 className="mb-4 text-lg font-bold">Book this property</h2>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-sm text-gray-500">
+          Check in
+          <input
+            className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            type="date"
+            dir="ltr"
+            min={todayIso()}
+            value={checkIn}
+            onChange={(e) => setCheckIn(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-sm text-gray-500">
+          Check out
+          <input
+            className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            type="date"
+            dir="ltr"
+            min={checkIn || todayIso()}
+            value={checkOut}
+            onChange={(e) => setCheckOut(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-sm text-gray-500">
+          Guests
+          <input
+            className="w-20 rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            type="number"
+            min={1}
+            max={property.max_guests}
+            value={guestCount}
+            onChange={(e) => setGuestCount(e.target.value)}
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {submitting ? 'Booking...' : 'Reserve'}
+        </button>
+      </div>
+
+      {nights > 0 && (
+        <p className="mt-3 text-sm text-gray-600">
+          {nights} night{nights === 1 ? '' : 's'} &times; {formatPrice(property.price_per_night_cents)} ={' '}
+          <span className="font-semibold">{formatPrice(nights * property.price_per_night_cents)}</span> total
+        </p>
+      )}
+
+      {validationError && (
+        <p role="alert" className="mt-3 text-sm text-red-700">
+          {validationError}
+        </p>
+      )}
+      {state.kind === 'error' && (
+        <p role="alert" className="mt-3 text-sm text-red-700">
+          {state.message}
+        </p>
+      )}
+    </form>
+  )
+}

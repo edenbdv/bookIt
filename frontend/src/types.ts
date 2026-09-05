@@ -66,6 +66,35 @@ export interface PropertyFilters {
   sort?: PropertySort
 }
 
+// app/reservation/models.py's ReservationStatus -- keep in sync by hand,
+// same as everything else in this file
+export type ReservationStatus = 'pending' | 'confirmed' | 'cancelled' | 'completed'
+
+export interface ReservationCreate {
+  property_id: string
+  check_in: string
+  check_out: string
+  guest_count: number
+}
+
+export interface Reservation {
+  id: string
+  property_id: string
+  guest_id: string
+  check_in: string
+  check_out: string
+  guest_count: number
+  // snapshot at booking time (app/reservation/service.py) -- never recompute
+  // this from the property's current price_per_night_cents
+  total_cents: number
+  status: ReservationStatus
+  // confirm does NOT clear this (BOOK-83) -- a confirmed reservation still
+  // carries its original (now past) hold deadline. Only meaningful when
+  // status === 'pending'; don't render it otherwise.
+  expires_at: string | null
+  created_at: string
+}
+
 export interface Review {
   id: string
   reservation_id: string
