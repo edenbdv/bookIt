@@ -306,25 +306,26 @@ driving this migration.
 
 **What does justify it, concretely:**
 
-- **It fixes a real ordering gap this direct-call version has.** `get_uow()`
+- **It durably fixes the ordering gap this direct-call version has.** `get_uow()`
   (`core/db/unit_of_work.py`) commits the reservation *after* the route handler
-  returns, so a `.delay()` fired from inside `create_reservation()` (or its router)
-  always precedes that commit. A commit failure after that point — rare, but real —
-  would leave an email enqueued for a reservation that was never actually persisted.
-  BOOK-50's outbox pattern is the actual fix: the event row is written in the *same*
-  transaction as the reservation, so a failed commit means the event row was never
-  written either. No orphaned email, by construction, not by care taken at the call
-  site.
+  returns, so a naive `.delay()` fired from inside `create_reservation()` would always
+  precede that commit. BOOK-50's outbox pattern closes this for good: the event row is
+  written in the *same* transaction as the reservation, so a failed commit means the
+  event was never written either, even across a process crash.
 - **Consistency once Notification is "a pure event consumer" (BOOK-51).** Once
   `BookingConfirmed`/`BookingCancelled` go through Kafka, leaving `BookingCreated` on a
   separate direct-call mechanism means two different reliability models living in the
   same module permanently, for reasons nobody will want to re-derive later.
 
-**Known limitation, accepted for now:** the ordering gap above is real today and is
-*not* fixed in BOOK-45. It's small — a DB commit failing after the service function
-already returned successfully is rare — and the real fix needs infrastructure (outbox +
-relay) that doesn't exist until BOOK-50. Fixing it early here would mean half-building
-Epic 7 inside an Epic 6 ticket.
+**Ordering fixed now, durability deferred to BOOK-50.** `UnitOfWork.on_commit()`
+(`core/db/unit_of_work.py`) queues a callback that only runs after `session.commit()`
+succeeds — `create_reservation_idempotent()` uses it instead of a direct `.delay()`, so
+the email can no longer be enqueued for a reservation that failed to commit. What this
+*doesn't* cover: the callback lives only in this process's memory, so a crash in the
+narrow window between commit succeeding and the callback running still loses it
+silently, with no record. Only BOOK-50's outbox table (the fact written durably, in the
+same transaction) closes that remaining gap — `on_commit()` is a real improvement, not
+a substitute for it.
 
 **What "only the trigger changes" does *not* mean:** Celery isn't kept around underneath
 and simply called from Kafka instead of from Reservation. `notification/service.py`'s
@@ -355,4 +356,4 @@ to bite, and moving the trigger earlier would be worth it on its own.
 | First job | The expiry job — idempotent, no external deps | — |
 | Retry policy target | Email (BOOK-45), not expiry (BOOK-46) | The expiry job gains a non-idempotent or partially-committing step |
 | Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
-| BOOK-45 trigger reliability | Direct `.delay()` call; the enqueue-before-commit gap is accepted, not fixed | A second real consumer of "reservation created" is planned before Epic 7 lands |
+| BOOK-45 trigger reliability | `uow.on_commit()`, not a direct `.delay()` — fixes ordering, not crash durability | A second real consumer of "reservation created" is planned before Epic 7 lands |

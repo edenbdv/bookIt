@@ -298,6 +298,47 @@ control-plane queue and an event/gossip queue appear automatically alongside `ce
 itself. See `rabbitmq-basics.md` §8 for what each one is; it's really a fact about what
 Celery does *to RabbitMQ*, not about the worker process in isolation.
 
+**Inside one task: sync, then async, then sync again.** Everything above is about
+*several* tasks and *several* processes. Zoom into just one task body (BOOK-45's
+`send_reservation_received_email`, concretely) and there are still three layers
+stacked, each a different sync/async world:
+
+```
+Celery (this worker process)        ← sync. Celery has no concept of async at all.
+        │
+        ▼
+the wrapper async_task returns      ← sync. An ordinary function Celery calls by name.
+        │  calls asyncio.run(...)     -- blocking: "run this coroutine to completion"
+        ▼
+the task's actual async body        ← async. A real event loop exists now.
+   await uow.reservations.get_by_id(...)   ← a genuine await, yields to that loop
+        │
+        ▼
+smtplib.SMTP(...).send_message(...) ← sync again! No await -- smtplib has no async
+                                        API at all, so this just blocks inside the
+                                        coroutine that's calling it
+```
+
+**Calling sync code from inside an `async def` function is legal — you just get none
+of async's benefit from it.** `smtplib`'s blocking call sits inside the coroutine
+exactly the way `time.sleep(1)` would. The reason this doesn't reproduce
+`background-jobs-basics.md` §3's warning about blocking calls ("job A blocks, jobs B
+and C don't run *at all*") is what `asyncio.run()` actually does: it opens a **brand
+new event loop scoped to this one call**, runs exactly one coroutine on it, and closes
+it when that coroutine returns. Nothing else is ever scheduled on that loop — so a
+blocking statement inside it has no sibling coroutine to starve. Contrast that with
+arq's model (`background-jobs-basics.md` §3), where several jobs' coroutines genuinely
+interleave on *one shared* loop within a process — there, the same blocking call would
+freeze every other job sharing it. Here, "no one else is stalled" isn't a coincidence
+of this specific task being simple; it's guaranteed by `asyncio.run()` giving every task
+its own throwaway loop, every time.
+
+What *does* still apply here, from the process level above: the prefork pool ensures a
+slow SMTP call in one task's `asyncio.run()` doesn't stall other *tasks* either, because
+each is a separate OS process. Two independent guarantees, from two different
+mechanisms, both true at once: no other coroutine stalls (this loop is solitary), and no
+other task stalls (prefork gives each its own process).
+
 ## 4. Task states, and what they require
 
 A task's lifecycle — `PENDING → STARTED → SUCCESS`/`FAILURE`/`RETRY` — is only
