@@ -1,10 +1,10 @@
 # BookIt
 
-A booking platform backend built as a Python/FastAPI modular monolith. See [app/README.md](app/README.md) for the code layout.
+A booking platform backend built as a Python/FastAPI modular monolith. See [app/README.md](app/README.md) for the code layout, or [docs/domain-layer/reservation-lifecycle.md](docs/domain-layer/reservation-lifecycle.md) for how a reservation actually moves end to end -- creation, background jobs, events, and where payment (Epic 8) will eventually plug in.
 
 ## Setup (first time on a machine)
 
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — runs Postgres, Redis, RabbitMQ, MailHog (and optionally the app, worker, and beat)
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — runs Postgres, Redis, RabbitMQ, Kafka, MailHog (and optionally the app, worker, and beat)
 2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) — manages the Python environment and dependencies:
    ```bash
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -16,7 +16,7 @@ A booking platform backend built as a Python/FastAPI modular monolith. See [app/
    ```
    `uv sync` reads `pyproject.toml` + `uv.lock` and creates `.venv` with the exact dependency versions already locked — nothing to configure. `.env` is your local config (gitignored); the example file has working defaults for the Docker-based infra below.
 
-That's it — you don't need to install Python packages globally, and you don't need to install Postgres/Redis/RabbitMQ/MailHog natively at all. Everything else is `uv` (app + deps) and `docker compose` (infra), covered below.
+That's it — you don't need to install Python packages globally, and you don't need to install Postgres/Redis/RabbitMQ/Kafka/MailHog natively at all. Everything else is `uv` (app + deps) and `docker compose` (infra), covered below.
 
 ## Seed data for local development
 
@@ -32,7 +32,7 @@ Safe to run again at any time — every seeded row has a fixed, hardcoded id, so
 
 ## Who runs what, and how
 
-**The infrastructure (Postgres, Redis, RabbitMQ, MailHog) always runs in Docker, in both workflows below — that never changes.** No native install of any of them, ever.
+**The infrastructure (Postgres, Redis, RabbitMQ, Kafka, MailHog) always runs in Docker, in both workflows below — that never changes.** No native install of any of them, ever.
 
 **What changes between the two workflows is where the app's own processes (`app`, `worker`, `beat`) run** — directly on your machine, or also inside Docker as their own containers. In practice only `app` benefits from staying on the host (auto-reload); `worker`/`beat` are recommended in Docker either way, since Celery has no `--reload` to gain from the host. That choice is what determines how each process addresses the infrastructure:
 
@@ -46,13 +46,24 @@ Same infrastructure, same containers — just two different vantage points for r
 Infra, `worker`, and `beat` in Docker; `app` on your machine with `uv`, for fast auto-reload on code changes without rebuilding a container each time.
 
 ```bash
-docker compose up -d db redis rabbitmq mailhog worker beat
+docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat
 uv run uvicorn app.main:app --reload
 ```
 
-The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `1025`/`8025` for MailHog).
+The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
 
 **MailHog** (BOOK-45) catches every email the `worker` sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). See `docs/jobs/email-basics.md`.
+
+**Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`.
+
+For anything the UI doesn't cover, the CLI tools bundled in the Kafka container itself work too:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --describe --bootstrap-server localhost:9092 --topic booking-events
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic booking-events --from-beginning
+```
+
+On Windows with Git Bash, prefix these with `MSYS_NO_PATHCONV=1` — Git Bash otherwise rewrites the `/opt/kafka/...` path as if it were a path on your own machine, before it ever reaches the container.
 
 **Restarting `worker`/`beat` after a change — two different commands depending on what changed:**
 
