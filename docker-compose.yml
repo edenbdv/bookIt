@@ -36,6 +36,53 @@ services:
       timeout: 5s
       retries: 5
 
+  # BOOK-48. Event bus for BookingConfirmed/BookingCancelled -- separate from
+  # `rabbitmq` on purpose (docs/jobs/worker-decisions.md §3, docs/jobs/kafka-basics.md).
+  # KRaft mode: Kafka is its own controller, no ZooKeeper container needed.
+  # Two listeners, same split as db/redis (README's "why the difference
+  # matters"): PLAINTEXT for other containers (`kafka:9092`), PLAINTEXT_HOST
+  # for the host machine (`localhost:9094`) -- a broker only ever advertises
+  # one hostname per listener, so both have to exist to be reachable from
+  # both places.
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # explicit topic creation only (BOOK-48's topic-design decision is
+      # deliberate, not "whatever a producer happens to touch first")
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # BOOK-48. Kafka has no built-in web UI the way RabbitMQ does -- this is
+  # the same role MailHog/RabbitMQ's management UI play for their brokers,
+  # just a separate tool since Kafka doesn't ship one itself. Reaches Kafka
+  # over the internal PLAINTEXT listener (`kafka:9092`), same as `worker` will.
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   # BOOK-45: local SMTP test double, not a real mail server -- see
   # docs/jobs/email-basics.md section 3 and docs/jobs/worker-decisions.md
   # section 8. Catches every message `worker` sends and shows it at
