@@ -466,6 +466,37 @@ which is exactly what BOOK-45 exists to prevent. The existing behavior (caught, 
 not retried, request unaffected) stays as-is — confirmed separately in §9 by actually
 stopping RabbitMQ.
 
+## 11. BOOK-50: polling relay, not CDC
+
+**Chosen, following outbox-basics.md §4's generic comparison table.** CDC (e.g.
+Debezium) wins unambiguously on latency and query efficiency — but that win is bundled
+with real, separate costs that don't fit this project:
+
+- Postgres would need `wal_level=logical` plus a replication slot — an actual
+  server-config change, not just an app-level dependency.
+- Debezium itself needs a place to run — typically Kafka Connect — which is another
+  service to deploy, monitor, and keep healthy, on top of everything already in
+  `docker-compose.yml`.
+- It's a whole new category of infrastructure (connectors, connector offsets, its own
+  failure modes) with no overlap with anything already built here.
+
+None of that latency actually matters for what BOOK-49 publishes: a `BookingConfirmed`/
+`BookingCancelled` event feeding a notification email. A few seconds of poll-interval
+delay before that email goes out is not a correctness problem, and not something a
+guest would ever notice. The polling relay's real downsides (added latency, repeated
+empty queries) are the pattern's actual cost *here* — and both are already priced in and
+handled (the delay is fine for this use case; the empty-query cost is what §6's partial
+index exists to keep cheap).
+
+**Concretely:** a Celery beat periodic task, same shape as BOOK-46's expiry job —
+queries `outbox_events WHERE published_at IS NULL ORDER BY created_at` (creation order
+matters for the per-`reservation_id` ordering guarantee, outbox-basics.md §6),
+publishes each to Kafka, sets `published_at`.
+
+**Revisit when:** a real deployment exists where a several-second delivery delay
+genuinely matters for some event this project starts publishing — CDC's cost only pays
+for itself once latency at that scale is actually worth something.
+
 ---
 
 ## Cheat sheet
@@ -485,3 +516,4 @@ stopping RabbitMQ.
 | BOOK-47 task-body retry | `autoretry_for` on connection-level errors, backoff+jitter, max_retries=5 — verified live | Never — this is the settled policy for this task |
 | BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
 | BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |
+| BOOK-50 relay | Polling (Celery beat, same shape as BOOK-46) — not CDC | A several-second delivery delay genuinely matters for some published event |

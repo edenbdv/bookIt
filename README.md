@@ -56,6 +56,14 @@ The app reads `.env` (see `.env.example`), which points at `localhost` — this 
 
 **Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`.
 
+**First time only — `kafka-data` volume permissions.** `rabbitmq`'s and `kafka`'s data now persist across restarts via named volumes (`rabbitmq-data`, `kafka-data`) instead of being wiped every `docker compose down`. RabbitMQ's image handles this itself, but Kafka's doesn't: a brand-new `kafka-data` volume is created owned by `root`, while the container runs as `appuser` (uid 1000) — Kafka fails to start (`Error while writing meta.properties file`) until that's fixed once:
+
+```bash
+docker run --rm -v bookit_kafka-data:/data alpine chown -R 1000:1000 /data
+```
+
+Only needed the first time the volume is created on a machine — already-running setups (or anyone who ran this once) never need it again.
+
 For anything the UI doesn't cover, the CLI tools bundled in the Kafka container itself work too:
 
 ```bash

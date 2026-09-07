@@ -27,9 +27,18 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
+    # Fixed hostname -- RabbitMQ's node name (and therefore its data
+    # directory, /var/lib/rabbitmq/mnesia/rabbit@<hostname>) is derived from
+    # it. Without this, Docker gives the container a new hostname (its own
+    # container id) every time it's recreated, so the volume below would
+    # just accumulate orphaned data under a different node name each time
+    # instead of ever being found again.
+    hostname: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -61,6 +70,11 @@ services:
       # explicit topic creation only (BOOK-48's topic-design decision is
       # deliberate, not "whatever a producer happens to touch first")
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      # /tmp/kafka-logs holds both regular topic data AND KRaft's own
+      # cluster metadata (meta.properties -- cluster.id/node.id -- confirmed
+      # live to live in the same directory), so one volume covers both.
+      - kafka-data:/tmp/kafka-logs
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
       interval: 10s
@@ -179,3 +193,5 @@ services:
 
 volumes:
   pgdata:
+  rabbitmq-data:
+  kafka-data:
