@@ -81,6 +81,46 @@ most likely to bite you if you don't design around it: two messages published to
 different partitions have no guaranteed relationship in the order a consumer sees
 them, even if you published the first one first.
 
+## 2a. Replication factor — how many copies of each partition, and why it's 1 here
+
+Partitions (§2) split a topic's data across the cluster for throughput and
+parallelism. **Replication is a separate concern layered on top: how many copies of
+each partition's data exist, for fault tolerance.** They answer different questions —
+partitioning is about spreading load, replication is about surviving a broker dying.
+
+A **replication factor of N** means each partition's log is copied onto N different
+brokers, not just one:
+
+```
+Partition 0, replication factor 3
+
+  Broker 1 (leader)     [msg][msg][msg]   ← serves all reads/writes for this partition
+  Broker 2 (follower)   [msg][msg][msg]   ← continuously copies the leader's log
+  Broker 3 (follower)   [msg][msg][msg]   ← continuously copies the leader's log
+```
+
+One replica is the **leader** — every producer and consumer for that partition talks
+to it, exclusively. The others are **followers**, which do nothing but continuously
+pull and replicate the leader's log. If the leader's broker dies, a follower that was
+fully caught up (an **in-sync replica**, ISR) gets promoted to leader automatically —
+no data loss, and only a brief availability gap while the promotion happens. With
+replication factor 1 (no followers at all), losing that one broker means losing the
+partition's data outright — there's no copy anywhere else to promote.
+
+**The hard constraint this creates: replication factor can never exceed the number of
+brokers in the cluster.** Each copy has to live on a *different* broker — copying a
+partition twice onto the same broker wouldn't survive that broker dying, so it isn't
+real replication at all. A 3-broker cluster can support replication factor up to 3; a single-broker cluster
+(this project's KRaft setup — one `kafka` container in `docker-compose.yml`) can only
+ever support **replication factor 1** — there is no second broker to put a copy on.
+That's why `booking-events` and Kafka's own internal offsets topic
+(`KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1`) are both set to 1 here: it's the only
+value a single-broker setup can satisfy, not a choice made for any other reason. A real
+deployment worried about broker failure runs 3+ brokers specifically so replication
+factor 3 is possible — the number people usually mean by "fault-tolerant Kafka" — which
+this single-broker dev setup structurally can't provide, regardless of what any topic's
+replication factor is configured to.
+
 ## 3. The partition key — what actually decides where a message lands
 
 Every message published to a topic carries a **key** (which can be empty). Kafka
@@ -282,6 +322,8 @@ consumer several times: it was never joining a group that persists.
 |---|---|
 | Topic | A named, append-only log. Doesn't delete messages on consume |
 | Partition | One ordered sub-log of a topic. Order is guaranteed only within one, never across |
+| Replication factor | How many broker copies of each partition exist — fault tolerance, not throughput. Capped by the number of brokers; a single-broker cluster can only ever be 1 |
+| Leader / follower (replica) | The leader serves all reads/writes for a partition; followers only copy it, ready to be promoted if the leader's broker dies |
 | Partition key | Determines which partition a message lands on (same key → same partition, always) |
 | Consumer group | A named set of consumers; each partition goes to exactly one member — this is how Kafka gets both competing-consumers (within a group) and fanout (across groups) from one mechanism |
 | Offset | A partition-local sequence number; a consumer group's position is "the last offset it committed" |

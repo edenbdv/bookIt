@@ -10,6 +10,8 @@ import uuid
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.jobs.celery_app import app, async_task
+from app.core.outbox import cleanup as outbox_cleanup
+from app.core.outbox import relay as outbox_relay
 from app.notification import service as notification_service
 from app.reservation import service as reservation_service
 
@@ -61,3 +63,24 @@ async def send_reservation_received_email(reservation_id: str) -> None:
     """
     async with UnitOfWork() as uow:
         await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))
+
+
+@app.task
+@async_task
+async def publish_outbox_events() -> None:
+    """BOOK-50: the outbox relay. Publishes `outbox_events` rows nothing has
+    sent to Kafka yet, oldest first; logic lives in core/outbox/relay.py.
+    """
+    producer = outbox_relay.make_producer()
+    async with UnitOfWork() as uow:
+        await outbox_relay.publish_pending_events(uow, producer)
+
+
+@app.task
+@async_task
+async def delete_published_outbox_events() -> None:
+    """BOOK-50: daily housekeeping, not publish-latency-sensitive like
+    publish_outbox_events -- logic lives in core/outbox/cleanup.py.
+    """
+    async with UnitOfWork() as uow:
+        await outbox_cleanup.delete_published_events(uow)

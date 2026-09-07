@@ -387,16 +387,54 @@ gap" and "build an outbox"; nothing smaller closes it.
    request" email carries none of that weight. Same tool, applied only where the stakes
    clear the bar.
 
-**Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka:**
-those are tied to Epic 8's real payment state changes, where durability has more at
-stake and other consumers plausibly matter. Notification consumes those as a Kafka
-consumer group; `BookingCreated` is never published as a Kafka event at all. These are
-two genuinely different, permanent mechanisms for two different jobs — not a migration
-in progress.
+**Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka —
+three reasons, and the load-bearing one isn't consumer count:**
 
-**Revisit if:** a second real consumer of "a reservation was created" actually gets
-planned — at that point the coupling cost (not the ordering gap, which `on_commit()`
-already handles) would justify moving this specific trigger to the event bus too.
+1. **Stakes, not consumer count — this is the real dividing line.** Neither job has a
+   second real consumer *today*; BOOK-51's Notification consumer group is currently the
+   only planned reader of `booking-events`, exactly as `BookingCreated`'s email is the
+   only reader of its trigger. What actually differs is what losing the event silently
+   costs: these two carry Epic 8's real payment-adjacent state — a silently-lost
+   `BookingConfirmed` is a genuine consistency problem (payment succeeded, nothing ever
+   knew). A missed "we got your request" email is not. Same tool (outbox + durable
+   transport), applied only where that cost clears the bar — "future consumers" is a
+   capability kept open, not the actual justification.
+2. **A real ordering requirement between the two event types themselves** — a distinct
+   thing from the enqueue-ordering gap `on_commit()` fixes above. `BOOK-38` lets a guest
+   cancel a reservation that's already `CONFIRMED`, so `BookingConfirmed` and
+   `BookingCancelled` can both happen, for the same reservation, over time. A consumer
+   holding any derived state (e.g. "is this reservation currently active") gets the
+   wrong answer if it processes them out of order. Kafka's partition key
+   (`reservation_id`, `kafka-basics.md` §3) makes that ordering a structural guarantee,
+   not a hope. **`BookingCreated` never faces this problem in the first place** — it's
+   not one of a set of events that can race each other for the same reservation; a
+   reservation must exist (Created) before it can be confirmed or cancelled at all, so
+   causally it's always first, by construction, regardless of transport.
+3. **Multiple independent consumers becoming real is a plausible, not planned, future**
+   — kept open by using Kafka, not the reason for using it today.
+
+**Could RabbitMQ provide reason 2's ordering guarantee instead?** Only approximately,
+and not natively:
+- One queue, one consumer (`concurrency=1`) gives true global FIFO — but serializes
+  *every* event for *every* reservation through one consumer, killing the parallelism
+  partitioning exists to keep.
+- One queue, multiple consumers (the competing-consumers shape `BOOK-44` already uses)
+  gives no ordering guarantee at all — two consumers can finish out of the order they
+  received messages in.
+- The `consistent-hash-exchange` plugin (non-default) can route same-key messages to
+  the same queue, similar in spirit to a partition — but still needs exactly one
+  consumer *per queue* to preserve order within it, which is manually reconstructing
+  Kafka's partition model with an add-on plugin, not a built-in guarantee. And even
+  then, RabbitMQ still deletes a message once acked (`rabbitmq-basics.md` §4) — no
+  retention/replay, and no native multiple-independent-consumer-groups mechanism either.
+
+Per-key ordering is a structural difference between a log and a queue, not a vocabulary
+difference — §3 above's "different vocabulary" framing was about producers/routing,
+not this.
+
+**Revisit `BookingCreated` if:** a second real consumer of "a reservation was created"
+actually gets planned (reason 3 above stops being hypothetical) — reasons 1 and 2 don't
+change with time, they're structural to what this specific event is.
 
 ## 10. BOOK-47: retry the task body, deliberately not the publish call
 
@@ -466,6 +504,37 @@ which is exactly what BOOK-45 exists to prevent. The existing behavior (caught, 
 not retried, request unaffected) stays as-is — confirmed separately in §9 by actually
 stopping RabbitMQ.
 
+## 11. BOOK-50: polling relay, not CDC
+
+**Chosen, following outbox-basics.md §4's generic comparison table.** CDC (e.g.
+Debezium) wins unambiguously on latency and query efficiency — but that win is bundled
+with real, separate costs that don't fit this project:
+
+- Postgres would need `wal_level=logical` plus a replication slot — an actual
+  server-config change, not just an app-level dependency.
+- Debezium itself needs a place to run — typically Kafka Connect — which is another
+  service to deploy, monitor, and keep healthy, on top of everything already in
+  `docker-compose.yml`.
+- It's a whole new category of infrastructure (connectors, connector offsets, its own
+  failure modes) with no overlap with anything already built here.
+
+None of that latency actually matters for what BOOK-49 publishes: a `BookingConfirmed`/
+`BookingCancelled` event feeding a notification email. A few seconds of poll-interval
+delay before that email goes out is not a correctness problem, and not something a
+guest would ever notice. The polling relay's real downsides (added latency, repeated
+empty queries) are the pattern's actual cost *here* — and both are already priced in and
+handled (the delay is fine for this use case; the empty-query cost is what §6's partial
+index exists to keep cheap).
+
+**Concretely:** a Celery beat periodic task, same shape as BOOK-46's expiry job —
+queries `outbox_events WHERE published_at IS NULL ORDER BY created_at` (creation order
+matters for the per-`reservation_id` ordering guarantee, outbox-basics.md §6),
+publishes each to Kafka, sets `published_at`.
+
+**Revisit when:** a real deployment exists where a several-second delivery delay
+genuinely matters for some event this project starts publishing — CDC's cost only pays
+for itself once latency at that scale is actually worth something.
+
 ---
 
 ## Cheat sheet
@@ -485,3 +554,4 @@ stopping RabbitMQ.
 | BOOK-47 task-body retry | `autoretry_for` on connection-level errors, backoff+jitter, max_retries=5 — verified live | Never — this is the settled policy for this task |
 | BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
 | BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |
+| BOOK-50 relay | Polling (Celery beat, same shape as BOOK-46) — not CDC | A several-second delivery delay genuinely matters for some published event |
