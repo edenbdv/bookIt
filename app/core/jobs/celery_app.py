@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import task_failure
 from kombu import Queue
 
@@ -82,6 +83,15 @@ app.conf.beat_schedule = {
     "publish-outbox-events": {
         "task": "app.worker.publish_outbox_events",
         "schedule": 5.0,
+    },
+    # BOOK-50's last step. Housekeeping, not latency-sensitive like the
+    # relay above -- a daily crontab, not a tight interval, is the right
+    # tool here (outbox-basics.md/BOOK-50: published rows are redundant
+    # with Kafka's own retention once they're old enough to no longer help
+    # debug a recent delivery issue).
+    "delete-published-outbox-events": {
+        "task": "app.worker.delete_published_outbox_events",
+        "schedule": crontab(hour=3, minute=0),
     },
 }
 
