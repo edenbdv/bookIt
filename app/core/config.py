@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
 
+    # BOOK-50: the outbox relay's Kafka producer. `localhost:9094` is
+    # Kafka's host-published listener (docker-compose.yml) -- the worker
+    # container overrides this to `kafka:9092`, same split as smtp_host above.
+    kafka_bootstrap_servers: str = "localhost:9094"
+
     # dev-only default -- every real deployment must override this via .env,
     # since anyone who knows it can forge a valid access token for any user
     secret_key: str = "dev-secret-change-me"

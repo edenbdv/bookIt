@@ -75,6 +75,14 @@ app.conf.beat_schedule = {
         "task": "app.worker.expire_pending_reservations",
         "schedule": 60.0,
     },
+    # BOOK-50. Deliberately more frequent than the expiry job -- publish
+    # latency here is user-facing (a guest's confirmation/cancellation
+    # notification), not an internal cleanup, so it's worth a tighter poll
+    # (worker-decisions.md §11).
+    "publish-outbox-events": {
+        "task": "app.worker.publish_outbox_events",
+        "schedule": 5.0,
+    },
 }
 
 
