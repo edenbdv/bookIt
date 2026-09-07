@@ -387,16 +387,54 @@ gap" and "build an outbox"; nothing smaller closes it.
    request" email carries none of that weight. Same tool, applied only where the stakes
    clear the bar.
 
-**Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka:**
-those are tied to Epic 8's real payment state changes, where durability has more at
-stake and other consumers plausibly matter. Notification consumes those as a Kafka
-consumer group; `BookingCreated` is never published as a Kafka event at all. These are
-two genuinely different, permanent mechanisms for two different jobs — not a migration
-in progress.
+**Why `BookingConfirmed`/`BookingCancelled` are different, and do go through Kafka —
+three reasons, and the load-bearing one isn't consumer count:**
 
-**Revisit if:** a second real consumer of "a reservation was created" actually gets
-planned — at that point the coupling cost (not the ordering gap, which `on_commit()`
-already handles) would justify moving this specific trigger to the event bus too.
+1. **Stakes, not consumer count — this is the real dividing line.** Neither job has a
+   second real consumer *today*; BOOK-51's Notification consumer group is currently the
+   only planned reader of `booking-events`, exactly as `BookingCreated`'s email is the
+   only reader of its trigger. What actually differs is what losing the event silently
+   costs: these two carry Epic 8's real payment-adjacent state — a silently-lost
+   `BookingConfirmed` is a genuine consistency problem (payment succeeded, nothing ever
+   knew). A missed "we got your request" email is not. Same tool (outbox + durable
+   transport), applied only where that cost clears the bar — "future consumers" is a
+   capability kept open, not the actual justification.
+2. **A real ordering requirement between the two event types themselves** — a distinct
+   thing from the enqueue-ordering gap `on_commit()` fixes above. `BOOK-38` lets a guest
+   cancel a reservation that's already `CONFIRMED`, so `BookingConfirmed` and
+   `BookingCancelled` can both happen, for the same reservation, over time. A consumer
+   holding any derived state (e.g. "is this reservation currently active") gets the
+   wrong answer if it processes them out of order. Kafka's partition key
+   (`reservation_id`, `kafka-basics.md` §3) makes that ordering a structural guarantee,
+   not a hope. **`BookingCreated` never faces this problem in the first place** — it's
+   not one of a set of events that can race each other for the same reservation; a
+   reservation must exist (Created) before it can be confirmed or cancelled at all, so
+   causally it's always first, by construction, regardless of transport.
+3. **Multiple independent consumers becoming real is a plausible, not planned, future**
+   — kept open by using Kafka, not the reason for using it today.
+
+**Could RabbitMQ provide reason 2's ordering guarantee instead?** Only approximately,
+and not natively:
+- One queue, one consumer (`concurrency=1`) gives true global FIFO — but serializes
+  *every* event for *every* reservation through one consumer, killing the parallelism
+  partitioning exists to keep.
+- One queue, multiple consumers (the competing-consumers shape `BOOK-44` already uses)
+  gives no ordering guarantee at all — two consumers can finish out of the order they
+  received messages in.
+- The `consistent-hash-exchange` plugin (non-default) can route same-key messages to
+  the same queue, similar in spirit to a partition — but still needs exactly one
+  consumer *per queue* to preserve order within it, which is manually reconstructing
+  Kafka's partition model with an add-on plugin, not a built-in guarantee. And even
+  then, RabbitMQ still deletes a message once acked (`rabbitmq-basics.md` §4) — no
+  retention/replay, and no native multiple-independent-consumer-groups mechanism either.
+
+Per-key ordering is a structural difference between a log and a queue, not a vocabulary
+difference — §3 above's "different vocabulary" framing was about producers/routing,
+not this.
+
+**Revisit `BookingCreated` if:** a second real consumer of "a reservation was created"
+actually gets planned (reason 3 above stops being hypothetical) — reasons 1 and 2 don't
+change with time, they're structural to what this specific event is.
 
 ## 10. BOOK-47: retry the task body, deliberately not the publish call
 
