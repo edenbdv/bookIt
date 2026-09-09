@@ -121,6 +121,7 @@ async def cancel_reservation(
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
     transition_to(reservation, ReservationStatus.CANCELLED)
+    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
     return reservation
 
 
@@ -132,6 +133,7 @@ async def expire_pending_reservations(uow: UnitOfWork) -> int:
     reservations = await uow.reservations.list_expired_pending(datetime.now(UTC))
     for reservation in reservations:
         transition_to(reservation, ReservationStatus.CANCELLED)
+        _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
     return len(reservations)
 
 
