@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db.unit_of_work import UnitOfWork
+from app.core.outbox.models import OutboxEvent, OutboxEventType
 from app.reservation.models import (
     IdempotencyKey,
     IdempotencyKeyStatus,
@@ -74,6 +75,25 @@ def transition_to(reservation: Reservation, new_status: ReservationStatus) -> No
     reservation.status = new_status
 
 
+# BOOK-49. Thin payload -- consumers re-fetch current state by id (same
+# pattern as BOOK-45's email job), so a duplicate/delayed at-least-once
+# delivery never hands out stale data. Call after transition_to() succeeds.
+def _emit_outbox_event(
+    uow: UnitOfWork, reservation: Reservation, event_type: OutboxEventType
+) -> None:
+    uow.session.add(
+        OutboxEvent(
+            event_type=event_type,
+            reservation_id=reservation.id,
+            payload={
+                "event_type": event_type.value,
+                "reservation_id": str(reservation.id),
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    )
+
+
 # stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
 # transition_to() on success. Manually callable for now so the state machine
 # is testable end-to-end before payments exist -- see docs/domain-layer/state-machine-basics.md
@@ -82,6 +102,7 @@ async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Res
     if reservation is None:
         raise ReservationNotFoundError
     transition_to(reservation, ReservationStatus.CONFIRMED)
+    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CONFIRMED)
     return reservation
 
 
@@ -100,6 +121,7 @@ async def cancel_reservation(
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
     transition_to(reservation, ReservationStatus.CANCELLED)
+    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
     return reservation
 
 
@@ -111,6 +133,7 @@ async def expire_pending_reservations(uow: UnitOfWork) -> int:
     reservations = await uow.reservations.list_expired_pending(datetime.now(UTC))
     for reservation in reservations:
         transition_to(reservation, ReservationStatus.CANCELLED)
+        _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
     return len(reservations)
 
 
