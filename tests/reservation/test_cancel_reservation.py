@@ -53,6 +53,9 @@ async def test_cancel_by_owning_guest_succeeds() -> None:
     assert isinstance(outbox_event, OutboxEvent)
     assert outbox_event.event_type == OutboxEventType.BOOKING_CANCELLED
     assert outbox_event.reservation_id == reservation.id
+    # BOOK-51 dedups on this -- the row's id and the payload's event_id must
+    # be the same value, not independently generated
+    assert outbox_event.payload["event_id"] == str(outbox_event.id)
 
 
 @pytest.mark.anyio
