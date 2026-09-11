@@ -537,6 +537,176 @@ for itself once latency at that scale is actually worth something.
 
 ---
 
+## 12. BOOK-51: a standalone Kafka consumer process, not a Celery task
+
+**Chosen:** `app/notification/consumer.py` — a `confluent_kafka.Consumer` in group
+`notifications`, subscribed to `booking-events`, run as its own long-running process
+(its own `docker-compose.yml` service, not a mode of `app`/`worker`/`beat`). Not a
+Celery task, and not folded into the existing `worker` container either.
+
+**Why not a Celery task, or a task run *by* the existing worker:** Celery's model is
+competing consumers pulling discrete task messages off RabbitMQ — no concept of a
+partition or a consumer-group offset. A Kafka consumer group is a structurally
+different thing: partitions get assigned to group members, and ordering is only
+guaranteed *within* a partition, to whichever single consumer owns it. Running this as
+a Celery task (or a background loop bolted onto `worker`) would throw away exactly the
+guarantee BOOK-49's `reservation_id` partition key exists for — `worker` is already
+scaled independently for Celery task throughput (`--scale worker=N`), and tying Kafka
+group membership to that same scaling knob would couple two unrelated decisions
+together for no benefit.
+
+**Why not just embed the poll loop in `app/worker.py`'s process:** same reason, one
+level down — `worker`'s process model (Celery's own pool/prefork machinery) has no
+hook for "also run one independent infinite loop," and doing it anyway would tie this
+consumer's health to Celery's, and vice versa, when the two have nothing to do with
+each other.
+
+**Loop shape:** `run()`/`_process_one()` (`app/notification/consumer.py`) take the
+per-message handler as a parameter rather than importing `notification/service.py`
+directly, so the poll → parse → dispatch → commit control flow is unit-testable with a
+fake handler. The concrete handler — open a `UnitOfWork`, route by `event_type`, call
+`send_reservation_confirmed_email`/`send_reservation_cancelled_email` — is assembled by
+the top-level `app/notification_consumer.py` entrypoint, mirroring the "thin wrapper
+opens infra, real logic lives in a service module" split `app/worker.py` already uses
+for its Celery tasks.
+
+**Commit-after-handling, not auto-commit:** `enable.auto.commit` is off; the offset is
+committed only once the handler has actually run to completion. Auto-commit would ack a
+message before we know its email actually sent — a crash mid-handling would then lose
+that notification silently instead of just risking a harmless duplicate. Combined with
+BOOK-50's at-least-once relay, this consumer must already tolerate seeing the same
+`BookingConfirmed`/`BookingCancelled` twice. **Revised by §13 below:** unlike BOOK-45/47's
+request-received email, a duplicate confirmation/cancellation email is *not* accepted as
+low-stakes here — it reads as "did this happen twice?" to a guest. §13 adds real
+deduplication instead of just tolerating the repeat.
+
+**One message at a time, no concurrency:** `_process_one()` fully handles (and commits)
+one message before the next `poll()`. Processing messages for the same `reservation_id`
+concurrently could let a later-in-topic-order event's email go out before an
+earlier one's, quietly defeating the reason a partition key exists in the first place.
+
+**Revisit when:** throughput on this topic becomes real enough that one message at a
+time is a bottleneck — at that point, a bounded thread/process pool *per partition*
+(not just "more consumers," which Kafka would rebalance across partitions anyway) is
+the next lever, not a redesign of this loop.
+
+---
+
+## 13. BOOK-51: real deduplication for the confirmation/cancellation emails — the Inbox pattern
+
+**General pattern, no BookIt specifics: `inbox-basics.md`.** This section is the
+project-specific decision; that doc covers why at-least-once processing needs it at
+all, and why a real email send (§3's "Case B" there) can narrow the duplicate window
+but never fully close it.
+
+**Why §12's "duplicates are fine" doesn't hold here, on reflection.** That reasoning was
+copied from BOOK-45/47's request-received email, but the two aren't the same shape. A
+missed-or-duplicated "we got your request" email is invisible either way — the guest's
+`201` already told them it worked. A **second** `BookingConfirmed`/`BookingCancelled`
+email is visible and asks a question the guest shouldn't have to ask: *did something
+happen twice?* That's a real support-ticket risk, not a hypothetical — worth spending
+real deduplication on, not just tolerating.
+
+**The pattern: Inbox, the consumer-side mirror of Outbox.** Before acting on a message,
+check "have I already processed this exact event?" via a durable, atomic check — don't
+trust the broker to never redeliver (BOOK-50's relay is explicitly at-least-once,
+outbox-basics.md §5). Concretely, a `processed_notification_events` table:
+
+```
+processed_notification_events
+-------------------------------
+event_id   UUID, primary key
+processed_at   timestamptz
+```
+
+Same shape of problem as `IdempotencyKey` (`app/reservation/models.py`, BOOK-36), but
+**not** the same solution — `IdempotencyKey` inserts first and lets a PK constraint
+reject a repeat atomically, because it has to defend against a real concurrent race
+(two overlapping HTTP requests racing to create a reservation). This consumer doesn't
+have that race: Kafka guarantees exactly one consumer in group `notifications` ever
+owns a given partition at a time, so there is never a second, concurrent execution of
+`dispatch()` for the same message — only *sequential* redelivery after a crash. A plain
+check-then-act (SELECT, then act, then INSERT) is safe under that condition, so
+`make_dispatcher()` (`app/notification/consumer.py`) uses one instead of reaching for
+the insert-first trick `IdempotencyKey` needs for an actually-concurrent caller.
+
+**The implemented flow, per message (`make_dispatcher()`'s `dispatch()`):**
+
+```
+Kafka message
+     │
+     ▼
+payload["event_id"]
+     │
+     ▼
+uow.session.get(ProcessedNotificationEvent, event_id)
+     │
+     ▼
+already exists? ──yes──▶ return (skip -- already handled, this is a redelivery)
+     │
+     no
+     ▼
+handler(uow, reservation_id)   # sends the actual email
+     │
+     ▼
+email send returned without raising
+     │
+     ▼
+uow.session.add(ProcessedNotificationEvent(event_id=event_id))
+     │
+     ▼
+UnitOfWork commits (both the fact "processed" and anything the handler wrote)
+```
+
+If `handler()` raises, nothing after it runs — no marker row, no commit, the
+`UnitOfWork` rolls back, and the exception propagates out of `_process_one()`, which
+never calls `consumer.commit(msg)`. The message is redelivered on restart and the whole
+`dispatch()` runs again from the top, exactly the retry this design accepts.
+
+**Dedup key: the outbox event's own `id`, not `(reservation_id, event_type)`.** The
+composite would technically work today — the state machine only ever fires
+`BookingConfirmed`/`BookingCancelled` once per reservation — but it's borrowing that
+invariant to do a job it doesn't actually describe. `event_id` answers "which specific
+event is this," `reservation_id` answers "which reservation," and conflating them means
+silently assuming one `BookingConfirmed` per reservation forever. `OutboxEvent.id`
+(already a UUID PK column, `app/core/outbox/models.py`) already *is* the right key; it
+was just never included in the JSON payload BOOK-49 writes. **Touched BOOK-49 for this:**
+`_emit_outbox_event()` (`app/reservation/service.py`) now generates the id explicitly
+(`event_id = uuid.uuid4()`), passed as both `OutboxEvent(id=event_id, ...)` and
+`payload["event_id"]`, rather than relying on the column's ORM-level default — the
+payload has to carry the same value that ends up in the row, and a default evaluated at
+flush time doesn't guarantee that without being read back afterward. `event_id` is now
+in every event's payload, alongside the existing `event_type`/`reservation_id`/
+`occurred_at`.
+
+**Mark *after* sending, not before — the same failure-mode trade BOOK-50's relay already
+made, applied one layer downstream:**
+
+| Order | Fails how |
+|---|---|
+| Mark processed, then send | Crash between the two → event is marked done, email never sent — a **silent loss**, worse than a duplicate |
+| Send, then mark processed | Crash between the two → email sent again next redelivery — a **duplicate**, the thing §13 exists to reduce, not the thing it must reach zero |
+
+BOOK-50's relay already made this exact call (`relay.py`: `published_at` is set only
+for rows Kafka actually confirmed, never optimistically beforehand) — marking-after
+trades a narrow duplicate risk for ruling out silent loss, and that trade is right again
+here for the same reason: a guest who never got their confirmation email is a worse
+outcome than a guest who got it twice.
+
+**The actual target, stated precisely — not exactly-once, because plain SMTP can't give
+that:** at-least-once event processing, paired with a consumer that makes duplicates
+*rare* (the send→mark window is short — one SMTP call — not eliminated. A crash inside
+that exact window still double-sends.) Nothing in this stack (confluent_kafka, plain
+SMTP/MailHog) offers a transactional outbox↔inbox handshake that would close that last
+window; closing it fully would need the email provider itself to support an idempotency
+key on the send call (Postmark/SendGrid do; MailHog doesn't).
+
+**Revisit when:** a real email provider replaces MailHog — if it supports send-level
+idempotency keys, `event_id` doubles as that key and the dedup responsibility can move
+to the provider, making even the narrow send→mark window safe.
+
+---
+
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
@@ -555,3 +725,5 @@ for itself once latency at that scale is actually worth something.
 | BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
 | BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |
 | BOOK-50 relay | Polling (Celery beat, same shape as BOOK-46) — not CDC | A several-second delivery delay genuinely matters for some published event |
+| BOOK-51 consumer process | Standalone `confluent_kafka.Consumer`, own docker-compose service — not a Celery task, not folded into `worker` | Never for the process split; revisit one-at-a-time processing if this topic's throughput becomes a real bottleneck |
+| BOOK-51 duplicate emails | Real dedup (Inbox pattern), not tolerated like BOOK-45/47 — keyed on `OutboxEvent.id`, marked processed *after* sending | A real email provider adds send-level idempotency keys — dedup responsibility can move there |

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # see core/db/models.py's docstring and BOOK-23.
 import app.auth.models
 import app.core.outbox.models
+import app.notification.models
 import app.payment.models
 import app.property.models
 import app.reservation.models

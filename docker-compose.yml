@@ -196,6 +196,29 @@ services:
       - .:/code
       - /code/.venv
 
+  # BOOK-51. Its own process, deliberately not folded into `worker` or run as
+  # a Celery task -- a Kafka consumer group needs a real, continuously
+  # running client, which Celery's task-pull model has no equivalent of
+  # (worker-decisions.md §12). No CELERY_BROKER_URL / rabbitmq dependency --
+  # this never touches RabbitMQ at all.
+  notification-consumer:
+    build: .
+    command: uv run --no-dev python -m app.notification_consumer
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SMTP_HOST: mailhog
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    volumes:
+      - .:/code
+      - /code/.venv
+
 volumes:
   pgdata:
   rabbitmq-data:
