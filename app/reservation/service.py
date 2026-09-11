@@ -78,14 +78,23 @@ def transition_to(reservation: Reservation, new_status: ReservationStatus) -> No
 # BOOK-49. Thin payload -- consumers re-fetch current state by id (same
 # pattern as BOOK-45's email job), so a duplicate/delayed at-least-once
 # delivery never hands out stale data. Call after transition_to() succeeds.
+#
+# event_id is generated here, not left to the id column's ORM-level default,
+# so the same value can go in both the row and the payload -- BOOK-51's
+# consumer dedups on it (worker-decisions.md §13), and that only works if
+# the id a consumer reads back out of Kafka is the same one the row itself
+# ends up with, not whatever the ORM happens to assign at flush time.
 def _emit_outbox_event(
     uow: UnitOfWork, reservation: Reservation, event_type: OutboxEventType
 ) -> None:
+    event_id = uuid.uuid4()
     uow.session.add(
         OutboxEvent(
+            id=event_id,
             event_type=event_type,
             reservation_id=reservation.id,
             payload={
+                "event_id": str(event_id),
                 "event_type": event_type.value,
                 "reservation_id": str(reservation.id),
                 "occurred_at": datetime.now(UTC).isoformat(),

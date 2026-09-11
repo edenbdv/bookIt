@@ -47,6 +47,7 @@ async def test_expires_every_candidate_returned_by_the_repository() -> None:
     assert isinstance(outbox_event, OutboxEvent)
     assert outbox_event.event_type == OutboxEventType.BOOKING_CANCELLED
     assert outbox_event.reservation_id == expired.id
+    assert outbox_event.payload["event_id"] == str(outbox_event.id)
 
 
 @pytest.mark.anyio
