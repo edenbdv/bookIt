@@ -6,6 +6,7 @@ Celery permanently (worker-decisions.md §9); the confirmed/cancelled pair
 is called by the Kafka consumer instead. Either way, this file doesn't care.
 """
 
+import asyncio
 import smtplib
 import uuid
 from datetime import datetime
@@ -38,27 +39,20 @@ def _send(to: str, subject: str, body: str) -> None:
     message.set_content(body)
 
     settings = get_settings()
-    # sync smtplib, not an async client: this already runs inside
-    # async_task's asyncio.run() bridge (core/jobs/celery_app.py), and one
-    # blocking SMTP call per task is the cost that bridge exists to isolate
-    # -- see docs/jobs/background-jobs-basics.md §3 on why a blocking call
-    # would be destructive inside a *shared* event loop, which this isn't.
+    # blocking call -- callers await it via asyncio.to_thread, not directly
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
         smtp.send_message(message)
 
 
-# named for what this reservation actually is right now -- PENDING, not
-# CONFIRMED. confirm_reservation() has no real caller yet (it's a manual
-# stand-in for Epic 8's payment webhook), so nothing has actually been
-# confirmed at the point this fires. See docs/jobs/worker-decisions.md's
-# BOOK-45 entries for why "received" and "confirmed" are deliberately
-# different emails, not one email with different wording.
+# named "received", not "confirmed" -- fires while still PENDING, before
+# confirm_reservation() (worker-decisions.md's BOOK-45 entries)
 async def send_reservation_received_email(uow: UnitOfWork, reservation_id: uuid.UUID) -> None:
     reservation = await uow.reservations.get_by_id(reservation_id)
     guest = await uow.users.get_by_id(reservation.guest_id)
     property_ = await uow.properties.get_by_id(reservation.property_id)
 
-    _send(
+    await asyncio.to_thread(
+        _send,
         to=guest.email,
         subject=f"Your reservation request for {property_.title}",
         body=(
@@ -80,7 +74,8 @@ async def send_reservation_confirmed_email(uow: UnitOfWork, reservation_id: uuid
     guest = await uow.users.get_by_id(reservation.guest_id)
     property_ = await uow.properties.get_by_id(reservation.property_id)
 
-    _send(
+    await asyncio.to_thread(
+        _send,
         to=guest.email,
         subject=f"Your reservation for {property_.title} is confirmed",
         body=(
@@ -103,7 +98,8 @@ async def send_reservation_cancelled_email(uow: UnitOfWork, reservation_id: uuid
     guest = await uow.users.get_by_id(reservation.guest_id)
     property_ = await uow.properties.get_by_id(reservation.property_id)
 
-    _send(
+    await asyncio.to_thread(
+        _send,
         to=guest.email,
         subject=f"Your reservation for {property_.title} has been cancelled",
         body=(

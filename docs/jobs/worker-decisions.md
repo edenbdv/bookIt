@@ -163,11 +163,12 @@ app/
 │
 └── core/
     ├── db/
-    │   └── unit_of_work.py             ← UnitOfWork, session, commit/rollback
+    │   ├── unit_of_work.py             ← UnitOfWork, session, commit/rollback
+    │   └── engine.py
+    │       └── async_task(...)         ← sync/async bridge (§2's open question)
     └── jobs/
         └── celery_app.py
-            ├── app = Celery(...)
-            └── async_task(...)         ← sync/async bridge (§2's open question)
+            └── app = Celery(...)
 ```
 
 Deliberately spread across existing module boundaries rather than gathered into one
@@ -589,6 +590,55 @@ earlier one's, quietly defeating the reason a partition key exists in the first 
 time is a bottleneck — at that point, a bounded thread/process pool *per partition*
 (not just "more consumers," which Kafka would rebalance across partitions anyway) is
 the next lever, not a redesign of this loop.
+
+**A real bug this design missed until actually tested end to end:** `_process_one()`
+originally called `asyncio.run(handle(payload))` directly, once per message. The first
+message worked; the second crashed the whole process with `RuntimeError: ... got Future
+... attached to a different loop`. Cause: `core/db/engine.py`'s `get_engine()` is
+`@lru_cache`d — one `AsyncEngine`, one connection pool, for the life of the process.
+`asyncio.run()` opens a *new* event loop every call; the pool's connections stay bound
+to whichever loop first used them. A second `asyncio.run()` call trying to reuse a
+pooled connection opened under the first (now-closed) loop is exactly what asyncpg
+rejects. `app/worker.py`'s Celery tasks never hit this because Celery only calls
+`async_task`'s wrapper once per task *invocation*, each a fresh worker-managed
+call — but this consumer calls it once per *message*, in a tight loop within the same
+process, so the second call was the first time this ever actually happened. Fixed by
+reusing `async_task` (moved from `core/jobs/celery_app.py` to `core/db/engine.py`,
+since disposing the cached engine is what it's actually for, and it has nothing
+Celery-specific about it) to wrap `handle` in `run()`, disposing the engine after every
+message the same way Celery already did after every task. Confirmed live: create →
+confirm → cancel through the real API, with `notification-consumer` running in Docker —
+all three emails arrived in MailHog, `processed_notification_events` and `outbox_events`
+row counts matched, and consumer-group lag was 0.
+
+**Not best practice, and pre-existing, not introduced here — revisit for Celery too.**
+Disposing the engine on every call means every single call opens a fresh DB connection
+from scratch (TCP + auth) and throws it away — real overhead, not free. **Fixed here**
+because this consumer owns its own loop: `run()` is now one `async def` driven by a
+single process-lifetime `asyncio.run()`, so the engine is created once and reused for
+every message, never disposed until the process actually exits. **Celery tasks pay the
+identical cost on every task invocation, and always have since BOOK-44** — `async_task`
+disposes after every task the same way, including BOOK-50's relay every 5s and
+BOOK-46's expiry job every 60s. It hasn't caused a *correctness* failure there the way
+it did here, only inefficiency, because Celery's own prefork model doesn't hot-loop
+like this consumer's poll loop does. It's harder to fix, though: Celery owns when and
+how it calls a task, so there's no single "wrap the whole worker in one `asyncio.run()`"
+the way there is for this consumer's own loop. Left as-is until task throughput
+actually makes the per-task connection cost worth fixing.
+
+**Every blocking call in the loop routed through `asyncio.to_thread()` — not `await`
+directly, because there's nothing to await.** `consumer.poll()`/`consumer.commit()`
+(`confluent_kafka`, a C-extension over librdkafka) and `smtplib.SMTP(...)`
+(`notification/service.py`'s `_send()`) are both plain synchronous calls — they return
+ordinary values, not coroutines or anything else implementing `__await__`. `await` only
+works on an awaitable; there is no async variant of either library in use here to
+await instead. Left un-wrapped, either one would block the single event loop for its
+entire duration — for `_send()` specifically, that means the *next* Kafka message
+can't even be polled until the current message's email finishes sending.
+`asyncio.to_thread()` is the bridge for exactly this: run the blocking call on a
+worker thread from asyncio's own thread pool, and hand back something that genuinely
+is awaitable, without needing an async-native rewrite of either library (that would
+mean a dependency swap — e.g. `aiosmtplib` for `smtplib` — not a keyword change).
 
 ---
 

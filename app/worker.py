@@ -8,8 +8,9 @@ Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md 
 import smtplib
 import uuid
 
+from app.core.db.engine import async_task
 from app.core.db.unit_of_work import UnitOfWork
-from app.core.jobs.celery_app import app, async_task
+from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
 from app.notification import service as notification_service

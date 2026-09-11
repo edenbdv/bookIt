@@ -1,12 +1,10 @@
 """BOOK-51: the Kafka poll loop for BookingConfirmed/BookingCancelled.
 
-Not a Celery task -- own process, own docker-compose service, a
-confluent_kafka.Consumer in group "notifications" (worker-decisions.md §12).
+Not a Celery task -- own process (worker-decisions.md §12).
 
-`run()`/`_process_one()` take `handle` as a parameter instead of importing
-notification/service.py directly, so the poll/parse/commit loop is
-unit-testable with a fake handler. app/notification_consumer.py assembles
-the real one via make_dispatcher() below.
+`handle` is a parameter, not an import of notification/service.py, so the
+loop is testable with a fake. app/notification_consumer.py wires the real
+one via make_dispatcher() below.
 """
 
 import asyncio
@@ -18,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from confluent_kafka import Consumer
 
 from app.core.config import get_settings
+from app.core.db.engine import get_engine
 from app.core.db.unit_of_work import UnitOfWork
 from app.notification.models import ProcessedNotificationEvent
 
@@ -34,8 +33,7 @@ def make_consumer() -> Consumer:
         {
             "bootstrap.servers": get_settings().kafka_bootstrap_servers,
             "group.id": GROUP_ID,
-            # committed only after handling succeeds (_process_one below) --
-            # auto-commit risks losing a message instead of just duplicating it
+            # manual commit, after handling succeeds -- see _process_one
             "enable.auto.commit": False,
             "auto.offset.reset": "earliest",
         }
@@ -63,25 +61,32 @@ def make_dispatcher(email_handlers: dict[str, EventHandler]) -> Callable[[dict],
     return dispatch
 
 
-def _process_one(consumer: Consumer, handle: Callable[[dict], Awaitable[None]]) -> None:
-    msg = consumer.poll(1.0)
+async def _process_one(consumer: Consumer, handle: Callable[[dict], Awaitable[None]]) -> None:
+    # poll() is blocking -- to_thread() so it doesn't stall the only event loop
+    msg = await asyncio.to_thread(consumer.poll, 1.0)
     if msg is None:
         return
     if msg.error():
         logger.error("Kafka consumer error: %s", msg.error())
         return
     payload = json.loads(msg.value())
-    asyncio.run(handle(payload))
-    consumer.commit(msg)
+    await handle(payload)
+    await asyncio.to_thread(consumer.commit, msg)
 
 
-def run(consumer: Consumer, handle: Callable[[dict], Awaitable[None]]) -> None:
-    """Poll forever, one message at a time -- preserves BOOK-49's per-reservation
-    ordering all the way through to the email that gets sent.
-    """
+async def _run(consumer: Consumer, handle: Callable[[dict], Awaitable[None]]) -> None:
     consumer.subscribe([TOPIC])
     try:
         while True:
-            _process_one(consumer, handle)
+            await _process_one(consumer, handle)
     finally:
         consumer.close()
+        await get_engine().dispose()
+
+
+def run(consumer: Consumer, handle: Callable[[dict], Awaitable[None]]) -> None:
+    """One asyncio.run() for the process's whole lifetime, not one per
+    message -- the engine is created once and reused for every message
+    instead of torn down and rebuilt each time (worker-decisions.md §12).
+    """
+    asyncio.run(_run(consumer, handle))

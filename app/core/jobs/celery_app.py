@@ -8,9 +8,6 @@ otherwise a worker crash mid-task loses the message silently instead of
 RabbitMQ redelivering it. See docs/jobs/rabbitmq-basics.md §4.
 """
 
-import asyncio
-import functools
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from celery import Celery
@@ -19,7 +16,6 @@ from celery.signals import task_failure
 from kombu import Queue
 
 from app.core.config import get_settings
-from app.core.db.engine import get_engine
 
 app = Celery("bookit", broker=get_settings().celery_broker_url)
 
@@ -94,25 +90,3 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=0),
     },
 }
-
-
-def async_task[T](async_fn: Callable[..., Awaitable[T]]) -> Callable[..., T]:
-    """Bridges an async task body into Celery's sync task interface.
-
-    Disposes the DB engine after each call, since a fresh event loop per
-    call would otherwise reuse stale connections from the last one. See
-    worker-decisions.md §2/6.
-    """
-
-    @functools.wraps(async_fn)
-    async def run_and_dispose(*args: object, **kwargs: object) -> T:
-        try:
-            return await async_fn(*args, **kwargs)
-        finally:
-            await get_engine().dispose()
-
-    @functools.wraps(async_fn)
-    def wrapper(*args: object, **kwargs: object) -> T:
-        return asyncio.run(run_and_dispose(*args, **kwargs))
-
-    return wrapper
