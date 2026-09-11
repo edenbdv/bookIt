@@ -11,7 +11,7 @@ BookIt is a short-term rental platform — see [docs/db/er-diagram.md](../docs/d
 - **reservation/** — `Reservation`. The core domain: availability, booking creation, concurrency control, state machine
 - **payment/** — `Payment`. Mock payment provider, idempotent payment endpoint, saga compensation on failure
 - **review/** — `Review`. Guest reviews a property, host reviews a guest
-- **notification/** — no models; sends confirmation emails, eventually a pure event consumer
+- **notification/** — `ProcessedNotificationEvent`, an Inbox-pattern dedup marker, not a domain entity of its own; sends confirmation emails directly (BOOK-45) and consumes `BookingConfirmed`/`BookingCancelled` from Kafka (BOOK-51)
 - **core/** — cross-cutting concerns shared by all modules, not a domain module itself; see [core/README.md](core/README.md) for what belongs there and why
 
 ## File shape (per module)
@@ -21,7 +21,7 @@ BookIt is a short-term rental platform — see [docs/db/er-diagram.md](../docs/d
 - **service.py** — business logic, calls repositories, independent of HTTP
 - **router.py** — FastAPI `APIRouter`, thin — parses requests, calls `service.py`, returns responses
 
-**Exception: `notification/` has no `models.py`.** Every other module owns a table in [docs/db/er-diagram.md](../docs/db/er-diagram.md); `notification/` doesn't — it reacts to events from other modules (a reservation confirmed, a payment failed) rather than storing anything of its own, so there's no model to define. If it ever needs its own persisted state (e.g. tracking which notifications were already sent, for idempotency), add `models.py` back then — don't keep an empty file around just for shape consistency.
+**`notification/`'s `models.py` isn't a domain entity, unlike every other module's.** It doesn't own a table in [docs/db/er-diagram.md](../docs/db/er-diagram.md) the way `Payment` or `Review` do — `ProcessedNotificationEvent` exists only to make the Kafka consumer idempotent (`docs/jobs/inbox-basics.md`), not to model something BookIt's domain has a concept of. Added once BOOK-51 actually needed it, not kept around ahead of time for shape consistency.
 
 The remaining `schemas.py`/`service.py`/`router.py` files are currently empty placeholders; they get filled in as their corresponding Jira epics are implemented.
 
