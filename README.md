@@ -4,7 +4,7 @@ A booking platform backend built as a Python/FastAPI modular monolith. See [app/
 
 ## Setup (first time on a machine)
 
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — runs Postgres, Redis, RabbitMQ, Kafka, MailHog (and optionally the app, worker, and beat)
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — runs Postgres, Redis, RabbitMQ, Kafka, MailHog (and optionally the app, worker, beat, and notification-consumer)
 2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) — manages the Python environment and dependencies:
    ```bash
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -34,7 +34,7 @@ Safe to run again at any time — every seeded row has a fixed, hardcoded id, so
 
 **The infrastructure (Postgres, Redis, RabbitMQ, Kafka, MailHog) always runs in Docker, in both workflows below — that never changes.** No native install of any of them, ever.
 
-**What changes between the two workflows is where the app's own processes (`app`, `worker`, `beat`) run** — directly on your machine, or also inside Docker as their own containers. In practice only `app` benefits from staying on the host (auto-reload); `worker`/`beat` are recommended in Docker either way, since Celery has no `--reload` to gain from the host. That choice is what determines how each process addresses the infrastructure:
+**What changes between the two workflows is where the app's own processes (`app`, `worker`, `beat`, `notification-consumer`) run** — directly on your machine, or also inside Docker as their own containers. In practice only `app` benefits from staying on the host (auto-reload); the other three are recommended in Docker either way, since none of them has a `--reload` to gain from the host. That choice is what determines how each process addresses the infrastructure:
 
 - Running **inside Docker**, alongside the infra containers → reaches them by container/service name (`db`, `redis`) — Docker's internal network resolves those names, but only for containers on that same network
 - Running **on your machine**, outside Docker → can't use those internal names at all. It has to go through the port each container *published* to your host machine — `localhost:5432`, `localhost:6379`, etc.
@@ -43,18 +43,18 @@ Same infrastructure, same containers — just two different vantage points for r
 
 ### Workflow A — active development (recommended day-to-day)
 
-Infra, `worker`, and `beat` in Docker; `app` on your machine with `uv`, for fast auto-reload on code changes without rebuilding a container each time.
+Infra, `worker`, `beat`, and `notification-consumer` in Docker; `app` on your machine with `uv`, for fast auto-reload on code changes without rebuilding a container each time.
 
 ```bash
-docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat
+docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat notification-consumer
 uv run uvicorn app.main:app --reload
 ```
 
 The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
 
-**MailHog** (BOOK-45) catches every email the `worker` sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). See `docs/jobs/email-basics.md`.
+**MailHog** catches every email BookIt sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). Two different senders, both land here: `worker` sends the reservation-received email directly (BOOK-45), and `notification-consumer` sends the confirmed/cancelled emails after consuming them from Kafka (BOOK-51). See `docs/jobs/email-basics.md`.
 
-**Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`.
+**Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`. The full publish → broker → consume pipeline for `booking-events` is traced end to end in `docs/jobs/booking-events-flow.md`.
 
 **First time only — `kafka-data` volume permissions.** `rabbitmq`'s and `kafka`'s data now persist across restarts via named volumes (`rabbitmq-data`, `kafka-data`) instead of being wiped every `docker compose down`. RabbitMQ's image handles this itself, but Kafka's doesn't: a brand-new `kafka-data` volume is created owned by `root`, while the container runs as `appuser` (uid 1000) — Kafka fails to start (`Error while writing meta.properties file`) until that's fixed once:
 
@@ -73,11 +73,11 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 
 On Windows with Git Bash, prefix these with `MSYS_NO_PATHCONV=1` — Git Bash otherwise rewrites the `/opt/kafka/...` path as if it were a path on your own machine, before it ever reaches the container.
 
-**Restarting `worker`/`beat` after a change — two different commands depending on what changed:**
+**Restarting `worker`/`beat`/`notification-consumer` after a change — two different commands depending on what changed:**
 
 ```bash
-docker compose restart worker    # code-only change (e.g. a task body, notification/service.py)
-docker compose up -d worker      # docker-compose.yml itself changed (env vars, command, ports)
+docker compose restart notification-consumer    # code-only change (e.g. notification/service.py)
+docker compose up -d notification-consumer      # docker-compose.yml itself changed (env vars, command, ports)
 ```
 
 `restart` re-runs the container's command against the same config it already has — since the code is bind-mounted, it does pick up edited `.py` files, but it does **not** re-read `docker-compose.yml`. `up -d` compares the running container against the compose file and recreates it if that file changed, which is the only way an updated environment variable (or similar) actually takes effect. Using `restart` after an `environment:` change silently keeps the old value — no error, it just doesn't apply.
@@ -87,7 +87,7 @@ docker compose up -d worker      # docker-compose.yml itself changed (env vars, 
 Run everything, including the app, in containers. Useful for testing the actual `Dockerfile`, or verifying the app works the way it will in CI/production.
 
 ```bash
-docker compose up --build   # starts every service: app, worker, beat, and all infra
+docker compose up --build   # starts every service: app, worker, beat, notification-consumer, and all infra
 ```
 
 Here the `app` container does **not** use your local `.env` — [docker-compose.yml](docker-compose.yml) overrides `DATABASE_URL`/`REDIS_URL` with container hostnames (`db`, `redis`) instead of `localhost`, since containers reach each other by service name, not `localhost`.
