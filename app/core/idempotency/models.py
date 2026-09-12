@@ -7,6 +7,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db.models import Base
 
+# shared by every idempotent-create flow (docs/db/idempotency-basics.md's ~24h window)
+IDEMPOTENCY_KEY_TTL_HOURS = 24
+
 
 class IdempotencyKeyStatus(str, enum.Enum):
     PROCESSING = "processing"

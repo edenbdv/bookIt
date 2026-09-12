@@ -29,12 +29,14 @@ def create_app() -> FastAPI:
 
     from app.auth.router import router as auth_router
     from app.core.router import router as core_router
+    from app.payment.router import router as payment_router
     from app.property.router import router as property_router
     from app.reservation.router import router as reservation_router
     from app.review.router import router as review_router
 
     app.include_router(auth_router)
     app.include_router(core_router)
+    app.include_router(payment_router)
     app.include_router(property_router)
     app.include_router(reservation_router)
     app.include_router(review_router)
