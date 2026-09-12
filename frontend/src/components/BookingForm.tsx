@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { ApiError, cancelReservation, confirmReservationStub, createReservation } from '../api/client'
+import { ApiError, cancelReservation, createReservation, payReservation } from '../api/client'
 import { useAuth } from '../context/useAuth'
 import type { PropertyDetail, Reservation } from '../types'
 import { formatPrice } from '../utils/format'
@@ -93,14 +93,37 @@ export function BookingForm({ property }: Props) {
     }
   }
 
-  // TODO(BOOK-10 / Epic 8): this button is where a real payment redirect
-  // replaces confirmReservationStub -- everything above this component stays
-  // the same.
+  // BOOK-97. payReservation() triggers BOOK-54's saga -- a 201 response with
+  // status 'succeeded'/'failed' is a hard guarantee confirm/cancel already
+  // happened server-side (see client.ts's payReservation comment), so it's
+  // safe to derive the reservation's new status here rather than re-fetch it.
   async function confirm(reservation: Reservation) {
     setState({ kind: 'reservation', reservation, action: 'confirming' })
     try {
-      const confirmed = await confirmReservationStub(reservation.id)
-      setState({ kind: 'reservation', reservation: confirmed, action: 'idle' })
+      // fresh per attempt, same convention as submit()'s createReservation call
+      const idempotencyKey = crypto.randomUUID()
+      const payment = await payReservation(reservation.id, idempotencyKey)
+      if (payment.status === 'pending') {
+        setState({
+          kind: 'reservation',
+          reservation,
+          action: 'idle',
+          actionError: 'Payment is still processing -- try again in a moment.',
+        })
+        return
+      }
+      const succeeded = payment.status === 'succeeded'
+      const updated: Reservation = { ...reservation, status: succeeded ? 'confirmed' : 'cancelled' }
+      setState({
+        kind: 'reservation',
+        reservation: updated,
+        action: 'idle',
+        // BOOK-52's mock declines ~8% of charges -- without this, a decline
+        // just silently flips to "cancelled" with no explanation of why
+        actionError: succeeded
+          ? undefined
+          : 'Payment was declined -- this reservation has been released.',
+      })
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Could not confirm this reservation.'
       setState({ kind: 'reservation', reservation, action: 'idle', actionError: message })
@@ -153,7 +176,7 @@ export function BookingForm({ property }: Props) {
               onClick={() => confirm(reservation)}
               className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
             >
-              {action === 'confirming' ? 'Confirming...' : 'Confirm booking'}
+              {action === 'confirming' ? 'Processing payment...' : 'Pay & confirm'}
             </button>
           )}
           {(reservation.status === 'pending' || reservation.status === 'confirmed') && (

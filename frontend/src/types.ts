@@ -95,6 +95,18 @@ export interface Reservation {
   created_at: string
 }
 
+// app/payment/models.py's PaymentStatus -- keep in sync by hand
+export type PaymentStatus = 'pending' | 'succeeded' | 'failed'
+
+export interface Payment {
+  id: string
+  reservation_id: string
+  kind: 'charge' | 'refund'
+  amount_cents: number
+  status: PaymentStatus
+  created_at: string
+}
+
 export interface Review {
   id: string
   reservation_id: string
