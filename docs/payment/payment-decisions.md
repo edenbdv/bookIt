@@ -83,6 +83,72 @@ resolved either direction — full reasoning in `docs/db/idempotency-basics.md`'
 `reservation/service.py`'s idempotent-create flows for consistency, since the
 underlying gap was identical in both (BOOK-36 predates BOOK-53, and had it too).
 
+## 5. BOOK-54: why this needs a saga at all, given BookIt is one monolith on one database
+
+**General pattern, no BookIt specifics: `saga-basics.md`.** This section is the
+project-specific decision; that doc covers why "distributed system" is the wrong
+mental trigger for needing a saga, and what actually is.
+
+**The question worth answering directly, since it's a fair one: BookIt is a monolith,
+`reservations` and `payments` are tables in the same Postgres database — so why not
+just wrap "charge" and "confirm" in one transaction?** Because the step in between isn't
+a database operation. Calling the payment provider (real or `provider.py`'s mock,
+standing in for one) is a call to another system, for the identical reason a Kafka
+publish is (`outbox-basics.md` §2) — it can't be inside our transaction no matter how
+many or few services BookIt has. That's the actual trigger for needing saga treatment
+here, not service count.
+
+**Third instance of the same underlying problem this project keeps hitting, with a
+third kind of consequence:**
+
+| | The non-transactional step | What closes the gap | Consequence if unhandled |
+|---|---|---|---|
+| Outbox (BOOK-50) | Publishing to Kafka | Write intent in the DB transaction, publish separately | A lost event |
+| Inbox (BOOK-51) | Sending an email | Check-then-act-then-mark | A duplicate email |
+| Saga (BOOK-54) | Charging the payment provider | Forward step + compensating step | Money moved, our state disagrees |
+
+**Why payment needs a compensating action and BOOK-45's email never did (`saga-basics.md`
+§3's two questions, applied):** the reservation's next state (confirmed or cancelled)
+*is* a direct function of the payment outcome — a real decision point, something
+downstream genuinely branching on it. And a *successful* charge leaves a real external
+effect (money moved) that a stuck-partway process would need to account for. Email
+fails both tests — nothing branches on whether it sent, and a sent email has no effect
+worth undoing — which is exactly why `worker-decisions.md` §9 could accept "duplicates
+are fine" there instead of building any of this.
+
+**Chosen: orchestration, not choreography (`saga-basics.md` §4).** One function
+(`app/payment/saga.py`) explicitly calls the charge step, then explicitly decides
+confirm vs. compensate — not each side reacting to a `BookingConfirmed`/`PaymentFailed`
+event over Kafka. Same reasoning `worker-decisions.md` §9 already used for BOOK-45's
+trigger: a single, tight, one-consumer flow doesn't earn the decoupling cost of routing
+through the event bus just because BOOK-48–51 already built one.
+
+**Two concrete reuse traps found while designing this, both from rereading the
+functions the saga needs to call, not guessing:**
+
+1. **`confirm_reservation()` has no ownership check at all** — safe to call directly
+   from the saga, unchanged. It's already written for exactly this: its own comment
+   calls it "a stand-in for Epic 8's real trigger."
+2. **`cancel_reservation()` is the wrong function for the compensating action** — it
+   requires `current_user_id == reservation.guest_id`, because it's built for BOOK-38's
+   guest-initiated HTTP cancel. The saga's compensation is a system action, not a guest
+   action. `expire_pending_reservations()` (BOOK-46) already solved this identical
+   problem by calling `transition_to()` + `_emit_outbox_event()` directly instead of
+   going through `cancel_reservation()` — the saga should use that same shape, ideally
+   via a shared internal helper both it and the expiry job call, rather than a third
+   copy of the same two lines.
+
+**The saga must be idempotent-safe against BOOK-53's own idempotent endpoint
+(`saga-basics.md` §5) — two separate operations, two separate guards.**
+`create_payment_idempotent()` only guarantees "don't create a payment twice"; it says
+nothing about how many times *the caller* then acts on the payment it returns. A retry
+returns the same already-resolved `Payment` — if the saga reacted to it
+unconditionally, that retry would call `confirm_reservation()` a second time on an
+already-`CONFIRMED` reservation, which `transition_to()` rejects as an illegal
+transition (raises, doesn't no-op). The saga checks the reservation's current status
+before acting: no longer `PENDING` means already reacted to, so treat it as a no-op
+rather than letting the state machine's own rejection surface as an unhandled error.
+
 ---
 
 ## Cheat sheet
@@ -94,3 +160,6 @@ underlying gap was identical in both (BOOK-36 predates BOOK-53, and had it too).
 | BOOK-53 `IdempotencyKeyStatus.COMPLETED` on timeout | Marked COMPLETED anyway — it tracks the request attempt, not the payment outcome | Never — a retry must not re-charge an unresolved payment regardless of this naming |
 | `IdempotencyKey.expires_at` cleanup | Daily delete (`core/idempotency/cleanup.py`), not archive | A real need for auditing expired attempts shows up |
 | Reused key, different request body | Explicit `400` (`...MismatchError`), both reservations and payments | Never — matches Stripe's documented behavior for this case |
+| BOOK-54 saga trigger | Orchestration (one function, explicit sequencing) | A second real independent consumer of the payment outcome becomes real |
+| BOOK-54 compensating action | New internal helper (shared with BOOK-46's expiry job), not `cancel_reservation()` | Never — that function's ownership check is specifically for the guest HTTP path |
+| BOOK-54 saga idempotency | Check reservation status before acting; already-moved-on is a no-op | Never — required for BOOK-53's retries and BOOK-55's redeliveries alike |
