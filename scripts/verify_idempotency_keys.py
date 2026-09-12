@@ -13,7 +13,7 @@ Run with: uv run python scripts/verify_idempotency_keys.py
 
 import asyncio
 import sys
-from datetime import date
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,12 +29,17 @@ from app.reservation.schemas import ReservationCreate
 from app.reservation.service import (
     GuestCountExceededError,
     IdempotencyKeyInProgressError,
+    IdempotencyKeyMismatchError,
     ReservationConflictError,
     create_reservation_idempotent,
 )
 from app.review.models import Review  # noqa: F401
 
 DEMO_EMAIL_SUFFIX = "_idempotency_verify@example.com"
+
+# relative to whenever this actually runs, not a hardcoded calendar date --
+# otherwise this script quietly goes stale (check_in can't be in the past, BOOK-96)
+TODAY = datetime.now(UTC).date()
 
 
 async def main() -> None:
@@ -61,7 +66,10 @@ async def main() -> None:
 
     # 1. First request with key K1 -- creates a reservation
     data1 = ReservationCreate(
-        property_id=prop_id, check_in=date(2026, 9, 1), check_out=date(2026, 9, 5), guest_count=2
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=30),
+        check_out=TODAY + timedelta(days=34),
+        guest_count=2,
     )
     async with UnitOfWork() as uow:
         r1 = await create_reservation_idempotent(uow, data1, guest_a_id, "K1-verify")
@@ -75,6 +83,22 @@ async def main() -> None:
     print(
         f"2. Retry, same key K1 -- got reservation {r1_retry.id} -- {'OK' if ok else 'UH OH, different row!'}"
     )
+
+    # 2b. Same key K1, but a DIFFERENT request body (different guest_count) --
+    #     must be rejected explicitly, not silently return r1 and not silently
+    #     create a second reservation either
+    mismatched_data = ReservationCreate(
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=30),
+        check_out=TODAY + timedelta(days=34),
+        guest_count=1,
+    )
+    try:
+        async with UnitOfWork() as uow:
+            await create_reservation_idempotent(uow, mismatched_data, guest_a_id, "K1-verify")
+        print("2b. Same key K1, different guest_count -- UH OH, should have been rejected")
+    except IdempotencyKeyMismatchError:
+        print("2b. Same key K1, different guest_count -- REJECTED as expected (no silent reuse)")
 
     # 3. A different guest reusing guest A's completed key -- must be rejected, not leak r1
     # NOTE: the try/except wraps the whole `async with` block, not just the call --
@@ -104,7 +128,10 @@ async def main() -> None:
     #    row) rolls back on the way out. A retry with the same key + valid data
     #    must then succeed.
     bad_data = ReservationCreate(
-        property_id=prop_id, check_in=date(2026, 10, 1), check_out=date(2026, 10, 5), guest_count=99
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=60),
+        check_out=TODAY + timedelta(days=64),
+        guest_count=99,
     )
     try:
         async with UnitOfWork() as uow:
@@ -114,7 +141,10 @@ async def main() -> None:
         print("5a. Key K3, invalid guest_count -- REJECTED as expected")
 
     good_data = ReservationCreate(
-        property_id=prop_id, check_in=date(2026, 10, 1), check_out=date(2026, 10, 5), guest_count=2
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=60),
+        check_out=TODAY + timedelta(days=64),
+        guest_count=2,
     )
     async with UnitOfWork() as uow:
         r3 = await create_reservation_idempotent(uow, good_data, guest_a_id, "K3-verify")
@@ -125,7 +155,10 @@ async def main() -> None:
     # 6. Concurrent-duplicate-key race: two genuinely simultaneous requests
     #    with the same brand-new key -- must not create two reservations.
     race_data = ReservationCreate(
-        property_id=prop_id, check_in=date(2026, 11, 1), check_out=date(2026, 11, 5), guest_count=2
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=90),
+        check_out=TODAY + timedelta(days=94),
+        guest_count=2,
     )
 
     async def one_request() -> object:

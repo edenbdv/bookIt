@@ -10,6 +10,7 @@ import uuid
 
 from app.core.db.engine import async_task
 from app.core.db.unit_of_work import UnitOfWork
+from app.core.idempotency import cleanup as idempotency_cleanup
 from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
@@ -85,3 +86,13 @@ async def delete_published_outbox_events() -> None:
     """
     async with UnitOfWork() as uow:
         await outbox_cleanup.delete_published_events(uow)
+
+
+@app.task
+@async_task
+async def delete_expired_idempotency_keys() -> None:
+    """Deferred from BOOK-36, built alongside BOOK-53 -- logic lives in
+    core/idempotency/cleanup.py.
+    """
+    async with UnitOfWork() as uow:
+        await idempotency_cleanup.delete_expired_keys(uow)

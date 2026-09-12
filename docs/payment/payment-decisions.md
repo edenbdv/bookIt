@@ -33,6 +33,56 @@ actually-slow call, not just an immediate `TIMEOUT` return value) — nothing he
 today, which is deliberate for fast, deterministic tests, but a future retry/backoff
 ticket might need to exercise real timing.
 
+## 2. BOOK-53: `IdempotencyKeyStatus.COMPLETED` means the request attempt is done, not that the payment succeeded
+
+**The trap this section exists to head off:** `key_row.status = IdempotencyKeyStatus.COMPLETED`
+is set unconditionally after `create_payment()` returns — including when the outcome was
+`TIMEOUT` and `Payment.status` is still `PENDING`. Reading `COMPLETED` as "it worked" is
+natural and wrong. `IdempotencyKeyStatus` answers *"did we finish attempting this
+request?"*; `PaymentStatus` answers *"what happened to the money?"* — two different
+questions, two different columns, on two different tables.
+
+**Why marking it `COMPLETED` on a timeout is correct, not a bug:** a retry with the same
+key must never trigger a second call to the provider for an unresolved payment — that's
+exactly the double-charge risk §1's TIMEOUT/FAILURE split exists to avoid. Marking the
+key `COMPLETED` (with a still-`PENDING` payment attached) means a retry hits
+`create_payment_idempotent()`'s `existing.status == COMPLETED` branch and simply returns
+the same `PENDING` payment again — no new charge attempt, no new provider call. Waiting
+for BOOK-55's webhook to resolve the ambiguity is the only thing allowed to change that
+payment's status from here.
+
+## 3. `IdempotencyKey.expires_at` gets a cleanup job now, deferred since BOOK-36
+
+**The gap found while building BOOK-53:** `expires_at` was set on every key from BOOK-36
+onward, but nothing ever read it back — a request handler only checks `status`, never
+whether the row has "expired." Left alone, a key stays authoritative forever; the column
+only ever bounded table growth, never request behavior. That growth-only purpose was
+already deferred once (`reservation/models.py`'s original comment said so); moving the
+model to `core/idempotency/` for BOOK-53 was the natural point to stop deferring it.
+
+**Chosen:** `core/idempotency/cleanup.py`'s `delete_expired_keys()` — same shape as
+BOOK-50's `core/outbox/cleanup.py`, a daily Celery beat task (`crontab(hour=3, minute=30)`,
+right after the outbox cleanup's `3:00`) deleting rows where `expires_at` has passed.
+Deleting, not archiving — once a key is past its retry window, there's nothing left
+worth keeping it for (unlike the outbox's published rows, which stick around briefly for
+debugging).
+
+**Revisit when:** a real need for auditing expired idempotency attempts shows up —
+nothing here today, so deletion over archival is the simpler default until one does.
+
+## 4. `PaymentIdempotencyKeyMismatchError`: a reused key must match the original request
+
+**Checked live against the actual frontend, not assumed:** `frontend/src/components/BookingForm.tsx`
+already generates a fresh `crypto.randomUUID()` inside the submit handler on every
+submission, so this gap was never reachable through BookIt's own client — this is
+defense-in-depth for any caller, not a live bug fix.
+
+**Chosen:** same-key-different-body is rejected explicitly (`400`), not silently
+resolved either direction — full reasoning in `docs/db/idempotency-basics.md`'s
+"Scoping the key to its owner" section. Applied to both `payment/service.py` and
+`reservation/service.py`'s idempotent-create flows for consistency, since the
+underlying gap was identical in both (BOOK-36 predates BOOK-53, and had it too).
+
 ---
 
 ## Cheat sheet
@@ -41,3 +91,6 @@ ticket might need to exercise real timing.
 |---|---|---|
 | BOOK-52 outcome selection | Weighted random (90/8/2), `force=` for determinism | Never for the mechanism; add real latency if a retry/backoff ticket needs to exercise actual timing |
 | BOOK-52 TIMEOUT vs FAILURE | Two distinct outcomes, not one — timeout means "unknown," not "confirmed failed" | Never — this distinction is load-bearing for BOOK-53's idempotency design |
+| BOOK-53 `IdempotencyKeyStatus.COMPLETED` on timeout | Marked COMPLETED anyway — it tracks the request attempt, not the payment outcome | Never — a retry must not re-charge an unresolved payment regardless of this naming |
+| `IdempotencyKey.expires_at` cleanup | Daily delete (`core/idempotency/cleanup.py`), not archive | A real need for auditing expired attempts shows up |
+| Reused key, different request body | Explicit `400` (`...MismatchError`), both reservations and payments | Never — matches Stripe's documented behavior for this case |
