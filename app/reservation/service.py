@@ -5,13 +5,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db.unit_of_work import UnitOfWork
+from app.core.idempotency.models import IdempotencyKey, IdempotencyKeyStatus
 from app.core.outbox.models import OutboxEvent, OutboxEventType
-from app.reservation.models import (
-    IdempotencyKey,
-    IdempotencyKeyStatus,
-    Reservation,
-    ReservationStatus,
-)
+from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.schemas import ReservationCreate
 
 # docs/db/idempotency-basics.md's ~24h window

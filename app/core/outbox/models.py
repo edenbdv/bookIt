@@ -24,8 +24,8 @@ class OutboxEvent(Base):
     navigating from a `Reservation` instance. A plain FK column keeps that
     one-way -- domain modules depend on core, not the other way around.
     `reservation_id` stays specific (not a generic aggregate_id) until a
-    second real event source justifies generalizing, same call already made
-    for `IdempotencyKey` (app/reservation/models.py).
+    second real event source justifies generalizing -- same call `IdempotencyKey`
+    (`core/idempotency/models.py`) made, until BOOK-53 became that second consumer.
     """
 
     __tablename__ = "outbox_events"
