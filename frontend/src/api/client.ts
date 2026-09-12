@@ -1,4 +1,5 @@
 import type {
+  Payment,
   PropertyDetail,
   PropertyFilters,
   PropertyListItem,
@@ -152,11 +153,11 @@ export function listCities(): Promise<string[]> {
   return request<string[]>('/properties/cities')
 }
 
-// BOOK-83. Kept separate from confirmReservationStub below -- two distinct
-// calls, not one "book it" action -- so Epic 8 only ever has to change the
-// second one. idempotencyKey is caller-supplied (a fresh UUID per attempt,
-// reused only when retrying that exact attempt) since it's a request-level
-// concern, not something this client should silently generate on retry.
+// BOOK-83. Kept separate from payReservation below -- two distinct calls,
+// not one "book it" action. idempotencyKey is caller-supplied (a fresh UUID
+// per attempt, reused only when retrying that exact attempt) since it's a
+// request-level concern, not something this client should silently generate
+// on retry.
 export function createReservation(
   data: ReservationCreate,
   idempotencyKey: string,
@@ -168,12 +169,19 @@ export function createReservation(
   })
 }
 
-// TODO(BOOK-10 / Epic 8): this is a stand-in for a real payment step -- the
-// backend endpoint itself is a manual trigger with no payment behind it yet
-// (app/reservation/service.py). Replace this function's body with a real
-// payment redirect; nothing else in the booking flow should need to change.
-export function confirmReservationStub(id: string): Promise<Reservation> {
-  return request<Reservation>(`/reservations/${id}/confirm`, { method: 'POST' })
+// BOOK-97. Replaces the old confirmReservationStub -- POST /payments (BOOK-53)
+// triggers the real saga (BOOK-54): a succeeded charge confirms the
+// reservation, a failed one cancels it, both inside the same request. There's
+// no GET /reservations/:id yet (BOOK-85) to re-fetch the result, so callers
+// derive the new status from the returned Payment themselves -- see
+// BookingForm.tsx's confirm(). idempotencyKey follows createReservation's
+// same convention: a fresh UUID per attempt.
+export function payReservation(reservationId: string, idempotencyKey: string): Promise<Payment> {
+  return request<Payment>('/payments', {
+    method: 'POST',
+    body: JSON.stringify({ reservation_id: reservationId }),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
 }
 
 export function cancelReservation(id: string): Promise<Reservation> {
