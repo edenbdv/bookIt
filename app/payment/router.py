@@ -39,3 +39,8 @@ async def create_payment(
             status_code=status.HTTP_409_CONFLICT,
             detail="A request with this Idempotency-Key is already being processed",
         ) from exc
+    except service.PaymentIdempotencyKeyMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This Idempotency-Key was already used with different request parameters",
+        ) from exc

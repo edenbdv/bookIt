@@ -34,5 +34,5 @@ class IdempotencyKey(Base):
     reservation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reservations.id"))
     payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payments.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    # ~24h window (docs/db/idempotency-basics.md); cleanup job deferred, same as Reservation.expires_at
+    # ~24h window (docs/db/idempotency-basics.md); swept by core/idempotency/cleanup.py
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

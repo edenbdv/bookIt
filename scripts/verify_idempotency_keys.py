@@ -29,6 +29,7 @@ from app.reservation.schemas import ReservationCreate
 from app.reservation.service import (
     GuestCountExceededError,
     IdempotencyKeyInProgressError,
+    IdempotencyKeyMismatchError,
     ReservationConflictError,
     create_reservation_idempotent,
 )
@@ -82,6 +83,22 @@ async def main() -> None:
     print(
         f"2. Retry, same key K1 -- got reservation {r1_retry.id} -- {'OK' if ok else 'UH OH, different row!'}"
     )
+
+    # 2b. Same key K1, but a DIFFERENT request body (different guest_count) --
+    #     must be rejected explicitly, not silently return r1 and not silently
+    #     create a second reservation either
+    mismatched_data = ReservationCreate(
+        property_id=prop_id,
+        check_in=TODAY + timedelta(days=30),
+        check_out=TODAY + timedelta(days=34),
+        guest_count=1,
+    )
+    try:
+        async with UnitOfWork() as uow:
+            await create_reservation_idempotent(uow, mismatched_data, guest_a_id, "K1-verify")
+        print("2b. Same key K1, different guest_count -- UH OH, should have been rejected")
+    except IdempotencyKeyMismatchError:
+        print("2b. Same key K1, different guest_count -- REJECTED as expected (no silent reuse)")
 
     # 3. A different guest reusing guest A's completed key -- must be rejected, not leak r1
     # NOTE: the try/except wraps the whole `async with` block, not just the call --

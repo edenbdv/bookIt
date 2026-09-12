@@ -33,6 +33,14 @@ class PaymentIdempotencyKeyInProgressError(Exception):
     pass
 
 
+# same key reused for a request that doesn't match the original -- e.g. a
+# different reservation_id. Stripe's actual behavior for this case, not
+# ours until now: reject explicitly, don't silently hand back the old
+# result and don't silently treat it as a new request either.
+class PaymentIdempotencyKeyMismatchError(Exception):
+    pass
+
+
 # TIMEOUT deliberately maps to PENDING, not FAILED -- BOOK-52's provider.py:
 # a timeout means unknown, not confirmed-failed. Left PENDING for BOOK-55's
 # webhook to resolve later, same as a real gateway's async confirmation.
@@ -107,6 +115,9 @@ async def create_payment_idempotent(
             # payment as their own request's result
             if existing_reservation.guest_id != current_user_id:
                 raise PaymentIdempotencyKeyInProgressError
+            # same key, different reservation_id than the original request
+            if existing_payment.reservation_id != data.reservation_id:
+                raise PaymentIdempotencyKeyMismatchError
             return existing_payment
         # still PROCESSING -- a concurrent request for the same key is mid-flight
         raise PaymentIdempotencyKeyInProgressError

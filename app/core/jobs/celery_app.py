@@ -89,4 +89,15 @@ app.conf.beat_schedule = {
         "task": "app.worker.delete_published_outbox_events",
         "schedule": crontab(hour=3, minute=0),
     },
+    # deferred from BOOK-36. Daily is fine, but not for the same reason as
+    # the outbox cleanup above -- an un-cleaned expired key isn't inert: a
+    # client reusing that exact key for a genuinely new request would get
+    # back the old result instead of a new payment. Rare (keys are normally
+    # single-use, e.g. a fresh UUID per attempt) and safe either way (no
+    # double charge, just a stale-but-correct answer) -- not zero impact,
+    # just low-severity enough that daily is still the right cadence.
+    "delete-expired-idempotency-keys": {
+        "task": "app.worker.delete_expired_idempotency_keys",
+        "schedule": crontab(hour=3, minute=30),
+    },
 }

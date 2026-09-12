@@ -40,6 +40,14 @@ class IdempotencyKeyInProgressError(Exception):
     pass
 
 
+# same key reused for a request that doesn't match the original (different
+# property/dates/guest_count) -- Stripe's actual behavior for this case:
+# reject explicitly, don't silently hand back the old result and don't
+# silently treat it as a new request either
+class IdempotencyKeyMismatchError(Exception):
+    pass
+
+
 class IllegalTransitionError(Exception):
     pass
 
@@ -221,6 +229,14 @@ async def create_reservation_idempotent(
             # back that other guest's reservation as their own POST's result
             if existing_reservation.guest_id != guest_id:
                 raise IdempotencyKeyInProgressError
+            # same key, different request body than the original attempt
+            if (
+                existing_reservation.property_id != data.property_id
+                or existing_reservation.check_in != data.check_in
+                or existing_reservation.check_out != data.check_out
+                or existing_reservation.guest_count != data.guest_count
+            ):
+                raise IdempotencyKeyMismatchError
             return existing_reservation
         # still PROCESSING: a genuinely concurrent request for the same key
         # is mid-flight right now -- reject rather than poll/wait, same
