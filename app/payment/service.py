@@ -44,7 +44,7 @@ class PaymentIdempotencyKeyMismatchError(Exception):
 # TIMEOUT deliberately maps to PENDING, not FAILED -- BOOK-52's provider.py:
 # a timeout means unknown, not confirmed-failed. Left PENDING for BOOK-55's
 # webhook to resolve later, same as a real gateway's async confirmation.
-_OUTCOME_TO_STATUS: dict[PaymentOutcome, PaymentStatus] = {
+OUTCOME_TO_STATUS: dict[PaymentOutcome, PaymentStatus] = {
     PaymentOutcome.SUCCESS: PaymentStatus.SUCCEEDED,
     PaymentOutcome.FAILURE: PaymentStatus.FAILED,
     PaymentOutcome.TIMEOUT: PaymentStatus.PENDING,
@@ -82,7 +82,7 @@ async def create_payment(
 
     # BOOK-52's mock -- outcome maps to the payment's real status below
     outcome = charge(payment.amount_cents, force=force)
-    payment.status = _OUTCOME_TO_STATUS[outcome]
+    payment.status = OUTCOME_TO_STATUS[outcome]
     return payment
 
 

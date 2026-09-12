@@ -108,6 +108,15 @@ def _emit_outbox_event(
     )
 
 
+# system-triggered cancel -- no guest-ownership check. For callers that
+# aren't an HTTP request from the reservation's own guest: the expiry job
+# below, and BOOK-54's saga compensation. cancel_reservation() is the
+# guest-authorized HTTP path; this is what it and system callers share.
+def cancel_reservation_system(uow: UnitOfWork, reservation: Reservation) -> None:
+    transition_to(reservation, ReservationStatus.CANCELLED)
+    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
+
+
 # stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
 # transition_to() on success. Manually callable for now so the state machine
 # is testable end-to-end before payments exist -- see docs/domain-layer/state-machine-basics.md
@@ -134,8 +143,7 @@ async def cancel_reservation(
     # same order as property/service.py's update_property
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
-    transition_to(reservation, ReservationStatus.CANCELLED)
-    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
+    cancel_reservation_system(uow, reservation)
     return reservation
 
 
@@ -146,8 +154,7 @@ async def cancel_reservation(
 async def expire_pending_reservations(uow: UnitOfWork) -> int:
     reservations = await uow.reservations.list_expired_pending(datetime.now(UTC))
     for reservation in reservations:
-        transition_to(reservation, ReservationStatus.CANCELLED)
-        _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
+        cancel_reservation_system(uow, reservation)
     return len(reservations)
 
 

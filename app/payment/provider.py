@@ -32,8 +32,19 @@ _OUTCOME_WEIGHTS: dict[PaymentOutcome, float] = {
 }
 
 
-# amount_cents is unused by design -- outcome is never derived from it, see module docstring
-def charge(amount_cents: int, *, force: PaymentOutcome | None = None) -> PaymentOutcome:
+def _resolve_outcome(force: PaymentOutcome | None) -> PaymentOutcome:
     if force is not None:
         return force
     return random.choices(list(_OUTCOME_WEIGHTS), weights=list(_OUTCOME_WEIGHTS.values()), k=1)[0]
+
+
+# amount_cents is unused by design -- outcome is never derived from it, see module docstring
+def charge(amount_cents: int, *, force: PaymentOutcome | None = None) -> PaymentOutcome:
+    return _resolve_outcome(force)
+
+
+# BOOK-54's compensating action for a charge that succeeded but couldn't be
+# confirmed -- same three-outcome shape as charge(), since a refund attempt
+# can itself succeed/fail/timeout against a real provider
+def refund(amount_cents: int, *, force: PaymentOutcome | None = None) -> PaymentOutcome:
+    return _resolve_outcome(force)

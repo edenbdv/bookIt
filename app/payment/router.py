@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
-from app.payment import service
+from app.payment import saga, service
 from app.payment.models import Payment
 from app.payment.schemas import PaymentCreate, PaymentRead
 
@@ -19,7 +19,7 @@ async def create_payment(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Payment:
     try:
-        return await service.create_payment_idempotent(uow, data, current_user.id, idempotency_key)
+        return await saga.create_payment_and_react(uow, data, current_user.id, idempotency_key)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
