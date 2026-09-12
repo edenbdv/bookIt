@@ -19,11 +19,7 @@ async def create_payment(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Payment:
     try:
-        payment = await service.create_payment_idempotent(
-            uow, data, current_user.id, idempotency_key
-        )
-        await saga.react_to_payment_outcome(uow, payment)
-        return payment
+        return await saga.create_payment_and_react(uow, data, current_user.id, idempotency_key)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"

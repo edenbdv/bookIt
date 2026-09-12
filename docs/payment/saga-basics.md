@@ -109,6 +109,45 @@ transition will usually reject that outright, not silently double-apply it. Trea
 "the state has already moved on" as a no-op, not an error, is what makes a saga step
 survive redelivery the same way `inbox-basics.md`'s dedup check does.
 
+## 6. The gap no amount of local commit ordering closes
+
+Splitting a saga's steps into separate local transactions (§2) fixes *one* failure
+window: a later step failing no longer erases an earlier step's already-committed
+record. It does not, and structurally cannot, fix an earlier window: the process
+crashing **between the external call returning and that first local commit actually
+landing**. In that window, the external system has already recorded its side effect —
+committed nothing on our end has any way to know that happened.
+
+This is the honest, irreducible core of the distributed-transaction problem: two
+systems, no shared transaction, and *no ordering of our own local commits* can make our
+database durable at the exact instant an external system's state changes, because that
+instant isn't under our control at all. Every mitigation below manages this gap; none
+of them eliminate it.
+
+- **Idempotency keys sent *to* the external system, not just received from our own
+  clients.** If the local process crashes and a retry re-attempts the same logical
+  operation, the external system recognizes the repeat (by the same key) and returns
+  its original result instead of repeating the effect — the same idea `inbox-basics.md`
+  applies to us, pushed one hop further out, onto a system we don't control.
+- **Treat an inbound webhook/callback as the source of truth, not just the answer to
+  a `TIMEOUT`.** A webhook fired by the external system is unaffected by whether *our*
+  process survived long enough to record anything — it's an independent, later
+  confirmation of what the external system actually did, and remains true even if
+  we crashed before our own attempt was ever durably recorded. This only works if
+  whatever correlates the webhook back to our own record (an id we control) was handed
+  to the external system *before* the crash could happen — at the start of the call,
+  not after a response we might never durably process.
+- **Reconciliation.** A periodic job comparing our own records against the external
+  system's own list of what it actually did, for the residual cases neither of the
+  above catches on their own — the last-resort net under both.
+- **Compensation (refund or equivalent) as the actual last resort**, once reconciliation
+  finds an effect on the external side with no matching local record at all.
+
+None of these make the gap zero-width. They make it survivable — the same posture this
+whole family of patterns already takes toward at-least-once delivery (`outbox-basics.md`
+§5, `inbox-basics.md` §5): not chasing an impossible guarantee, narrowing the window and
+making what gets through recoverable instead.
+
 ---
 
 ## Cheat sheet
@@ -122,3 +161,5 @@ survive redelivery the same way `inbox-basics.md`'s dedup check does.
 | Orchestration | One coordinator, explicit sequencing and compensation — simple to read, centralizes the sequence knowledge |
 | Choreography | No coordinator — each step reacts to the previous step's event — needs an event bus already in place |
 | Saga idempotency | A redelivered/retried step must treat "already moved past this state" as a no-op, not an error |
+| The remaining gap | Crash between the external call and the first local commit — no local commit ordering can close this |
+| What manages it | Provider-side idempotency keys, webhook-as-source-of-truth (with a correlation id sent up front), reconciliation, compensation as last resort |

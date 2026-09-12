@@ -149,6 +149,56 @@ transition (raises, doesn't no-op). The saga checks the reservation's current st
 before acting: no longer `PENDING` means already reacted to, so treat it as a no-op
 rather than letting the state machine's own rejection surface as an unhandled error.
 
+## 6. Split the commit: the charge must outlive a failure in the reaction step
+
+**Found by asking "how is this a saga if there's no compensation for a successful
+charge?"** — a fair challenge. The first version had `create_payment_idempotent()` and
+`react_to_payment_outcome()` sharing one open transaction, committed once at the very
+end. `charge()` is an external, irreversible effect the same way a Kafka publish is
+(`outbox-basics.md` §2) — if `confirm_reservation()` then raised for any reason before
+that single commit, the *entire* transaction rolled back, including the record that the
+charge succeeded. The real charge would still stand at the provider; our own database
+would have no memory of it. Worse: since a rolled-back attempt leaves no row at all
+(`idempotency-basics.md` §5's same logic), a retry with the same key would call
+`charge()` again from scratch — a genuine double charge, with nothing recorded to even
+notice.
+
+**Chosen:** `app/payment/saga.py`'s `create_payment_and_react()` commits right after
+`create_payment_idempotent()` returns, *before* calling `react_to_payment_outcome()`.
+Two local transactions, not one — matching `saga-basics.md` §2's own diagram, where
+step 1 commits before the external-call-dependent step ever runs. A failure in
+confirming/compensating afterward now rolls back only its own transaction; the payment
+record survives.
+
+**Confirmed live, not just reasoned about:** `scripts/verify_saga_commit_split.py`
+forces a successful charge, then makes the reaction step raise immediately afterward
+(simulating a crash) — the `Payment` row is still there as `SUCCEEDED` afterward, and
+the reservation correctly never got confirmed.
+
+**What this fix does *not* close, found immediately after fixing it — a real,
+still-open gap:** the process crashing **between `charge()` returning and that first
+commit actually landing**. No local commit ordering can close that window; it's the
+irreducible core of the distributed-transaction problem (`saga-basics.md` §6) — two
+systems, no shared transaction, and the instant the external system's state changes
+isn't under our control at all.
+
+**Deliberately not built now, and why:**
+- **Provider-side idempotency keys** (sending our own key *to* the provider, so a
+  crash-retry doesn't double-charge even there) — `provider.py` is a mock with nothing
+  to be idempotent *against*; there's no real external state to protect yet.
+- **Reconciliation** — a job comparing our records against the provider's own list of
+  what happened — has nothing to reconcile against for the same reason.
+
+**What actually does close most of it, already on the roadmap:** BOOK-55's webhook.
+Worth being explicit about this, since it's easy to under-scope BOOK-55 as "just handles
+`TIMEOUT`" — a webhook is the provider's own, independent confirmation of what it did,
+true regardless of whether *our* process survived long enough to record its own attempt.
+It only works for this if the correlating id (`reservation_id`, or an explicit payment
+attempt id) is handed to the provider **at the start of the `charge()` call**, not
+recovered from our own row afterward — otherwise a crash before that row exists leaves
+the eventual webhook with nothing to correlate back to. Worth designing into BOOK-55
+from the start, not bolted on after.
+
 ---
 
 ## Cheat sheet
@@ -163,3 +213,6 @@ rather than letting the state machine's own rejection surface as an unhandled er
 | BOOK-54 saga trigger | Orchestration (one function, explicit sequencing) | A second real independent consumer of the payment outcome becomes real |
 | BOOK-54 compensating action | New internal helper (shared with BOOK-46's expiry job), not `cancel_reservation()` | Never — that function's ownership check is specifically for the guest HTTP path |
 | BOOK-54 saga idempotency | Check reservation status before acting; already-moved-on is a no-op | Never — required for BOOK-53's retries and BOOK-55's redeliveries alike |
+| BOOK-54 commit split | Two local transactions (charge, then react), not one | Never — matches saga-basics.md §2's own shape |
+| Crash before the first commit | Accepted gap for now — mock provider, nothing to reconcile against | A real payment provider replaces the mock — build provider-side idempotency + reconciliation then |
+| BOOK-55 scope | Not just TIMEOUT — the actual source of truth for "crashed before commit" too | Never — design the correlation id in from the start, not bolted on after |
