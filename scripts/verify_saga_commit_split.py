@@ -1,16 +1,22 @@
-"""Manual verification for BOOK-54's split-commit fix.
+"""Manual verification for BOOK-54's split-commit fix and its compensating refund.
 
 Not a pytest test -- same reasoning as verify_idempotency_keys.py: this
 needs to prove something about real Postgres transaction/commit behavior
 that a FakeUnitOfWork can't meaningfully simulate (there's no real DB
 fixture in this project yet, BOOK-61/62).
 
-The guarantee under test: if react_to_payment_outcome() raises AFTER the
-charge succeeded, the Payment row must still be durably SUCCEEDED -- not
-rolled back along with the failed reaction step. Before the fix
-(app/payment/saga.py's create_payment_and_react splitting the commit),
-both would have shared one transaction and the charge's own record would
-have been lost along with it.
+Two guarantees under test, both triggered by the same simulated crash
+(confirm_reservation() raising right after a successful charge):
+
+1. The Payment row must still be durably SUCCEEDED afterward -- not rolled
+   back along with the failed reaction step. Before create_payment_and_react
+   split the commit, charge + reaction shared one transaction, and the
+   charge's own record would have been lost along with it.
+2. The failure must be compensated, not just survived: a REFUND Payment row
+   gets created, and the reservation ends up CANCELLED, not stuck PENDING
+   forever with an unrefunded charge against it. The original exception
+   still propagates afterward (see saga.py's react_to_payment_outcome) --
+   compensating doesn't mean hiding that something went wrong.
 
 Requires: `docker compose up -d db` already running.
 Run with: uv run python scripts/verify_saga_commit_split.py
@@ -77,7 +83,7 @@ async def main() -> None:
     # force SUCCESS so the charge definitely "happens", then make the
     # reaction step blow up right after -- simulating a crash/bug between
     # the two, which is exactly the window create_payment_and_react's split
-    # commit exists to protect
+    # commit (and the compensating refund) exist to protect
     data = PaymentCreate(reservation_id=reservation_id)
     with patch(
         "app.payment.saga.reservation_service.confirm_reservation",
@@ -90,40 +96,75 @@ async def main() -> None:
                 )
             print("UH OH: expected the simulated crash to propagate, it didn't")
         except RuntimeError:
-            print("1. Reaction step crashed as expected (simulated)")
+            print("1. Reaction step crashed as expected (simulated) -- and still propagated")
 
-    # the crash above rolled back the SECOND transaction (the reservation
-    # side) -- but the payment's own commit already happened before that,
-    # in its own transaction, so it must still be there
+    # the crash rolled back the failed confirm attempt's own transaction --
+    # but the charge's commit already happened before that, in its own
+    # earlier transaction, so it must still be there
     async with UnitOfWork() as uow:
         result = await uow.session.execute(
-            text("SELECT status FROM payments WHERE reservation_id = :rid"),
+            text("SELECT status FROM payments WHERE reservation_id = :rid AND kind = 'charge'"),
             {"rid": str(reservation_id)},
         )
         row = result.first()
 
     if row is None:
-        print("2. UH OH: no payment row survived -- the fix didn't work, the charge was lost")
+        print("2. UH OH: no charge payment survived -- the fix didn't work, the charge was lost")
     elif row[0] == PaymentStatus.SUCCEEDED.value:
-        print(f"2. Payment row survived with status={row[0]!r} -- OK, charge record wasn't lost")
+        print(f"2. Charge payment survived with status={row[0]!r} -- OK, charge record wasn't lost")
     else:
-        print(f"2. UH OH: payment row survived but status={row[0]!r}, expected 'succeeded'")
+        print(f"2. UH OH: charge payment survived but status={row[0]!r}, expected 'succeeded'")
 
+    # the compensating action: a REFUND payment should now exist too
+    async with UnitOfWork() as uow:
+        result = await uow.session.execute(
+            text(
+                "SELECT status, kind FROM payments WHERE reservation_id = :rid AND kind = 'refund'"
+            ),
+            {"rid": str(reservation_id)},
+        )
+        refund_row = result.first()
+
+    if refund_row is None:
+        print(
+            "3. UH OH: no refund payment was created -- the guest is charged with nothing to show for it"
+        )
+    else:
+        print(
+            f"3. Refund payment created with status={refund_row[0]!r} -- OK, charge was compensated"
+        )
+
+    # and the reservation should be CANCELLED, not stuck PENDING with an
+    # unrefunded charge against it
     async with UnitOfWork() as uow:
         result = await uow.session.execute(
             text("SELECT status FROM reservations WHERE id = :rid"),
             {"rid": str(reservation_id)},
         )
         (resv_status,) = result.first()
-    expected = ReservationStatus.PENDING.value
+    expected = ReservationStatus.CANCELLED.value
     ok = resv_status == expected
     print(
-        f"3. Reservation status={resv_status!r} -- "
-        f"{'OK, never confirmed since the reaction step crashed' if ok else 'UH OH, unexpected'}"
+        f"4. Reservation status={resv_status!r} -- "
+        f"{'OK, released since confirm failed and we compensated' if ok else 'UH OH, unexpected'}"
     )
 
+    # FK order matters: idempotency_keys -> payments, processed_notification_events
+    # -> outbox_events -> reservations. The notification-consumer may have
+    # actually picked up the BookingCancelled event for real by the time
+    # this runs (BOOK-51's dedup marker), hence that table too.
     async with get_engine().begin() as conn:
         await conn.execute(text("DELETE FROM idempotency_keys WHERE key = 'commit-split-verify'"))
+        await conn.execute(
+            text(
+                "DELETE FROM processed_notification_events WHERE event_id IN "
+                "(SELECT id FROM outbox_events WHERE reservation_id = :rid)"
+            ),
+            {"rid": reservation_id},
+        )
+        await conn.execute(
+            text("DELETE FROM outbox_events WHERE reservation_id = :rid"), {"rid": reservation_id}
+        )
         await conn.execute(
             text("DELETE FROM payments WHERE reservation_id = :rid"), {"rid": reservation_id}
         )

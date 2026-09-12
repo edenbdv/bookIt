@@ -199,6 +199,59 @@ recovered from our own row afterward — otherwise a crash before that row exist
 the eventual webhook with nothing to correlate back to. Worth designing into BOOK-55
 from the start, not bolted on after.
 
+## 7. Compensating a *successful* charge, not just a declined one
+
+**Found by a fair challenge: "how is this a saga if there's no compensation for a
+successful charge?"** §6 fixed one gap (the payment record surviving a later crash) but
+left the guest actually charged with nothing to show for it, if `confirm_reservation()`
+then failed. Unlike §6's remaining gap, this one doesn't need a real provider to close
+— we already have everything required, locally: a durable `Payment(SUCCEEDED)` row to
+act on. BOOK-54's own description was updated to cover this explicitly, once it became
+clear neither it nor BOOK-76 (guest-voluntary, policy-based refunds — a different
+trigger entirely) actually tracked it.
+
+**Chosen:** `saga.py`'s `react_to_payment_outcome()` wraps `confirm_reservation()` in
+`try/except Exception` — broad on purpose, and not the usual anti-pattern, because:
+
+1. What `confirm_reservation()` can realistically raise here (`ReservationNotFoundError`,
+   `IllegalTransitionError`) is already near-impossible — the reservation was just
+   fetched and checked `PENDING` moments earlier, in the same transaction. Anything that
+   actually fires is either that freak race or a genuine infra failure — and both get
+   the identical response.
+2. The exception is **re-raised** after compensating, not swallowed — the real failure
+   still surfaces as a `500`, still hits logs/monitoring. Broad-catch-and-hide is the
+   anti-pattern; broad-catch-cleanup-then-rethrow isn't hiding anything.
+3. Re-raising also avoids inventing a third HTTP response shape ("succeeded but we
+   fixed it for you") for what should be a rare, exceptional path.
+
+**`_refund_and_release()`:** rolls back the failed confirm attempt (discarding only its
+own uncommitted changes — the payment from `create_payment_and_react`'s earlier,
+already-committed transaction is untouched), issues a `Payment(kind=REFUND)` via
+`provider.py`'s new `refund()`, releases the hold via `cancel_reservation_system()`, and
+commits. The refund is itself another external, irreversible call — it inherits §6's
+exact accepted gap symmetrically (a crash between `refund()` returning and *that*
+commit), not a new problem to solve twice.
+
+**Two real bugs found only by verifying this live, not caught by unit tests
+(`scripts/verify_saga_commit_split.py`, extended rather than a new script — same
+crash-simulation harness):**
+
+- **Accessing `reservation.id` (or any attribute) immediately after
+  `uow.session.rollback()` crashes with `MissingGreenlet`.** `rollback()`
+  unconditionally expires every attribute on every persistent object in the session —
+  not just ones touched in the failed transaction, `payment` included, even though it
+  was already committed earlier by `create_payment_and_react`. The expired attribute's
+  next read triggers a lazy reload, which async SQLAlchemy can't perform outside an
+  awaited call — plain attribute access can't provide that. Fixed by capturing
+  `reservation.id` and `payment.amount_cents` into plain variables *before* calling
+  `rollback()`.
+- **The verification script's own cleanup needed two more tables than expected** —
+  `outbox_events` (the `BookingCancelled` event this path emits) and even
+  `processed_notification_events` (BOOK-51's dedup marker), since the live
+  `notification-consumer` actually picked up and processed the event for real during
+  the test run. A reminder that "verify it live" surfaces integration details no fake
+  session would.
+
 ---
 
 ## Cheat sheet
@@ -216,3 +269,5 @@ from the start, not bolted on after.
 | BOOK-54 commit split | Two local transactions (charge, then react), not one | Never — matches saga-basics.md §2's own shape |
 | Crash before the first commit | Accepted gap for now — mock provider, nothing to reconcile against | A real payment provider replaces the mock — build provider-side idempotency + reconciliation then |
 | BOOK-55 scope | Not just TIMEOUT — the actual source of truth for "crashed before commit" too | Never — design the correlation id in from the start, not bolted on after |
+| Compensating a successful charge | Refund + release, `except Exception` then re-raise | Never — response is identical regardless of cause, and re-raising means nothing is hidden |
+| `rollback()` and expired attributes | Capture ids/amounts into plain variables before rolling back | Never — `rollback()` expires every persistent object's attributes, not just the failed transaction's |
