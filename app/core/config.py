@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
+    # BOOK-55: HMAC secret for verifying inbound payment webhook calls --
+    # docs/payment/webhook-basics.md §8. dev-only default, same as secret_key.
+    payment_webhook_secret: str = "dev-webhook-secret-change-me"
+
     # BOOK-78: how long a just-spent refresh token is still accepted, answering
     # with the token that replaced it instead of counting as reuse. This is the
     # two-open-tabs case -- each tab has its own interceptor and neither knows

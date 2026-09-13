@@ -4,8 +4,11 @@ choreography (saga-basics.md §4) -- one function explicitly sequencing
 both steps, same reasoning worker-decisions.md §9 already used for BOOK-45.
 
 Idempotent-safe against BOOK-53's own idempotent endpoint and BOOK-55's
-future webhook redeliveries: checks the reservation's current status
-before acting, so a repeat call is a no-op, not an IllegalTransitionError.
+webhook redeliveries: checks the reservation's current status before
+acting, so a repeat call is a no-op, not an IllegalTransitionError.
+
+BOOK-55: `resolve_payment_and_react()` below is the webhook's entrypoint
+into this saga -- resolves a PENDING payment, then reacts to it.
 """
 
 import logging
@@ -57,8 +60,6 @@ async def react_to_payment_outcome(uow: UnitOfWork, payment: Payment) -> None:
 
 
 # BOOK-54: charged but couldn't confirm -- refund and release the hold.
-# The refund is its own external call, so it gets the same commit
-# discipline (and the same accepted crash gap) as the charge -- §6.
 async def _refund_and_release(uow: UnitOfWork, payment: Payment, reservation: Reservation) -> None:
     # captured before rollback() -- it expires every attribute on every
     # persistent object in the session, not just the failed transaction's
@@ -68,14 +69,21 @@ async def _refund_and_release(uow: UnitOfWork, payment: Payment, reservation: Re
     await uow.session.rollback()  # discard confirm_reservation()'s half-mutated state
     reservation = await uow.reservations.get_by_id(reservation_id)
 
-    outcome = provider_refund(amount_cents)
+    # BOOK-55: mint + commit PENDING before calling the provider, same as
+    # service.create_payment() -- refund_payment.id is the correlation id
     refund_payment = Payment(
         reservation_id=reservation.id,
         kind=PaymentKind.REFUND,
         amount_cents=amount_cents,
-        status=service.OUTCOME_TO_STATUS[outcome],
+        status=PaymentStatus.PENDING,
     )
     uow.payments.add(refund_payment)
+    await uow.session.flush()
+    await uow.session.commit()
+
+    outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
+    refund_payment.status = service.OUTCOME_TO_STATUS[outcome]
+    # unconditional -- the hold releases either way (unchanged from BOOK-54)
     reservation_service.cancel_reservation_system(uow, reservation)
     await uow.session.commit()
 
@@ -101,4 +109,24 @@ async def create_payment_and_react(
     )
     await uow.session.commit()
     await react_to_payment_outcome(uow, payment)
+    return payment
+
+
+async def resolve_payment_and_react(
+    uow: UnitOfWork, payment_id: uuid.UUID, outcome: PaymentOutcome
+) -> Payment:
+    """BOOK-55: webhook entrypoint -- resolve a PENDING payment, then react.
+    No-ops on an already-resolved payment (redelivery-safe)."""
+    payment = await uow.payments.get_by_id(payment_id)
+    if payment is None:
+        raise service.PaymentNotFoundError
+    if payment.status != PaymentStatus.PENDING:
+        return payment  # already resolved -- redelivery, no-op
+
+    payment.status = service.OUTCOME_TO_STATUS[outcome]
+    await uow.session.commit()  # resolve first, react second -- own commits
+
+    if payment.kind == PaymentKind.CHARGE:
+        # only a CHARGE drives the reservation; a REFUND's hold already released
+        await react_to_payment_outcome(uow, payment)
     return payment

@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
 from app.payment import saga, service
 from app.payment.models import Payment
-from app.payment.schemas import PaymentCreate, PaymentRead
+from app.payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
+from app.payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -44,3 +45,32 @@ async def create_payment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This Idempotency-Key was already used with different request parameters",
         ) from exc
+
+
+# BOOK-55: no get_current_user/rate limit -- the caller is the provider,
+# not a logged-in guest. The signature check below is what authenticates it.
+@router.post("/webhook", status_code=status.HTTP_200_OK)
+async def payment_webhook(
+    request: Request,
+    x_webhook_signature: str = Header(..., alias="X-Webhook-Signature"),
+    uow: UnitOfWork = Depends(get_uow),
+) -> dict[str, str]:
+    body = (
+        await request.body()
+    )  # raw bytes -- signature is verified over these, not a reparsed model
+    try:
+        verify_webhook_signature(body, x_webhook_signature)
+    except InvalidWebhookSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature"
+        ) from exc
+
+    payload = PaymentWebhookPayload.model_validate_json(body)  # only parsed once verified
+    try:
+        await saga.resolve_payment_and_react(uow, payload.payment_id, payload.outcome)
+    except service.PaymentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found"
+        ) from exc
+
+    return {"status": "ok"}

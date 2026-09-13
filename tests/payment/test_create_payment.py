@@ -13,11 +13,13 @@ from app.payment.service import (
 from app.reservation.models import Reservation, ReservationStatus
 
 
-# same minimal-fake approach as tests/reservation/*.py -- create_payment only
-# ever calls uow.reservations.get_by_id, uow.payments.add, and
-# uow.session.flush(), so that's all that's faked
+# same minimal-fake approach as tests/reservation/*.py -- only what
+# create_payment actually calls on uow is faked
 class FakeSession:
     async def flush(self) -> None:
+        pass
+
+    async def commit(self) -> None:
         pass
 
 

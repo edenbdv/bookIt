@@ -252,6 +252,201 @@ crash-simulation harness):**
   the test run. A reminder that "verify it live" surfaces integration details no fake
   session would.
 
+## 8. BOOK-55: the webhook, and closing the gap it was built to close
+
+The whole tree — every branch `react_to_payment_outcome()` /
+`resolve_payment_and_react()` / `_refund_and_release()` can take, resolved either
+synchronously or later by the webhook:
+
+```
+                    create_payment_and_react()
+                              │
+                    charge() called
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                      │
+    SUCCESS               FAILURE            TIMEOUT / crash
+        │                     │                      │
+        │                     │              Payment = PENDING
+        │                     │              (stuck here until a
+        │                     │               webhook resolves it)
+        │                     │                      │
+        │                     │         resolve_payment_and_react()
+        │                     │        (webhook says SUCCESS/FAILURE)
+        │                     │                      │
+        └──────────┬──────────┴──────────────────────┘
+                   │
+        react_to_payment_outcome()
+                   │
+      ┌────────────┴────────────┐
+      │                          │
+  SUCCEEDED                   FAILED
+      │                          │
+confirm_reservation()   cancel_reservation_system()
+      │                          │
+ ┌────┴─────┐              Reservation
+ │          │              → CANCELLED
+ ok      raises
+ │          │
+Reservation _refund_and_release()
+→CONFIRMED       │
+            create refund_payment (PENDING) → COMMIT
+                  │
+         provider_refund() called
+                  │
+        ┌─────────┴──────────┐
+        │                     │
+   resolves now          crashes → PENDING
+        │                     │
+ refund.status = outcome  (stuck here until a
+        │                webhook resolves it)
+        │                     │
+        │          resolve_payment_and_react()
+        │             (webhook, kind=REFUND)
+        │                     │
+        └──────────┬──────────┘
+                   │
+     refund.status set — nothing else happens
+     (reservation is already CANCELLED, from
+      the branch above, regardless of this)
+```
+
+Two rules apply everywhere on this tree, not just at one spot: any already-resolved
+payment hit by `resolve_payment_and_react()` again is a pure no-op (a redelivered
+webhook never redoes anything, anywhere in this tree), and only the `CHARGE` branch
+(top half) ever touches the reservation — the `REFUND` branch (bottom half, under a
+failed confirm) only ever updates its own row, since the reservation was already
+decided one level up.
+
+The charge path's two commit boundaries, zoomed in:
+
+```
+   BookIt / our DB                      Payment Provider
+
+  Create Payment
+  status=PENDING
+        │
+     COMMIT #1
+        │
+        ├──────────────── charge() ─────────────>│
+        │                                         │
+        │                                    (SUCCESS)
+        │<────────────────────────────────────────┤
+        │
+  payment.status = SUCCEEDED
+        │
+     COMMIT #2
+        │
+        ▼
+  Saga reaction (react_to_payment_outcome)
+        │
+        ▼
+  Reservation → CONFIRMED
+```
+
+A crash anywhere before COMMIT #1 loses nothing real (no charge was ever attempted). A
+crash anywhere *after* COMMIT #1 — including mid-`charge()`, including right after
+COMMIT #2 but before the reaction finishes — always leaves a row on our side to recover
+from: `PENDING` if it's before COMMIT #2, a resolved-but-unreacted `Payment` if it's
+after. The webhook (via `resolve_payment_and_react()`) is what recovers the first case;
+BOOK-54's existing split already recovers the second.
+
+**Correlation id is `Payment.id` — no new id needed.** `service.create_payment()` already
+calls `uow.session.flush()` before calling `charge()`, and SQLAlchemy applies `Payment.id`'s
+Python-side default (`default=uuid.uuid4`) at flush time — so the id exists before the
+provider is ever called. `charge()`/`refund()` now take `correlation_id` as a required
+keyword-only argument even though `provider.py`'s mock never uses it for anything: the
+point is the *shape*, not the mock's own behavior. The day a real provider replaces it,
+every caller already hands over an id up front, exactly as `webhook-basics.md` §2 requires.
+
+**Kept deliberately even though it's inert — worth being honest about the trade.**
+`correlation_id` has zero behavior behind it today: our mock is a single Python function
+returning a value in-process, not a separate system with its own database to store the
+id in and echo it back from later. A real provider stores it and hands it back in its
+own webhook call; ours doesn't need to, because the manual trigger script already knows
+the `payment_id` directly. That makes this parameter speculative generality for a
+provider that doesn't exist yet — the exact smell normally worth cutting. Kept anyway,
+on the reasoning that it's cheap, already threaded through and tested, and removing it
+now just means re-adding it (and re-touching every call site again) the day it's
+actually needed.
+
+**The HMAC signature is not the same kind of thing — it's live today, not shaped for
+later.** Unlike `correlation_id`, both sides of it actually run right now:
+`scripts/simulate_provider_webhook.py` computes a real signature and sends it;
+`payment_webhook()` (`router.py`) verifies it and returns `401` on a mismatch. A request
+to that endpoint without a valid signature is rejected today, mock provider or not —
+it's the one thing standing between "anyone who finds the URL" and marking an unpaid
+reservation as paid. Earns its place regardless of whether the provider ever becomes
+real.
+
+**Closing "crash before the first commit" now, not deferring it — the answer to the open
+question §6/§7 both left for this ticket.** Both `service.create_payment()` and
+`saga._refund_and_release()` used to flush the `Payment`/`refund_payment` row and only
+commit it *after* calling the provider. A crash in that window rolled the row back with
+it — nothing left for a webhook to resolve against, and no correlation id worth having.
+Both now commit the row, PENDING, immediately after flush and *before* calling
+`charge()`/`refund()`. This was originally going to stay an accepted gap until a real
+provider existed (§6's framing), but there's no real reason to wait: the fix is a plain
+reordering of two already-present lines, costs nothing, and converges "genuinely timed
+out" and "crashed before recording the outcome" into the exact same recoverable state —
+`PENDING`, an id, and a webhook that resolves either one identically.
+
+**The refund path had the identical bug, not previously caught.** `_refund_and_release()`
+called `provider_refund(amount_cents)` *before* `refund_payment` existed at all — so even
+after closing the charge-side gap, a crash during the compensating refund would still
+leave nothing to correlate a webhook against. Fixed the same way: mint `refund_payment`
+PENDING, flush, commit, *then* call `provider_refund(amount_cents, correlation_id=refund_payment.id)`.
+
+**`resolve_payment_and_react()` (`saga.py`) is the webhook's only entrypoint into the
+saga — not a second copy of BOOK-54's logic.** Given `payment_id` + a resolved outcome:
+no-op if the payment isn't `PENDING` (redelivery-safe, same discipline
+`react_to_payment_outcome` already has); otherwise resolve the status, commit that on its
+own (resolving what happened must survive even if reacting to it then fails — the same
+split-commit reasoning as `create_payment_and_react`), then react **only if `kind ==
+CHARGE`**. A `REFUND`'s webhook just records whether the money actually moved — nothing
+downstream depends on it, since `_refund_and_release` already released the reservation's
+hold unconditionally, regardless of how the refund itself resolves (unchanged from
+BOOK-54).
+
+**Confirmed live, not just reasoned about:** `scripts/verify_webhook_resolution.py`
+proves three things against real Postgres, not fakes — (1) the early-commit fix means a
+`Payment`/refund row survives a crash instead of vanishing, (2) a row left `PENDING` can
+actually be resolved afterward by the webhook, (3) a repeat webhook delivery for the
+same id is a no-op, not a second reaction. Same crash-simulation approach as
+`verify_saga_commit_split.py` — patch `charge()`/`provider_refund()` to raise the
+instant they're called, after the row is already committed.
+
+**The webhook payload never accepts `TIMEOUT`.** `PaymentWebhookPayload.outcome` is typed
+`Literal[PaymentOutcome.SUCCESS, PaymentOutcome.FAILURE]` — a webhook is definitionally
+the provider's own resolution of what happened, never itself another "unknown"
+(`webhook-basics.md` §1).
+
+**Auth: HMAC-SHA256 over the raw body, not a shared-secret header.** `webhook_auth.py`
+signs/verifies the exact bytes received, `hmac.compare_digest` for constant-time
+comparison. Matches how real providers (Stripe et al.) actually authenticate their own
+callbacks — chosen over a simpler shared-secret header specifically so this mock's
+contract doesn't need to change when a real provider replaces it.
+
+**Trigger: a manual script now (`scripts/simulate_provider_webhook.py`), deliberately
+shaped for a later automatic one.** Nothing in this project schedules a delayed call to
+the webhook automatically yet — a person (or a test) runs the script, which signs and
+posts a payload. `send_webhook()` is factored out from the script's CLI specifically so
+a future automatic trigger (e.g. a Celery task scheduled right after a `TIMEOUT`) can
+import and call the same function instead of re-deriving the signing logic.
+
+**Test coverage:** `tests/payment/test_webhook_auth.py` (signature round-trip, tampered
+body, wrong signature) and `tests/payment/test_resolve_payment.py` (unknown payment id,
+already-resolved no-op, `CHARGE` reacts, `REFUND` doesn't — `react_to_payment_outcome`
+mocked out rather than re-testing BOOK-54's own internals). `test_provider.py` updated
+for the new `correlation_id` parameter. Plus `scripts/verify_webhook_resolution.py`
+(§ above) for what fakes can't cover. All passing.
+
+**Revisit when:** a real provider replaces the mock — `correlation_id` already threads
+through, but provider-side idempotency keys and reconciliation (§6's still-open items)
+remain genuinely deferred until there's a real external system to protect against. Also
+revisit the manual trigger once an automatic one is actually built — `send_webhook()` is
+the seam that move should happen through.
+
 ---
 
 ## Cheat sheet
@@ -267,7 +462,11 @@ crash-simulation harness):**
 | BOOK-54 compensating action | New internal helper (shared with BOOK-46's expiry job), not `cancel_reservation()` | Never — that function's ownership check is specifically for the guest HTTP path |
 | BOOK-54 saga idempotency | Check reservation status before acting; already-moved-on is a no-op | Never — required for BOOK-53's retries and BOOK-55's redeliveries alike |
 | BOOK-54 commit split | Two local transactions (charge, then react), not one | Never — matches saga-basics.md §2's own shape |
-| Crash before the first commit | Accepted gap for now — mock provider, nothing to reconcile against | A real payment provider replaces the mock — build provider-side idempotency + reconciliation then |
-| BOOK-55 scope | Not just TIMEOUT — the actual source of truth for "crashed before commit" too | Never — design the correlation id in from the start, not bolted on after |
 | Compensating a successful charge | Refund + release, `except Exception` then re-raise | Never — response is identical regardless of cause, and re-raising means nothing is hidden |
 | `rollback()` and expired attributes | Capture ids/amounts into plain variables before rolling back | Never — `rollback()` expires every persistent object's attributes, not just the failed transaction's |
+| BOOK-55 correlation id | `Payment.id`, already available post-flush — no new id needed | `charge()`/`refund()` require it as a param regardless, so the shape is right when a real provider arrives |
+| BOOK-55 crash-before-commit gap | Closed now, not deferred — commit the row PENDING before calling the provider (charge *and* refund paths) | Never — the fix was a free reordering, no reason to wait for a real provider |
+| BOOK-55 webhook entrypoint | One function, `resolve_payment_and_react()` — no second copy of BOOK-54's logic | Never — CHARGE reacts via the existing saga, REFUND just resolves its own status |
+| BOOK-55 webhook payload | `outcome` excludes `TIMEOUT` by type | Never — a webhook is always a final answer, never another "unknown" |
+| BOOK-55 webhook auth | HMAC-SHA256 over the raw body, not a shared-secret header | Never — matches real providers' own convention, no contract change needed later |
+| BOOK-55 webhook trigger | Manual script (`scripts/simulate_provider_webhook.py`), `send_webhook()` factored out | Once an automatic trigger (e.g. Celery-scheduled) is built — swap the caller, not the signing logic |
