@@ -48,6 +48,16 @@ class ReservationNotPayableError(Exception):
     pass
 
 
+# a TIMEOUT leaves the reservation itself still 'pending' (react_to_payment_
+# outcome no-ops on a PENDING payment), so nothing else blocks a guest from
+# retrying -- without this guard, an impatient retry starts a second,
+# independent charge attempt while the first's real outcome is still
+# unknown. If the first one *did* actually go through, that's a double
+# charge with no automatic refund, not just a UX annoyance.
+class PendingChargeExistsError(Exception):
+    pass
+
+
 class PaymentIdempotencyKeyInProgressError(Exception):
     pass
 
@@ -88,6 +98,12 @@ async def create_payment(
         raise NotReservationGuestError
     if reservation.status != ReservationStatus.PENDING:
         raise ReservationNotPayableError
+
+    # blocks a second charge attempt while an earlier TIMEOUT for this
+    # reservation is still unresolved -- see PendingChargeExistsError
+    existing_pending = await uow.payments.get_pending_charge_by_reservation_id(reservation.id)
+    if existing_pending is not None:
+        raise PendingChargeExistsError
 
     # record the attempt before calling the provider, not after
     payment = Payment(
