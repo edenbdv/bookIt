@@ -1,8 +1,9 @@
+import enum
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, func
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db.models import Base
@@ -10,6 +11,15 @@ from app.core.db.models import Base
 if TYPE_CHECKING:
     from app.auth.models import User
     from app.reservation.models import Reservation
+
+
+# BOOK-76: drives calculate_refund_cents() (reservation/cancellation_policy.py).
+# MODERATE sits between the other two on purpose -- see that module's docstring
+# for the exact cutoffs each tier maps to.
+class CancellationPolicy(str, enum.Enum):
+    FLEXIBLE = "flexible"
+    MODERATE = "moderate"
+    STRICT = "strict"
 
 
 class Property(Base):
@@ -28,6 +38,14 @@ class Property(Base):
     country: Mapped[str]
     max_guests: Mapped[int]
     price_per_night_cents: Mapped[int]
+    # BOOK-76: defaults MODERATE for existing rows/new listings that don't
+    # pick one explicitly -- a real middle ground, not the most guest- or
+    # host-favorable option
+    cancellation_policy: Mapped[CancellationPolicy] = mapped_column(
+        Enum(CancellationPolicy, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=CancellationPolicy.MODERATE,
+        server_default=CancellationPolicy.MODERATE.value,
+    )
     # soft delete: null while listed, set on delist. Never hard-delete a
     # property with reservation history — see core/README.md's
     # "repository.py" section for why BaseRepository.delete() won't stop you.
