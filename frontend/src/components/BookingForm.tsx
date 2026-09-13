@@ -18,7 +18,16 @@ interface Props {
 type BookingState =
   | { kind: 'form' }
   | { kind: 'submitting' }
-  | { kind: 'reservation'; reservation: Reservation; action: 'idle' | 'confirming' | 'cancelling'; actionError?: string }
+  | {
+      kind: 'reservation'
+      reservation: Reservation
+      action: 'idle' | 'confirming' | 'cancelling'
+      actionError?: string
+      // BOOK-76/99: set once a cancel actually returns -- 0 is a real "no
+      // refund" answer, not "unknown", so this is only absent before any
+      // cancel has happened yet
+      refundAmountCents?: number
+    }
   | { kind: 'error'; message: string }
 
 function nightsBetween(checkIn: string, checkOut: string): number {
@@ -134,7 +143,12 @@ export function BookingForm({ property }: Props) {
     setState({ kind: 'reservation', reservation, action: 'cancelling' })
     try {
       const cancelled = await cancelReservation(reservation.id)
-      setState({ kind: 'reservation', reservation: cancelled, action: 'idle' })
+      setState({
+        kind: 'reservation',
+        reservation: cancelled,
+        action: 'idle',
+        refundAmountCents: cancelled.refund_amount_cents,
+      })
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Could not cancel this reservation.'
       setState({ kind: 'reservation', reservation, action: 'idle', actionError: message })
@@ -142,7 +156,7 @@ export function BookingForm({ property }: Props) {
   }
 
   if (state.kind === 'reservation') {
-    const { reservation, action, actionError } = state
+    const { reservation, action, actionError, refundAmountCents } = state
     const styles = STATUS_STYLES[reservation.status]
     return (
       <div className={`rounded-lg border p-5 ${styles.container}`}>
@@ -165,6 +179,19 @@ export function BookingForm({ property }: Props) {
         {actionError && (
           <p role="alert" className="mt-2 text-sm text-red-700">
             {actionError}
+          </p>
+        )}
+
+        {/* BOOK-99: only after a cancel this page itself just performed --
+            refund_amount_cents isn't part of a plain reservation fetch */}
+        {reservation.status === 'cancelled' && refundAmountCents !== undefined && (
+          <p className="mt-2 text-sm text-gray-700">
+            {refundAmountCents > 0
+              ? `Refund: ${formatPrice(refundAmountCents)}, based on this property's cancellation policy.`
+              : // 0 covers two different cases the frontend can't tell apart from
+                // this number alone -- never charged in the first place, or charged
+                // but the policy/timing zeroed it out -- so this doesn't claim which
+                'No refund for this cancellation.'}
           </p>
         )}
 

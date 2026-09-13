@@ -5,6 +5,7 @@ import { BookingForm } from '../components/BookingForm'
 import { PhotoCarousel } from '../components/PhotoCarousel'
 import { ReviewList } from '../components/ReviewList'
 import type { PropertyDetail as PropertyDetailType, Review } from '../types'
+import { CANCELLATION_POLICY_COPY, CANCELLATION_POLICY_LABEL } from '../utils/cancellationPolicy'
 import { formatPrice } from '../utils/format'
 
 type LoadState =
@@ -105,6 +106,14 @@ export function PropertyDetail() {
       <div className="mt-6 border-t border-gray-200 pt-5 text-lg">
         <span className="text-xl font-bold">{formatPrice(property.price_per_night_cents)}</span> / night
       </div>
+
+      {/* BOOK-99: shown here, before booking -- not just at cancel time */}
+      <p className="mt-2 text-sm text-gray-600">
+        <span className="font-semibold">
+          {CANCELLATION_POLICY_LABEL[property.cancellation_policy]} cancellation:
+        </span>{' '}
+        {CANCELLATION_POLICY_COPY[property.cancellation_policy]}
+      </p>
 
       <div className="mt-6 border-t border-gray-200 pt-6">
         <BookingForm property={property} />
