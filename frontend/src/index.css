@@ -1,9 +1,30 @@
 @import "tailwindcss";
 
+/* BookIt visual identity (property page redesign) -- warm coastal palette,
+   a serif display face for headings/price, Work Sans for everything else.
+   Tokens only here; components consume them via Tailwind's generated
+   bg-ground / text-ink / font-display utilities, never a raw hex. */
+@theme {
+  --color-ground: #f7f5f0;
+  --color-surface: #ffffff;
+  --color-ink: #1b2420;
+  --color-ink-soft: #5c665f;
+  --color-ink-faint: #8b948e;
+  --color-accent: #0e6b57;
+  --color-accent-ink: #0a4e3f;
+  --color-accent-soft: #e3efea;
+  --color-line: #e4e0d6;
+  --color-gold: #b8842a;
+  --color-gold-soft: #f6ecd9;
+
+  --font-display: "Fraunces", Georgia, serif;
+  --font-sans: "Work Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
 :root {
   color-scheme: light;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
 }

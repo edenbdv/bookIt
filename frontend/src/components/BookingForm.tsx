@@ -6,6 +6,22 @@ import type { PropertyDetail, Reservation } from '../types'
 import { formatPrice } from '../utils/format'
 import { todayIso } from '../utils/dates'
 
+// the backend now simulates real provider latency itself (app/payment/
+// service.py's _simulate_provider_latency) -- no need to fake a minimum
+// wait here too, the request genuinely takes a moment
+function Spinner() {
+  return (
+    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+      <path
+        className="opacity-90"
+        fill="currentColor"
+        d="M12 2a10 10 0 0 1 10 10h-3a7 7 0 0 0-7-7z"
+      />
+    </svg>
+  )
+}
+
 interface Props {
   property: PropertyDetail
 }
@@ -58,8 +74,8 @@ export function BookingForm({ property }: Props) {
 
   if (!session) {
     return (
-      <p className="text-sm text-gray-600">
-        <Link to="/login" className="font-semibold text-gray-900 underline">
+      <p className="mt-4 text-sm text-ink-soft">
+        <Link to="/login" className="font-semibold text-accent-ink underline">
           Log in
         </Link>{' '}
         to book this property.
@@ -159,10 +175,10 @@ export function BookingForm({ property }: Props) {
     const { reservation, action, actionError, refundAmountCents } = state
     const styles = STATUS_STYLES[reservation.status]
     return (
-      <div className={`rounded-lg border p-5 ${styles.container}`}>
-        <p className="text-sm text-gray-700">
+      <div className={`mt-4 rounded-2xl border p-4 ${styles.container}`}>
+        <p className="text-sm text-ink">
           Reservation{' '}
-          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${styles.badge}`}>
+          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold tracking-wide uppercase ${styles.badge}`}>
             {reservation.status}
           </span>{' '}
           &middot; {reservation.check_in} &rarr; {reservation.check_out} &middot; {reservation.guest_count} guest
@@ -185,7 +201,7 @@ export function BookingForm({ property }: Props) {
         {/* BOOK-99: only after a cancel this page itself just performed --
             refund_amount_cents isn't part of a plain reservation fetch */}
         {reservation.status === 'cancelled' && refundAmountCents !== undefined && (
-          <p className="mt-2 text-sm text-gray-700">
+          <p className="mt-2 text-sm text-ink-soft">
             {refundAmountCents > 0
               ? `Refund: ${formatPrice(refundAmountCents)}, based on this property's cancellation policy.`
               : // 0 covers two different cases the frontend can't tell apart from
@@ -201,8 +217,9 @@ export function BookingForm({ property }: Props) {
               type="button"
               disabled={action !== 'idle'}
               onClick={() => confirm(reservation)}
-              className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-ink disabled:opacity-70"
             >
+              {action === 'confirming' && <Spinner />}
               {action === 'confirming' ? 'Processing payment...' : 'Pay & confirm'}
             </button>
           )}
@@ -211,8 +228,9 @@ export function BookingForm({ property }: Props) {
               type="button"
               disabled={action !== 'idle'}
               onClick={() => cancel(reservation)}
-              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg border border-line px-4 py-2 text-sm font-semibold text-ink hover:bg-ground disabled:opacity-70"
             >
+              {action === 'cancelling' && <Spinner />}
               {action === 'cancelling' ? 'Cancelling...' : 'Cancel'}
             </button>
           )}
@@ -230,13 +248,12 @@ export function BookingForm({ property }: Props) {
     // (triggered by the date/number inputs' min/max) intercepts submit
     // before onSubmit ever runs, silently, with no visible error and no
     // network call. Found by testing an out-of-range guest count.
-    <form onSubmit={submit} noValidate className="rounded-lg border border-gray-200 p-5">
-      <h2 className="mb-4 text-lg font-bold">Book this property</h2>
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-sm text-gray-500">
+    <form onSubmit={submit} noValidate className="mt-5">
+      <div className="grid grid-cols-2 gap-2.5">
+        <label className="flex flex-col gap-1.5 text-[11.5px] font-semibold tracking-wide text-ink-soft uppercase">
           Check in
           <input
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            className="rounded-[9px] border border-line bg-ground px-2.5 py-2 text-sm font-sans text-ink normal-case focus:ring-2 focus:ring-accent focus:outline-none"
             type="date"
             dir="ltr"
             min={todayIso()}
@@ -244,10 +261,10 @@ export function BookingForm({ property }: Props) {
             onChange={(e) => setCheckIn(e.target.value)}
           />
         </label>
-        <label className="flex flex-col gap-1 text-sm text-gray-500">
+        <label className="flex flex-col gap-1.5 text-[11.5px] font-semibold tracking-wide text-ink-soft uppercase">
           Check out
           <input
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            className="rounded-[9px] border border-line bg-ground px-2.5 py-2 text-sm font-sans text-ink normal-case focus:ring-2 focus:ring-accent focus:outline-none"
             type="date"
             dir="ltr"
             min={checkIn || todayIso()}
@@ -255,10 +272,10 @@ export function BookingForm({ property }: Props) {
             onChange={(e) => setCheckOut(e.target.value)}
           />
         </label>
-        <label className="flex flex-col gap-1 text-sm text-gray-500">
+        <label className="col-span-2 flex flex-col gap-1.5 text-[11.5px] font-semibold tracking-wide text-ink-soft uppercase">
           Guests
           <input
-            className="w-20 rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            className="rounded-[9px] border border-line bg-ground px-2.5 py-2 text-sm font-sans text-ink normal-case focus:ring-2 focus:ring-accent focus:outline-none"
             type="number"
             min={1}
             max={property.max_guests}
@@ -266,21 +283,30 @@ export function BookingForm({ property }: Props) {
             onChange={(e) => setGuestCount(e.target.value)}
           />
         </label>
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-        >
-          {submitting ? 'Booking...' : 'Reserve'}
-        </button>
       </div>
 
       {nights > 0 && (
-        <p className="mt-3 text-sm text-gray-600">
-          {nights} night{nights === 1 ? '' : 's'} &times; {formatPrice(property.price_per_night_cents)} ={' '}
-          <span className="font-semibold">{formatPrice(nights * property.price_per_night_cents)}</span> total
-        </p>
+        <div className="mt-4 border-t border-line pt-3.5">
+          <div className="flex justify-between text-sm text-ink-soft tabular-nums">
+            <span>
+              {formatPrice(property.price_per_night_cents)} &times; {nights} night{nights === 1 ? '' : 's'}
+            </span>
+            <span>{formatPrice(nights * property.price_per_night_cents)}</span>
+          </div>
+          <div className="mt-2 flex justify-between border-t border-line pt-2 text-[15px] font-semibold text-ink tabular-nums">
+            <span>Total</span>
+            <span>{formatPrice(nights * property.price_per_night_cents)}</span>
+          </div>
+        </div>
       )}
+
+      <button
+        type="submit"
+        disabled={submitting}
+        className="mt-4 w-full rounded-[9px] bg-accent px-4 py-3 text-[15px] font-semibold text-white hover:bg-accent-ink disabled:opacity-50"
+      >
+        {submitting ? 'Booking...' : 'Reserve'}
+      </button>
 
       {validationError && (
         <p role="alert" className="mt-3 text-sm text-red-700">

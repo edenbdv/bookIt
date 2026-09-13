@@ -96,10 +96,10 @@ export function SearchBar({ onSearch }: Props) {
   }
 
   const inputClass =
-    'rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-gray-400 focus:outline-none'
+    'rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink focus:border-accent focus:outline-none'
 
   return (
-    <form onSubmit={submit} className="flex flex-wrap items-center gap-2.5 border-b border-gray-200 bg-gray-50 px-8 py-5">
+    <form onSubmit={submit} className="flex flex-wrap items-center gap-2.5 border-b border-line bg-ground px-8 py-5">
       <input
         className={`${inputClass} w-44`}
         placeholder="City"
@@ -128,7 +128,7 @@ export function SearchBar({ onSearch }: Props) {
           min greys out impossible days in the picker, but validateDates
           still re-checks every rule: a date typed straight into the field
           isn't constrained by min in every browser. */}
-      <label className="flex items-center gap-2 text-sm text-gray-500">
+      <label className="flex items-center gap-2 text-sm text-ink-soft">
         Check in
         <input
           className={`${inputClass} w-36`}
@@ -139,7 +139,7 @@ export function SearchBar({ onSearch }: Props) {
           onChange={(e) => setCheckIn(e.target.value)}
         />
       </label>
-      <label className="flex items-center gap-2 text-sm text-gray-500">
+      <label className="flex items-center gap-2 text-sm text-ink-soft">
         Check out
         <input
           className={`${inputClass} w-36`}
@@ -176,17 +176,17 @@ export function SearchBar({ onSearch }: Props) {
         value={maxPrice}
         onChange={(e) => setMaxPrice(e.target.value)}
       />
-      <button type="submit" className="rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90">
+      <button type="submit" className="rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-accent-ink">
         Search
       </button>
 
-      <button type="button" onClick={clear} className="text-sm text-gray-500 underline">
+      <button type="button" onClick={clear} className="text-sm text-ink-soft underline">
         Clear
       </button>
 
       {/* ml-auto pushes the sort control to the far right, away from the
           filter inputs -- it acts on results, it isn't another filter */}
-      <label className="ml-auto flex items-center gap-2 text-sm text-gray-500">
+      <label className="ml-auto flex items-center gap-2 text-sm text-ink-soft">
         Sort
         <select
           className={inputClass}

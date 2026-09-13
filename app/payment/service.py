@@ -1,3 +1,5 @@
+import asyncio
+import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +16,17 @@ from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
 from app.reservation.models import Reservation, ReservationStatus
+
+# real card networks/issuing banks take real time to answer -- this mock
+# resolves in zero time otherwise, which reads as fake ("did that actually
+# charge anything?") rather than fast. provider.py stays a pure, sync
+# decision function; the latency belongs here, at the layer that's
+# actually standing in for "calling out to a real external system".
+_SIMULATED_PROVIDER_LATENCY_SECONDS = (0.4, 1.2)
+
+
+async def _simulate_provider_latency() -> None:
+    await asyncio.sleep(random.uniform(*_SIMULATED_PROVIDER_LATENCY_SECONDS))
 
 
 class ReservationNotFoundError(Exception):
@@ -89,6 +102,11 @@ async def create_payment(
     # payment.id, the correlation id) survives a crash during charge()
     await uow.session.commit()
 
+    # skipped when force= is set -- tests/scripts pin a deterministic
+    # outcome specifically to run fast and not wait on this
+    if force is None:
+        await _simulate_provider_latency()
+
     # BOOK-52's mock -- outcome maps to the payment's real status below
     outcome = charge(payment.amount_cents, correlation_id=payment.id, force=force)
     payment.status = OUTCOME_TO_STATUS[outcome]
@@ -161,6 +179,7 @@ async def create_refund(uow: UnitOfWork, reservation: Reservation, amount_cents:
     await uow.session.flush()
     await uow.session.commit()
 
+    await _simulate_provider_latency()
     outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
     refund_payment.status = OUTCOME_TO_STATUS[outcome]
     return refund_payment

@@ -37,22 +37,22 @@ export function Feed() {
     <>
       <SearchBar onSearch={setFilters} />
       <main className="mx-auto max-w-6xl px-8 py-7">
-        {state.status === 'loading' && <p className="text-sm text-gray-500">Loading properties...</p>}
+        {state.status === 'loading' && <p className="text-sm text-ink-soft">Loading properties...</p>}
 
         {state.status === 'error' && (
           <div className="py-20 text-center text-red-700">
             {state.message}
-            <div className="mt-1 text-sm text-gray-500">Is the API running?</div>
+            <div className="mt-1 text-sm text-ink-soft">Is the API running?</div>
           </div>
         )}
 
         {state.status === 'ready' && state.properties.length === 0 && (
-          <div className="py-20 text-center text-gray-500">No properties match these filters.</div>
+          <div className="py-20 text-center text-ink-soft">No properties match these filters.</div>
         )}
 
         {state.status === 'ready' && state.properties.length > 0 && (
           <>
-            <p className="mb-4 text-sm text-gray-500">
+            <p className="mb-4 text-sm text-ink-soft">
               {state.properties.length} propert{state.properties.length === 1 ? 'y' : 'ies'}
             </p>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-6">

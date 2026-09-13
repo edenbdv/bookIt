@@ -7,7 +7,7 @@ import { Signup } from './pages/Signup'
 
 function App() {
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-ground">
       <Header />
       <Routes>
         <Route path="/" element={<Feed />} />

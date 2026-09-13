@@ -6,8 +6,8 @@ export function PhotoCarousel({ photos, alt }: { photos: PropertyPhoto[]; alt: s
 
   if (photos.length === 0) {
     return (
-      <div className="aspect-video overflow-hidden rounded-2xl bg-gradient-to-br from-gray-100 to-gray-200">
-        <div className="flex h-full w-full items-center justify-center text-gray-400">No photo</div>
+      <div className="aspect-[21/9] overflow-hidden rounded-2xl bg-accent-soft">
+        <div className="flex h-full w-full items-center justify-center text-ink-faint">No photo</div>
       </div>
     )
   }
@@ -17,7 +17,7 @@ export function PhotoCarousel({ photos, alt }: { photos: PropertyPhoto[]; alt: s
   }
 
   return (
-    <div className="relative aspect-video overflow-hidden rounded-2xl bg-gray-100">
+    <div className="relative aspect-[21/9] overflow-hidden rounded-2xl bg-ground">
       <img src={photos[index].url} alt={alt} className="h-full w-full object-cover" />
 
       {photos.length > 1 && (
