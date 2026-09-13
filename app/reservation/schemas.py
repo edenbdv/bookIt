@@ -74,6 +74,13 @@ class ReservationRead(BaseModel):
     created_at: datetime
 
 
+class ReservationCancelRead(ReservationRead):
+    # BOOK-76: 0 when there was nothing to refund (never charged, or the
+    # policy/timing zeroed it out) -- always a concrete number, never null,
+    # so the guest always sees a definite answer
+    refund_amount_cents: int
+
+
 class ReservationUpdate(BaseModel):
     # only guest_count is a plain field edit. Changing check_in/check_out
     # would need to re-run the overlap check the EXCLUDE constraint

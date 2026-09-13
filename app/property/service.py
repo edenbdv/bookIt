@@ -33,7 +33,10 @@ class NotPropertyOwnerError(Exception):
 
 
 async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
-    property_ = Property(host_id=host_id, **data.model_dump())
+    # exclude_unset: an omitted cancellation_policy dumps as None otherwise,
+    # which would override the model's own MODERATE default with an explicit
+    # NULL -- same reasoning update_property already applies below
+    property_ = Property(host_id=host_id, **data.model_dump(exclude_unset=True))
     uow.properties.add(property_)
     # flush, not commit: populates the server-generated created_at so the
     # response can include it -- commit happens once at request end, in

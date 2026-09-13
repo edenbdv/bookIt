@@ -11,8 +11,9 @@ from app.core.idempotency.models import (
 )
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.provider import PaymentOutcome, charge
+from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
-from app.reservation.models import ReservationStatus
+from app.reservation.models import Reservation, ReservationStatus
 
 
 class ReservationNotFoundError(Exception):
@@ -138,3 +139,28 @@ async def create_payment_idempotent(
     key_row.status = IdempotencyKeyStatus.COMPLETED
     key_row.payment_id = payment.id
     return payment
+
+
+async def create_refund(uow: UnitOfWork, reservation: Reservation, amount_cents: int) -> Payment:
+    """The refund-side mirror of create_payment() above: mint the row,
+    commit it PENDING, then call the provider. Shared by BOOK-54's saga
+    (_refund_and_release, always the full charge) and BOOK-76's
+    policy-based partial refund on guest cancellation (payment/cancellation.py)
+    -- neither is this function's concern, it just processes an amount.
+
+    BOOK-55's commit split: PENDING committed before calling the provider,
+    so a crash mid-call still leaves a row a webhook can resolve later.
+    """
+    refund_payment = Payment(
+        reservation_id=reservation.id,
+        kind=PaymentKind.REFUND,
+        amount_cents=amount_cents,
+        status=PaymentStatus.PENDING,
+    )
+    uow.payments.add(refund_payment)
+    await uow.session.flush()
+    await uow.session.commit()
+
+    outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
+    refund_payment.status = OUTCOME_TO_STATUS[outcome]
+    return refund_payment

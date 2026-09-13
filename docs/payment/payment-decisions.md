@@ -447,6 +447,204 @@ remain genuinely deferred until there's a real external system to protect agains
 revisit the manual trigger once an automatic one is actually built — `send_webhook()` is
 the seam that move should happen through.
 
+## 9. BOOK-76: cancellation policies driving refund amounts
+
+Every case `cancel_reservation_and_refund()` can hit, cancel to refund:
+
+```
+              Guest calls POST /reservations/{id}/cancel
+                              │
+              reservation_service.cancel_reservation()
+              (ownership check + transition to CANCELLED --
+               unchanged from BOOK-38)
+                              │
+              Was there a SUCCEEDED charge for this reservation?
+                              │
+                ┌─────────────┴─────────────┐
+                │                           │
+               NO                         YES
+                │                           │
+      refund_amount_cents = 0    Property.cancellation_policy
+      (never charged --                     │
+       e.g. still PENDING)      calculate_refund_cents(policy, check_in,
+                                             now, charge.amount_cents)
+                                             │
+                          ┌──────────────────┼──────────────────┐
+                          │                  │                  │
+                      FLEXIBLE           MODERATE            STRICT
+                          │                  │                  │
+                    >=24h: 100%        >=5d: 100%          >=7d: 50%
+                    <24h:  0%          >=24h: 50%          <7d:  0%
+                                       <24h:  0%
+                          │                  │                  │
+                          └──────────────────┼──────────────────┘
+                                             │
+                          create_refund(uow, reservation, refund_amount_cents)
+                          (mint Payment(REFUND, PENDING) -> COMMIT -> provider.refund())
+                          -- runs even when the amount is 0
+                                             │
+                          ┌──────────────────┴──────────────────┐
+                          │                                     │
+                   resolves now                          crashes / times out
+                   (SUCCEEDED/FAILED)                     -> stays PENDING
+                          │                                     │
+                          │                     resolve_payment_and_react()
+                          │                     (BOOK-55's webhook, later)
+                          └──────────────────┬──────────────────┘
+                                             │
+                          refund.status set -- nothing else reacts
+                          (reservation already CANCELLED, from the top)
+                                             │
+                                             ▼
+                          Response: ReservationCancelRead
+                          { ...reservation fields, refund_amount_cents }
+```
+
+**This is not itself a saga, despite reusing a saga's machinery — worth being precise
+about.** `saga-basics.md` §3's own test: a step needs saga treatment only if (1) something
+downstream branches on its outcome, and (2) a successful outcome leaves a real effect
+worth undoing if something later fails. `create_refund()`'s outcome here fails both —
+the reservation is already `CANCELLED` before the refund is even attempted, so nothing
+branches on whether it later resolves `SUCCEEDED`, `FAILED`, or sits `PENDING`; there's
+no further compensating step if it fails. By §3's own definition this is a **terminal
+action**, the same category that doc puts "most notifications" in — not a decision
+point. What's actually reused from BOOK-54/55 isn't the saga *pattern*
+(forward-step-plus-compensation) — it's the generic **external-call durability
+machinery** underneath it: commit before calling out, a correlation id, and a webhook
+that can resolve a stuck `PENDING` row later. That machinery is useful for any external
+call, saga or not; `create_refund()` just happens to be shared by one of each.
+
+**Webhook is not the same thing as saga — worth spelling out concretely, since this
+flow makes the two easy to conflate.** A webhook is a mechanism for finding out a
+result *later* from the provider; a saga is a pattern of orchestration + branching +
+compensation once a result is known. This flow has the first without the second:
+
+```
+The cancel flow itself, no branching on the refund at all:
+
+  User cancels
+       │
+  Reservation -> CANCELLED                (unconditional, happens first)
+       │
+  Was there a successful charge?
+       │
+      yes
+       │
+  calculate refund, then process it        (never: SUCCESS -> do X, FAILURE -> do Y)
+```
+
+`create_refund()`'s own internals can still hit the exact same async gap `charge()` can:
+
+```
+  Payment(REFUND) = PENDING
+       │
+     COMMIT
+       │
+  provider.refund()
+       │
+  TIMEOUT / process crash  -->  Payment stays PENDING
+       │
+  POST /payments/webhook  -->  resolve_payment_and_react()  (same endpoint, doesn't
+       │                        care whether this row is a CHARGE or a REFUND)
+       ▼
+  Payment resolved
+```
+
+The two flows only diverge in what happens *after* that same webhook resolves something:
+
+```
+  CHARGE resolves SUCCESS            REFUND resolves (either outcome)
+       │                                    │
+  react_to_payment_outcome()          Payment.status updated
+       │                                    │
+  Reservation -> CONFIRMED            (nothing else -- reservation was
+  (a real decision, made because           already CANCELLED before this
+   the outcome was now known --            refund was even attempted)
+   this is the saga)
+```
+
+So: a cancellation's refund uses the exact same webhook and durability infrastructure a
+charge does, but the cancellation flow itself is not a saga. Same webhook, different
+question — "did something happen yet" (webhook) is not "what do we do now that it has"
+(saga).
+
+**`cancellation_policy` lives on `Property`, not globally.** Matches the ticket's own
+acceptance criteria, and how real platforms actually work — each host picks their own
+policy for their own listing, not one platform-wide setting. Defaults to `MODERATE`
+(`property/models.py`) so existing rows and hosts who don't pick one get a real middle
+ground, not the most guest- or host-favorable option by default.
+
+**The refund calculation is a pure function, no DB access at all.**
+`reservation/cancellation_policy.py`'s `calculate_refund_cents()` takes a policy, a
+check-in date, "now," and the charged amount — nothing else. Deliberately kept this way
+so every boundary (the 18 tests in `test_cancellation_policy.py`) is checkable without a
+database, a session, or any async machinery.
+
+**`check_in` has no time-of-day — treated as midnight UTC of that date.** `Reservation.check_in`
+is a `Date`, not a `DateTime`; the cutoffs ("24h before check-in") need an actual instant
+to measure against. A deliberate simplification, not an attempt to model a real check-in
+time (which varies per listing in reality) — documented in the module's own docstring so
+it's not mistaken for an oversight later.
+
+**Refund processing reuses BOOK-54/55's machinery, not a second implementation --
+and lives in `payment/service.py`, not `saga.py`, once that became clear.**
+`_refund_and_release()`'s "mint a REFUND payment, commit it PENDING, call the provider,
+resolve its status" logic was extracted into `service.create_refund()` — the refund-side
+mirror of `service.create_payment()`, the charge-side equivalent already there. Both
+`_refund_and_release` (BOOK-54's system-triggered compensation, always the full amount)
+and this ticket's guest-voluntary, policy-based partial refund call the identical
+function. Putting it in `service.py` rather than `saga.py` matters for the same reason
+the next paragraph does: `create_refund()` doesn't decide anything or branch on an
+outcome — it's a mechanical "make this refund happen and record it" primitive, exactly
+like `create_payment()` is for charges, not a saga concern. A refund created here that
+times out is resolved later by exactly the same webhook (`resolve_payment_and_react`)
+BOOK-55 already built — no new async-resolution path needed for refunds specifically.
+
+**A zero-amount refund still creates a `Payment(REFUND)` row.** Considered skipping the
+provider call entirely when the calculated amount is 0 (refunding nothing to a real
+provider is a slightly odd call to make) — rejected in favor of one uniform code path:
+every cancellation of a paid reservation produces a real, queryable record that the
+policy was evaluated, rather than silence that later looks indistinguishable from a bug
+("did we forget to check the policy?" vs. "we checked, and it was zero").
+
+**Where the orchestration lives: a new `payment/cancellation.py`, not `reservation/service.py`
+and, after the terminal-action distinction above became explicit, not `saga.py` either.**
+`cancel_reservation_and_refund()` needs a `Payment` lookup and a `Property` lookup —
+`reservation/service.py` deliberately stays payment-agnostic (the same import-direction
+reasoning `saga.py`'s own module docstring gives for `react_to_payment_outcome`: payment
+already depends on reservation, not the reverse, so adding the refund logic here avoids a
+circular import rather than fighting one). It started out living in `saga.py` for
+exactly that reason — but a file named `saga.py` implying something is a saga step when
+it structurally isn't (no branching, no compensation) was its own kind of wrong, so it
+moved to its own module once that became explicit, keeping "is this a saga decision"
+answerable from file layout alone, not just a comment. `reservation_service.cancel_reservation()`
+itself is completely unchanged — the guest ownership check and the actual `CANCELLED`
+transition are still exactly BOOK-38's code, just called from one level up now.
+
+**Refund amount returned in the same cancel response, not a separate preview
+endpoint.** `ReservationCancelRead` adds one field (`refund_amount_cents`) to the normal
+reservation response. A dedicated preview-then-confirm flow was considered and rejected:
+the calculation is a pure function of policy + "how far ahead of check-in is *right
+now*," so a preview call would still need to run again at actual-cancel time anyway (time
+moves between the two calls, especially near a boundary) — a preview doesn't save any
+work, it only adds a second place that has to agree with the first. The property's
+policy terms are meant to be visible to the guest before booking (BOOK-99), not
+discovered for the first time at the moment of cancelling.
+
+**Real bug found and fixed while wiring this, not part of the original plan:**
+`property/service.py`'s `create_property()` did `Property(host_id=host_id,
+**data.model_dump())` — since the new `cancellation_policy` field is optional on
+`PropertyCreate`, an omitted value dumps as `None` and gets passed to the model
+constructor explicitly, overriding its own `MODERATE` default with an explicit `NULL` and
+violating the column's `NOT NULL` constraint on insert. Fixed with `exclude_unset=True`,
+matching what `update_property()` already did one function below it for the identical
+reason. Confirmed live: created a property with no policy specified, verified it landed
+as `MODERATE`, not a crash.
+
+**Revisit when:** BOOK-99 (showing the policy in the UI) actually needs the exact
+plain-language copy per tier — this doc's cutoffs are the source of truth for that copy,
+not the other way around.
+
 ---
 
 ## Cheat sheet
@@ -470,3 +668,11 @@ the seam that move should happen through.
 | BOOK-55 webhook payload | `outcome` excludes `TIMEOUT` by type | Never — a webhook is always a final answer, never another "unknown" |
 | BOOK-55 webhook auth | HMAC-SHA256 over the raw body, not a shared-secret header | Never — matches real providers' own convention, no contract change needed later |
 | BOOK-55 webhook trigger | Manual script (`scripts/simulate_provider_webhook.py`), `send_webhook()` factored out | Once an automatic trigger (e.g. Celery-scheduled) is built — swap the caller, not the signing logic |
+| BOOK-76 policy ownership | Per-`Property`, defaults `MODERATE` | Never — matches real platforms, each host sets their own listing's terms |
+| BOOK-76 refund calculation | Pure function (`cancellation_policy.py`), no DB access | Never — keeps every boundary unit-testable without a database |
+| BOOK-76 `check_in` as an instant | Treated as midnight UTC of that date | If a real per-listing check-in *time* ever gets modeled |
+| BOOK-76 refund processing | Reuses BOOK-54/55's `create_refund()`/webhook, not a second implementation | Never — a timed-out policy refund resolves via the exact same webhook |
+| BOOK-76 zero-amount refund | Still creates a `Payment(REFUND)` row | Never — a real record beats silence that looks like a missed check |
+| BOOK-76 orchestration location | New `payment/cancellation.py` — not `reservation/service.py` (import direction), not `saga.py` (not a saga step) | Never — file layout should show "is this a saga decision" without needing a comment |
+| BOOK-76 `create_refund()` location | `payment/service.py`, mirroring `create_payment()` | Never — it's a mechanical primitive, not a saga concern |
+| BOOK-76 refund preview | Same response as the cancel action, no separate preview call | Never — a preview would still have to recompute at actual-cancel time anyway |
