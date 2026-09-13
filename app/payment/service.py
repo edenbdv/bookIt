@@ -19,6 +19,11 @@ class ReservationNotFoundError(Exception):
     pass
 
 
+# BOOK-55: webhook references a payment id we don't have
+class PaymentNotFoundError(Exception):
+    pass
+
+
 class NotReservationGuestError(Exception):
     pass
 
@@ -79,9 +84,12 @@ async def create_payment(
     )
     uow.payments.add(payment)
     await uow.session.flush()
+    # BOOK-55: commit before the external call, so this PENDING row (and
+    # payment.id, the correlation id) survives a crash during charge()
+    await uow.session.commit()
 
     # BOOK-52's mock -- outcome maps to the payment's real status below
-    outcome = charge(payment.amount_cents, force=force)
+    outcome = charge(payment.amount_cents, correlation_id=payment.id, force=force)
     payment.status = OUTCOME_TO_STATUS[outcome]
     return payment
 

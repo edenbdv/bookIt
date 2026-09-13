@@ -99,3 +99,21 @@ Here the `app` container does **not** use your local `.env` — [docker-compose.
 - App running **inside Docker** → talks to infra via the service name (`db`, `redis`), which Docker's internal network resolves for you
 
 That's why there are two different sets of connection strings — `.env` for Workflow A, and the `environment:` block in `docker-compose.yml` for Workflow B — rather than one shared config.
+
+## Simulating a payment provider webhook (BOOK-55)
+
+`scripts/simulate_provider_webhook.py` plays the part of a real payment provider calling
+back later with a charge's result -- see `docs/payment/webhook-basics.md` and
+`docs/payment/payment-decisions.md` §8. It's a real HTTP call against your actual running
+app, signed the same way the real endpoint expects (`app/payment/webhook_auth.py`).
+
+To try it: find (or create) a `Payment` row that's `PENDING` -- e.g. one whose charge was
+forced to `TIMEOUT`, or crashed mid-call -- then:
+
+```bash
+uv run python scripts/simulate_provider_webhook.py <payment_id> success
+```
+
+(`failure` also works.) A `200 {"status":"ok"}` means the app accepted it -- the payment's
+`status` and, if it was a `CHARGE`, the reservation's `status` update immediately, the same
+way they would from a real provider's callback.

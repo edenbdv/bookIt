@@ -10,10 +10,14 @@ go through. TIMEOUT means we don't know -- the charge may have succeeded on
 the provider's side with the response lost in transit. A saga that treats
 a timeout as a clean failure and retries risks a double charge; that's a
 BOOK-53 idempotency concern, not something resolved here.
+
+BOOK-55: `correlation_id` is required so a real provider's webhook has
+something to echo back later (webhook-basics.md §2). Unused by this mock.
 """
 
 import enum
 import random
+import uuid
 
 
 class PaymentOutcome(str, enum.Enum):
@@ -39,12 +43,16 @@ def _resolve_outcome(force: PaymentOutcome | None) -> PaymentOutcome:
 
 
 # amount_cents is unused by design -- outcome is never derived from it, see module docstring
-def charge(amount_cents: int, *, force: PaymentOutcome | None = None) -> PaymentOutcome:
+def charge(
+    amount_cents: int, *, correlation_id: uuid.UUID, force: PaymentOutcome | None = None
+) -> PaymentOutcome:
     return _resolve_outcome(force)
 
 
 # BOOK-54's compensating action for a charge that succeeded but couldn't be
 # confirmed -- same three-outcome shape as charge(), since a refund attempt
 # can itself succeed/fail/timeout against a real provider
-def refund(amount_cents: int, *, force: PaymentOutcome | None = None) -> PaymentOutcome:
+def refund(
+    amount_cents: int, *, correlation_id: uuid.UUID, force: PaymentOutcome | None = None
+) -> PaymentOutcome:
     return _resolve_outcome(force)
