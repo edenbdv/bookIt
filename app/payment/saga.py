@@ -9,6 +9,12 @@ acting, so a repeat call is a no-op, not an IllegalTransitionError.
 
 BOOK-55: `resolve_payment_and_react()` below is the webhook's entrypoint
 into this saga -- resolves a PENDING payment, then reacts to it.
+
+BOOK-76: guest-initiated cancellation (payment/cancellation.py) is
+deliberately NOT in this file -- it isn't a saga step (payment-decisions.md
+§9: nothing branches on its refund's outcome, no compensation), just a
+caller of service.create_refund(), the same external-call durability
+machinery _refund_and_release below uses for an actual saga step.
 """
 
 import logging
@@ -18,7 +24,6 @@ from app.core.db.unit_of_work import UnitOfWork
 from app.payment import service
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.provider import PaymentOutcome
-from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
 from app.reservation import service as reservation_service
 from app.reservation.models import Reservation, ReservationStatus
@@ -69,20 +74,7 @@ async def _refund_and_release(uow: UnitOfWork, payment: Payment, reservation: Re
     await uow.session.rollback()  # discard confirm_reservation()'s half-mutated state
     reservation = await uow.reservations.get_by_id(reservation_id)
 
-    # BOOK-55: mint + commit PENDING before calling the provider, same as
-    # service.create_payment() -- refund_payment.id is the correlation id
-    refund_payment = Payment(
-        reservation_id=reservation.id,
-        kind=PaymentKind.REFUND,
-        amount_cents=amount_cents,
-        status=PaymentStatus.PENDING,
-    )
-    uow.payments.add(refund_payment)
-    await uow.session.flush()
-    await uow.session.commit()
-
-    outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
-    refund_payment.status = service.OUTCOME_TO_STATUS[outcome]
+    await service.create_refund(uow, reservation, amount_cents)
     # unconditional -- the hold releases either way (unchanged from BOOK-54)
     reservation_service.cancel_reservation_system(uow, reservation)
     await uow.session.commit()

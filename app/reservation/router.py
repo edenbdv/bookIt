@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
+from app.payment import cancellation as payment_cancellation
 from app.reservation import service
 from app.reservation.models import Reservation
-from app.reservation.schemas import ReservationCreate, ReservationRead
+from app.reservation.schemas import ReservationCancelRead, ReservationCreate, ReservationRead
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
 
@@ -74,8 +75,11 @@ async def confirm_reservation(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-# guest-only (BOOK-38) -- host-initiated cancellation is BOOK-80, not this
-@router.post("/{reservation_id}/cancel", response_model=ReservationRead)
+# guest-only (BOOK-38) -- host-initiated cancellation is BOOK-80, not this.
+# BOOK-76: routes through payment.cancellation, not service.cancel_reservation
+# directly -- refund calculation needs the payment/property lookups the
+# reservation module deliberately doesn't know about (cancellation.py's docstring).
+@router.post("/{reservation_id}/cancel", response_model=ReservationCancelRead)
 async def cancel_reservation(
     reservation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -83,7 +87,9 @@ async def cancel_reservation(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
-        return await service.cancel_reservation(uow, reservation_id, current_user.id)
+        return await payment_cancellation.cancel_reservation_and_refund(
+            uow, reservation_id, current_user.id
+        )
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
