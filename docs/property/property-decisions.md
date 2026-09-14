@@ -263,3 +263,40 @@ own within one poll tick — no reload.
 **Not live-tested:** the ~50s "gave up, still pending" path — would need an actual 50s
 wait to observe; the logic itself is a plain, fixed attempt-count cap with nothing
 non-deterministic in it, so this was left to code review rather than a real-time wait.
+
+## 5. BOOK-86: write-a-review UI — reuse the host-side form, don't rebuild it
+
+**The gap:** `POST /reservations/{id}/reviews` existed since `BOOK-73` with no client at
+all — reviews could only be *read* on a property page. The ticket named two hard
+blockers before this was even buildable: no reservation could ever reach `COMPLETED`
+(the review endpoint's own requirement), and no `GET /reservations` existed to find
+which stay to review. Both are now resolved — `BOOK-103` and `BOOK-85` respectively —
+which is what made this ticket actually startable.
+
+**Chosen: extract, don't rebuild.** `PropertyReservations.tsx` (BOOK-102) already had a
+complete review form — rating select, comment, submit to `createReview()` — for the
+*host* reviewing a *guest*. Pulled into a shared `ReviewForm.tsx` (a `placeholder` prop
+is the only thing that differs by direction) and reused as-is on `MyBookings.tsx`'s
+`COMPLETED` rows for the *guest* reviewing the *property*. No new backend code at all —
+the endpoint already handled both directions server-side, inferring which from
+`author_id`.
+
+**Scoped to guest→property only**, matching the ticket's own recommendation — the
+host→guest direction (already built via `PropertyReservations.tsx`) has nowhere to
+*read* those reviews back yet (`BOOK-87`, not picked up), so that half was already
+correctly out of scope before this ticket started.
+
+**No pre-check for "already reviewed."** The ticket flagged this as an "ideally," not a
+requirement — same call as `BOOK-98`'s payment retry: let the real `409`
+("You have already reviewed this reservation") do the job instead of adding a lookup
+just to avoid ever seeing it. `ReviewForm`'s error handling is already generic (any
+`ApiError`'s `.message`), so this needed zero new code, not even a special case.
+
+**Verified live:** submitted a real review as Carol on a fresh `COMPLETED` reservation
+→ `201`, "Review submitted." shown on the correct row. Confirmed the duplicate case
+directly against the API using Bob's already-reviewed seed reservation → `409` with the
+expected message; not re-verified through the browser since the rendering path is the
+exact same unchanged code already proven for other errors this session.
+
+**Testing:** none new — this was pure UI reuse around an endpoint whose behavior was
+already correct and unchanged. Backend suite (83 tests) is untouched.

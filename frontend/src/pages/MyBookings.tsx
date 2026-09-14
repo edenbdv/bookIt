@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, cancelReservation, getProperty, listMyReservations, payReservation } from '../api/client'
+import { ReviewForm } from '../components/ReviewForm'
 import { Spinner } from '../components/Spinner'
 import { useAuth } from '../context/useAuth'
 import type { PropertyDetail, Reservation } from '../types'
@@ -29,6 +30,10 @@ export function MyBookings() {
   const [rowActions, setRowActions] = useState<Record<string, RowAction>>({})
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
+  // BOOK-86: which COMPLETED row is showing its review form, and which
+  // ones already got one this session -- same pattern as PropertyReservations
+  const [reviewingId, setReviewingId] = useState<string | null>(null)
+  const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set())
   // populated once a cancel actually returns -- 0 is a real "no refund"
   // answer, not "unknown" (same convention as PropertyReservations)
   const [refundByReservationId, setRefundByReservationId] = useState<Record<string, number>>({})
@@ -285,6 +290,29 @@ export function MyBookings() {
                       </button>
                     )}
                   </div>
+                )}
+
+                {r.status === 'completed' && !reviewedIds.has(r.id) && reviewingId !== r.id && (
+                  <button
+                    type="button"
+                    onClick={() => setReviewingId(r.id)}
+                    className="mt-2 text-sm font-semibold text-accent-ink hover:underline"
+                  >
+                    Leave a review
+                  </button>
+                )}
+                {r.status === 'completed' && reviewingId === r.id && (
+                  <ReviewForm
+                    reservationId={r.id}
+                    placeholder="How was your stay?"
+                    onDone={() => {
+                      setReviewedIds((prev) => new Set(prev).add(r.id))
+                      setReviewingId(null)
+                    }}
+                  />
+                )}
+                {r.status === 'completed' && reviewedIds.has(r.id) && (
+                  <p className="mt-2 text-sm text-ink-soft">Review submitted.</p>
                 )}
               </li>
             )
