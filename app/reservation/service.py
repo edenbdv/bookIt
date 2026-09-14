@@ -60,6 +60,10 @@ class NotReservationGuestError(Exception):
     pass
 
 
+class NotPropertyHostError(Exception):
+    pass
+
+
 # CANCELLED and COMPLETED map to an empty set: terminal states, no legal
 # transition out of either. BOOK-38 (cancel) and any future confirm/complete
 # logic should go through transition_to() below rather than setting
@@ -145,6 +149,18 @@ async def cancel_reservation(
         raise NotReservationGuestError
     cancel_reservation_system(uow, reservation)
     return reservation
+
+
+# BOOK-102: a host's own bookings view, for the "my properties" page
+async def list_reservations_for_property(
+    uow: UnitOfWork, property_id: uuid.UUID, current_user_id: uuid.UUID
+) -> list[Reservation]:
+    property_ = await uow.properties.get_active_by_id(property_id)
+    if property_ is None:
+        raise PropertyNotFoundError
+    if property_.host_id != current_user_id:
+        raise NotPropertyHostError
+    return await uow.reservations.list_by_property_id(property_id)
 
 
 # BOOK-46. Called from app/worker.py's scheduled task, which owns

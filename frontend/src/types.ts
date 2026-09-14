@@ -54,6 +54,24 @@ export interface PropertyDetail extends PropertyBase {
   photos: PropertyPhoto[]
 }
 
+// app/property/schemas.py's PropertyCreate -- BOOK-102
+export interface PropertyCreate {
+  title: string
+  description: string
+  city: string
+  country: string
+  max_guests: number
+  price_per_night_cents: number
+  cancellation_policy?: CancellationPolicy
+}
+
+// app/property/schemas.py's PropertyRead -- the create endpoint's response
+// shape. Unlike PropertyBase, has no rating_avg/review_count/cover_photo:
+// those are only computed by the list/detail endpoints (BOOK-77), never by
+// create/update, so they'd always be absent here -- see PropertyRead's own
+// comment in schemas.py
+export type PropertyCreated = Omit<PropertyBase, 'rating_avg' | 'review_count'>
+
 export type PropertySort = 'price' | 'recommended'
 
 export interface PropertyFilters {
@@ -116,6 +134,12 @@ export interface Payment {
   amount_cents: number
   status: PaymentStatus
   created_at: string
+}
+
+// app/review/schemas.py's ReviewCreate -- BOOK-102
+export interface ReviewCreate {
+  rating: number
+  comment: string
 }
 
 export interface Review {

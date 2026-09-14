@@ -8,7 +8,11 @@ function loadSession(): Session | null {
   const raw = localStorage.getItem(STORAGE_KEY)
   if (!raw) return null
   try {
-    return JSON.parse(raw) as Session
+    const parsed = JSON.parse(raw) as Session
+    // a session persisted before userId existed can't be repaired client-side
+    // -- treat it as logged out rather than crash pages that need it
+    if (!parsed.userId) return null
+    return parsed
   } catch {
     return null
   }
@@ -32,6 +36,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const inFlightRefresh = useRef<Promise<string | null> | null>(null)
 
   const persist = useCallback((next: Session | null) => {
+    // set synchronously, not just via the render-time assignment above --
+    // login() below needs authHooks to see the new token immediately after
+    // persist() returns, before this component has necessarily re-rendered
+    sessionRef.current = next
     setSession(next)
     if (next) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
@@ -51,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const tokens = await api.refreshTokens(current.refreshToken!)
         persist({
           email: current.email,
+          userId: current.userId,
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
         })
@@ -102,10 +111,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function login(email: string, password: string) {
     const tokens = await api.login(email, password)
+    // persist the tokens first so getMe() below has a session to authenticate
+    // with (via sessionRef, updated synchronously in persist()), then persist
+    // again once the user's own id is known
+    persist({ email, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, userId: '' })
+    const me = await api.getMe()
     persist({
       email,
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
+      userId: me.id,
     })
   }
 

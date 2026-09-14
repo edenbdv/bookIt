@@ -58,6 +58,7 @@ async def list_properties(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     city: str | None = None,
+    host_id: uuid.UUID | None = None,
     guests: int | None = Query(default=None, gt=0),
     min_price_cents: int | None = Query(default=None, ge=0),
     max_price_cents: int | None = Query(default=None, ge=0),
@@ -91,6 +92,7 @@ async def list_properties(
         limit,
         offset,
         city,
+        host_id,
         guests,
         min_price_cents,
         max_price_cents,
@@ -137,6 +139,11 @@ async def delete_property(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only this property's host may delete it",
+        ) from exc
+    except service.PropertyHasActiveReservationsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This property has a pending or confirmed reservation and can't be deleted",
         ) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
