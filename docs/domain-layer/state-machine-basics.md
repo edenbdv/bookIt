@@ -53,7 +53,7 @@ async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Res
 
 **This is a placeholder for who calls `transition_to()`, not a change to the rule itself.** Once `BOOK-10` exists, the real trigger becomes a payment webhook — on payment success, the webhook handler calls `transition_to(reservation, ReservationStatus.CONFIRMED)` internally, the same function this endpoint already calls. The confirmation doesn't *cause* payment; it's the reverse — payment succeeding is what's supposed to cause confirmation, and this endpoint exists only because that real cause isn't wired up yet. When `BOOK-10` lands, this manual route may get locked down or repurposed, but `transition_to()` and its table don't need to change at all — exactly the point of putting the check in one place.
 
-Same reasoning applies to `confirmed → completed`: that's conceptually "the checkout date passed," owned by Epic 6's (`BOOK-8`) not-yet-built background job. No manual stand-in for it exists yet because `BOOK-37`'s scope is the transition table plus one testable trigger (confirm), not every trigger.
+Same reasoning applies to `confirmed → completed`: conceptually "the checkout date passed." Unlike `pending → confirmed` above, this one didn't need a manual stand-in — once the real trigger (a background job checking `check_out`) existed, it called `transition_to()` directly, same as every other caller (`docs/domain-layer/reservation-lifecycle.md` §7).
 
 ## 5. Why `IllegalTransitionError`, not a plain `ValueError`
 

@@ -51,6 +51,15 @@ async def expire_pending_reservations() -> None:
         await reservation_service.expire_pending_reservations(uow)
 
 
+@app.task
+@async_task
+async def complete_past_reservations() -> None:
+    """Unblocks BOOK-86: CONFIRMED -> COMPLETED past check_out.
+    Thin wrapper, same shape as expire_pending_reservations above."""
+    async with UnitOfWork() as uow:
+        await reservation_service.complete_past_reservations(uow)
+
+
 @app.task(
     autoretry_for=_TRANSIENT_SMTP_ERRORS,
     retry_backoff=True,

@@ -215,6 +215,18 @@ async def expire_pending_reservations(uow: UnitOfWork) -> int:
     return len(reservations)
 
 
+# unblocks BOOK-86 (write-a-review UI): CONFIRMED -> COMPLETED had no code
+# path anywhere before this -- the review endpoint requires COMPLETED, so
+# without this nothing a guest actually books could ever become reviewable.
+# No outbox event, unlike confirm/cancel above -- nothing consumes a
+# "completed" notification yet; reviews are read on demand, not pushed.
+async def complete_past_reservations(uow: UnitOfWork) -> int:
+    reservations = await uow.reservations.list_confirmed_past_checkout(datetime.now(UTC).date())
+    for reservation in reservations:
+        transition_to(reservation, ReservationStatus.COMPLETED)
+    return len(reservations)
+
+
 async def create_reservation(
     uow: UnitOfWork, data: ReservationCreate, guest_id: uuid.UUID
 ) -> Reservation:

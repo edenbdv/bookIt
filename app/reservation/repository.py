@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -55,6 +55,19 @@ class ReservationRepository(BaseRepository[Reservation]):
         result = await self.session.execute(
             select(Reservation)
             .where(Reservation.status == ReservationStatus.PENDING, Reservation.expires_at < now)
+            .with_for_update()
+        )
+        return list(result.scalars())
+
+    # same FOR UPDATE reasoning as list_expired_pending above -- check_out
+    # is treated as midnight UTC of that date (same convention BOOK-76's
+    # refund calculation already uses)
+    async def list_confirmed_past_checkout(self, today: date) -> list[Reservation]:
+        result = await self.session.execute(
+            select(Reservation)
+            .where(
+                Reservation.status == ReservationStatus.CONFIRMED, Reservation.check_out <= today
+            )
             .with_for_update()
         )
         return list(result.scalars())

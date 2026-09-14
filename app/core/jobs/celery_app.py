@@ -77,6 +77,14 @@ app.conf.beat_schedule = {
         "task": "app.worker.reconcile_stale_payments",
         "schedule": 60.0,
     },
+    # Unblocks BOOK-86. Hourly, not the expiry job's 60s -- unlike an
+    # expiring hold, nothing is time-critical about marking a stay
+    # complete, but same-day is still worth it so a guest can review soon
+    # after checkout.
+    "complete-past-reservations": {
+        "task": "app.worker.complete_past_reservations",
+        "schedule": crontab(minute=0),
+    },
     # BOOK-50. Deliberately more frequent than the expiry job -- publish
     # latency here is user-facing (a guest's confirmation/cancellation
     # notification), not an internal cleanup, so it's worth a tighter poll
