@@ -151,3 +151,8 @@ async def logout_all(current_user: User = Depends(get_current_user)) -> None:
     """Sign out every device. Authenticated by access token, not refresh, so a
     user who has lost a device can do it from a session they still hold."""
     await _with_token_store(service.logout_all(current_user.id))
+
+
+@router.get("/me", response_model=UserRead)
+async def get_me(current_user: User = Depends(get_current_user)) -> User:
+    return current_user

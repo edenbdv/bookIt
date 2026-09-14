@@ -32,6 +32,15 @@ class NotPropertyOwnerError(Exception):
     pass
 
 
+# BOOK-102: without this, a delisted property's guest keeps a valid,
+# untouched CONFIRMED reservation with nowhere left to see it -- the
+# property 404s (get_active_by_id excludes it) and there's still no "my
+# bookings" list (BOOK-85/BOOK-98). Not raised for CANCELLED/COMPLETED --
+# those have nothing left to disrupt.
+class PropertyHasActiveReservationsError(Exception):
+    pass
+
+
 async def create_property(uow: UnitOfWork, data: PropertyCreate, host_id: uuid.UUID) -> Property:
     # exclude_unset: an omitted cancellation_policy dumps as None otherwise,
     # which would override the model's own MODERATE default with an explicit
@@ -160,6 +169,8 @@ async def delete_property(uow: UnitOfWork, id: uuid.UUID, current_user_id: uuid.
     # over 403 for a real property you don't own
     if property_.host_id != current_user_id:
         raise NotPropertyOwnerError
+    if await uow.reservations.has_active_by_property_id(id):
+        raise PropertyHasActiveReservationsError
     # deliberately NOT uow.properties.delete(property_) -- that's the
     # inherited BaseRepository hard delete, which core/README.md's
     # "repository.py" section explicitly says won't stop misuse; soft

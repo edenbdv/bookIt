@@ -34,6 +34,12 @@ export function Header() {
 
       {session ? (
         <div className="flex items-center gap-3">
+          <Link
+            to="/host/properties"
+            className="rounded-full border border-ground/30 px-4 py-2 text-sm font-semibold text-ground hover:bg-ground/10"
+          >
+            My Properties
+          </Link>
           <div className="flex items-center gap-2 text-sm text-ground/85">
             <span className="flex h-7 w-7 items-center justify-center rounded-full bg-ground text-xs font-bold uppercase text-accent-ink">
               {session.email.charAt(0)}

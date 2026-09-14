@@ -13,12 +13,17 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User, UserRole
+from app.auth.security import hash_password
 from app.core.db.models import Base
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus
 from app.review.models import Review
+
+# BOOK-102: a real hash, not a placeholder -- lets every seeded account below
+# actually log in through the UI with this password, for manual testing
+SEED_PASSWORD_HASH = hash_password("password123")
 
 # fixed UUIDs, not uuid4() -- re-running this script must generate the same
 # ids every time so the get-or-create checks below actually find prior rows.
@@ -72,7 +77,7 @@ async def seed(uow: UnitOfWork) -> None:
         HOST_ALICE,
         email="alice.host@example.com",
         display_name="Alice",
-        hashed_password="seed-data-not-a-real-hash",
+        hashed_password=SEED_PASSWORD_HASH,
         role=UserRole.USER,
     )
     host_bob = await get_or_create(
@@ -81,7 +86,7 @@ async def seed(uow: UnitOfWork) -> None:
         HOST_BOB,
         email="bob.host@example.com",
         display_name="Bob",
-        hashed_password="seed-data-not-a-real-hash",
+        hashed_password=SEED_PASSWORD_HASH,
         role=UserRole.USER,
     )
     guest_carol = await get_or_create(
@@ -90,7 +95,7 @@ async def seed(uow: UnitOfWork) -> None:
         GUEST_CAROL,
         email="carol.guest@example.com",
         display_name="Carol",
-        hashed_password="seed-data-not-a-real-hash",
+        hashed_password=SEED_PASSWORD_HASH,
         role=UserRole.USER,
     )
     guest_dave = await get_or_create(
@@ -99,7 +104,7 @@ async def seed(uow: UnitOfWork) -> None:
         GUEST_DAVE,
         email="dave.guest@example.com",
         display_name="Dave",
-        hashed_password="seed-data-not-a-real-hash",
+        hashed_password=SEED_PASSWORD_HASH,
         role=UserRole.USER,
     )
 

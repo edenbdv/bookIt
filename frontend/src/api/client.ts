@@ -1,5 +1,7 @@
 import type {
   Payment,
+  PropertyCreate,
+  PropertyCreated,
   PropertyDetail,
   PropertyFilters,
   PropertyListItem,
@@ -7,6 +9,7 @@ import type {
   ReservationCancelRead,
   ReservationCreate,
   Review,
+  ReviewCreate,
   Tokens,
   User,
 } from '../types'
@@ -109,6 +112,12 @@ export function login(email: string, password: string): Promise<Tokens> {
   )
 }
 
+// BOOK-102: how the frontend learns the logged-in user's own id -- the
+// access token isn't decoded client-side, so this is the only source
+export function getMe(): Promise<User> {
+  return request<User>('/auth/me')
+}
+
 export function refreshTokens(refreshToken: string): Promise<Tokens> {
   // mints a fresh pair, but does NOT invalidate the refresh token spent to
   // get it -- that one stays valid for its full refresh_token_expire_days
@@ -152,6 +161,32 @@ export function getPropertyReviews(propertyId: string): Promise<Review[]> {
 
 export function listCities(): Promise<string[]> {
   return request<string[]>('/properties/cities')
+}
+
+// BOOK-102: the "My Properties" page's own listing -- a plain filter on the
+// same public endpoint Feed uses, same as filtering by city
+export function listPropertiesByHost(hostId: string): Promise<PropertyListItem[]> {
+  return request<PropertyListItem[]>(`/properties?limit=100&host_id=${hostId}`)
+}
+
+export function createProperty(data: PropertyCreate): Promise<PropertyCreated> {
+  return request<PropertyCreated>('/properties', { method: 'POST', body: JSON.stringify(data) })
+}
+
+export function deleteProperty(id: string): Promise<void> {
+  return request<void>(`/properties/${id}`, { method: 'DELETE' })
+}
+
+// host-only (403 for anyone else) -- app/reservation/router.py
+export function listReservationsForProperty(propertyId: string): Promise<Reservation[]> {
+  return request<Reservation[]>(`/properties/${propertyId}/reservations`)
+}
+
+export function createReview(reservationId: string, data: ReviewCreate): Promise<Review> {
+  return request<Review>(`/reservations/${reservationId}/reviews`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
 }
 
 // BOOK-83. Kept separate from payReservation below -- two distinct calls,

@@ -20,6 +20,20 @@ class ReservationRepository(BaseRepository[Reservation]):
         )
         return list(result.scalars())
 
+    # BOOK-102: guards property deletion -- PENDING/CONFIRMED are the two
+    # non-terminal statuses (reservation/service.py's _LEGAL_TRANSITIONS);
+    # a CANCELLED or COMPLETED one has nothing left to disrupt
+    async def has_active_by_property_id(self, property_id: UUID) -> bool:
+        stmt = (
+            select(Reservation.id)
+            .where(
+                Reservation.property_id == property_id,
+                Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.CONFIRMED]),
+            )
+            .limit(1)
+        )
+        return await self.session.scalar(stmt) is not None
+
     # BOOK-46: locked (FOR UPDATE) rather than a plain SELECT -- the caller
     # still has to run transition_to() on each row (a Python-level check, not
     # expressible as a WHERE clause), so the lock is what keeps that

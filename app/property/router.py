@@ -140,6 +140,11 @@ async def delete_property(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only this property's host may delete it",
         ) from exc
+    except service.PropertyHasActiveReservationsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This property has a pending or confirmed reservation and can't be deleted",
+        ) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
 
