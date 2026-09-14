@@ -6,6 +6,7 @@ from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.provider import PaymentOutcome
 from app.payment.service import (
     NotReservationGuestError,
+    PendingChargeExistsError,
     ReservationNotFoundError,
     ReservationNotPayableError,
     create_payment,
@@ -24,11 +25,17 @@ class FakeSession:
 
 
 class FakePaymentRepository:
-    def __init__(self) -> None:
+    def __init__(self, pending_charge: Payment | None = None) -> None:
         self.added: list[Payment] = []
+        self._pending_charge = pending_charge
 
     def add(self, payment: Payment) -> None:
         self.added.append(payment)
+
+    async def get_pending_charge_by_reservation_id(
+        self, reservation_id: uuid.UUID
+    ) -> Payment | None:
+        return self._pending_charge
 
 
 class FakeReservationRepository:
@@ -40,9 +47,11 @@ class FakeReservationRepository:
 
 
 class FakeUnitOfWork:
-    def __init__(self, reservation: Reservation | None) -> None:
+    def __init__(
+        self, reservation: Reservation | None, pending_charge: Payment | None = None
+    ) -> None:
         self.reservations = FakeReservationRepository(reservation)
-        self.payments = FakePaymentRepository()
+        self.payments = FakePaymentRepository(pending_charge)
         self.session = FakeSession()
 
 
@@ -117,3 +126,23 @@ async def test_timeout_outcome_leaves_payment_pending() -> None:
     payment = await create_payment(uow, uuid.uuid4(), guest_id, force=PaymentOutcome.TIMEOUT)
 
     assert payment.status == PaymentStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_retry_while_a_charge_is_still_pending_is_rejected() -> None:
+    # simulates: an earlier attempt timed out and is still unresolved --
+    # a second attempt must not start a second, independent charge
+    guest_id = uuid.uuid4()
+    reservation = Reservation(
+        guest_id=guest_id, status=ReservationStatus.PENDING, total_cents=10_000
+    )
+    stuck_payment = Payment(
+        reservation_id=uuid.uuid4(),
+        kind=PaymentKind.CHARGE,
+        amount_cents=10_000,
+        status=PaymentStatus.PENDING,
+    )
+    uow = FakeUnitOfWork(reservation, pending_charge=stuck_payment)
+
+    with pytest.raises(PendingChargeExistsError):
+        await create_payment(uow, uuid.uuid4(), guest_id, force=PaymentOutcome.SUCCESS)

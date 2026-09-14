@@ -4,6 +4,7 @@ import type {
   PropertyFilters,
   PropertyListItem,
   Reservation,
+  ReservationCancelRead,
   ReservationCreate,
   Review,
   Tokens,
@@ -184,6 +185,8 @@ export function payReservation(reservationId: string, idempotencyKey: string): P
   })
 }
 
-export function cancelReservation(id: string): Promise<Reservation> {
-  return request<Reservation>(`/reservations/${id}/cancel`, { method: 'POST' })
+// BOOK-76: response now also carries refund_amount_cents -- always a
+// concrete number (0 if there was nothing to refund), never absent
+export function cancelReservation(id: string): Promise<ReservationCancelRead> {
+  return request<ReservationCancelRead>(`/reservations/${id}/cancel`, { method: 'POST' })
 }

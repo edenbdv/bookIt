@@ -25,6 +25,9 @@ export interface PropertyPhoto {
   created_at: string
 }
 
+// app/property/models.py's CancellationPolicy -- keep in sync by hand
+export type CancellationPolicy = 'flexible' | 'moderate' | 'strict'
+
 export interface PropertyBase {
   id: string
   host_id: string
@@ -34,6 +37,7 @@ export interface PropertyBase {
   country: string
   max_guests: number
   price_per_night_cents: number
+  cancellation_policy: CancellationPolicy
   created_at: string
   // BOOK-77 review aggregate, on both the list and detail responses (but not
   // create/update). null rating_avg means "no reviews yet", which the UI
@@ -93,6 +97,13 @@ export interface Reservation {
   // status === 'pending'; don't render it otherwise.
   expires_at: string | null
   created_at: string
+}
+
+// app/reservation/schemas.py's ReservationCancelRead -- BOOK-76
+export interface ReservationCancelRead extends Reservation {
+  // 0 when there was nothing to refund (never charged, or the policy/timing
+  // zeroed it out) -- always a concrete number, never null
+  refund_amount_cents: number
 }
 
 // app/payment/models.py's PaymentStatus -- keep in sync by hand

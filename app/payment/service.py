@@ -1,3 +1,5 @@
+import asyncio
+import random
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +16,17 @@ from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
 from app.reservation.models import Reservation, ReservationStatus
+
+# real card networks/issuing banks take real time to answer -- this mock
+# resolves in zero time otherwise, which reads as fake ("did that actually
+# charge anything?") rather than fast. provider.py stays a pure, sync
+# decision function; the latency belongs here, at the layer that's
+# actually standing in for "calling out to a real external system".
+_SIMULATED_PROVIDER_LATENCY_SECONDS = (0.4, 1.2)
+
+
+async def _simulate_provider_latency() -> None:
+    await asyncio.sleep(random.uniform(*_SIMULATED_PROVIDER_LATENCY_SECONDS))
 
 
 class ReservationNotFoundError(Exception):
@@ -32,6 +45,16 @@ class NotReservationGuestError(Exception):
 # BOOK-53 only accepts a charge against a PENDING reservation -- one already
 # confirmed/cancelled/completed has nothing left to pay for or against
 class ReservationNotPayableError(Exception):
+    pass
+
+
+# a TIMEOUT leaves the reservation itself still 'pending' (react_to_payment_
+# outcome no-ops on a PENDING payment), so nothing else blocks a guest from
+# retrying -- without this guard, an impatient retry starts a second,
+# independent charge attempt while the first's real outcome is still
+# unknown. If the first one *did* actually go through, that's a double
+# charge with no automatic refund, not just a UX annoyance.
+class PendingChargeExistsError(Exception):
     pass
 
 
@@ -76,6 +99,12 @@ async def create_payment(
     if reservation.status != ReservationStatus.PENDING:
         raise ReservationNotPayableError
 
+    # blocks a second charge attempt while an earlier TIMEOUT for this
+    # reservation is still unresolved -- see PendingChargeExistsError
+    existing_pending = await uow.payments.get_pending_charge_by_reservation_id(reservation.id)
+    if existing_pending is not None:
+        raise PendingChargeExistsError
+
     # record the attempt before calling the provider, not after
     payment = Payment(
         reservation_id=reservation.id,
@@ -88,6 +117,11 @@ async def create_payment(
     # BOOK-55: commit before the external call, so this PENDING row (and
     # payment.id, the correlation id) survives a crash during charge()
     await uow.session.commit()
+
+    # skipped when force= is set -- tests/scripts pin a deterministic
+    # outcome specifically to run fast and not wait on this
+    if force is None:
+        await _simulate_provider_latency()
 
     # BOOK-52's mock -- outcome maps to the payment's real status below
     outcome = charge(payment.amount_cents, correlation_id=payment.id, force=force)
@@ -161,6 +195,7 @@ async def create_refund(uow: UnitOfWork, reservation: Reservation, amount_cents:
     await uow.session.flush()
     await uow.session.commit()
 
+    await _simulate_provider_latency()
     outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
     refund_payment.status = OUTCOME_TO_STATUS[outcome]
     return refund_payment

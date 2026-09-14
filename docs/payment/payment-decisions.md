@@ -645,13 +645,56 @@ as `MODERATE`, not a crash.
 plain-language copy per tier — this doc's cutoffs are the source of truth for that copy,
 not the other way around.
 
+## 10. Two small, related fixes found by asking "why does paying feel instant?"
+
+**Simulated provider latency.** `provider.py`'s mock resolved in zero time, which read
+as fake rather than fast — a real card charge involves real network hops (card network,
+issuing bank) that take actual time, even on the synchronous happy path. Added
+`service._simulate_provider_latency()`: a random 0.4-1.2s `asyncio.sleep()` right before
+calling `charge()`/`provider_refund()`, on both the charge and refund paths. Skipped
+whenever `force=` is set, so `force=`-driven tests and verification scripts stay fast and
+deterministic — the delay is for realism, not correctness, and has no business slowing
+down anything that already knows its answer. This replaced an equivalent fake delay that
+had been living in `BookingForm.tsx` (a `MIN_LOADING_MS` + `Promise.all` trick) — moved to
+the backend so *any* client of this API gets realistic timing, not just this one button.
+
+**`PendingChargeExistsError` — closing a retry gap `TIMEOUT` left open.** Once a charge
+times out, the `Payment` stays `PENDING` but `react_to_payment_outcome()` no-ops on a
+`PENDING` payment (by design — nothing to react to yet), which means the *reservation*
+stays `PENDING`/payable too. Nothing was stopping a guest from clicking "Pay & confirm"
+again in that state: `create_payment_idempotent()`'s dedup only fires on a *reused*
+idempotency key, and the frontend mints a fresh one on every click, so a retry sails
+straight past it into a second, fully independent charge attempt. Since `TIMEOUT`
+specifically means "might have actually succeeded, we don't know," that second attempt
+succeeding is a real double charge, with no record anywhere that a refund is owed.
+
+**Chosen:** `create_payment()` now checks `uow.payments.get_pending_charge_by_reservation_id()`
+right after the existing reservation-payable check, before minting a new `Payment` row.
+A hit raises `PendingChargeExistsError` → `409` ("a previous payment attempt for this
+reservation is still processing"). The repository method takes *any* matching row, not
+`scalar_one_or_none()` — unlike the succeeded-charge lookup (backed by a real unique
+index), nothing stops multiple `PENDING` rows from accumulating across retries, so this
+can't assume at most one match.
+
+**Why this was only fixable now, not a gap in the original design:** blocking "a second
+attempt while an earlier one is unresolved" requires a durable record that an earlier
+attempt *exists* — which is exactly what committing the row `PENDING` before calling the
+provider (BOOK-55) already provides. The guard is new; the durability it depends on
+isn't.
+
+**Revisit when:** never for the mechanism — this is a permanent, always-needed guard, not
+a stopgap. If BOOK-98's automatic `TIMEOUT` resolution ever gets built, this guard is what
+makes the waiting period *safe*, not just visible.
+
 ---
 
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
 |---|---|---|
-| BOOK-52 outcome selection | Weighted random (90/8/2), `force=` for determinism | Never for the mechanism; add real latency if a retry/backoff ticket needs to exercise actual timing |
+| BOOK-52 outcome selection | Weighted random (90/8/2), `force=` for determinism | Never for the mechanism |
+| Simulated provider latency | Random 0.4-1.2s before calling charge()/refund(), skipped when `force=` is set | Never — realism for real use, zero cost to tests |
+| Retry racing an unresolved `TIMEOUT` | `PendingChargeExistsError` (409) blocks a second charge attempt while one's still `PENDING` | Never — permanent guard, not a stopgap |
 | BOOK-52 TIMEOUT vs FAILURE | Two distinct outcomes, not one — timeout means "unknown," not "confirmed failed" | Never — this distinction is load-bearing for BOOK-53's idempotency design |
 | BOOK-53 `IdempotencyKeyStatus.COMPLETED` on timeout | Marked COMPLETED anyway — it tracks the request attempt, not the payment outcome | Never — a retry must not re-charge an unresolved payment regardless of this naming |
 | `IdempotencyKey.expires_at` cleanup | Daily delete (`core/idempotency/cleanup.py`), not archive | A real need for auditing expired attempts shows up |

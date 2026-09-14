@@ -38,8 +38,10 @@ export function AuthForm({ mode }: Props) {
 
   return (
     <div className="mx-auto mt-16 max-w-sm px-6">
-      <h1 className="text-2xl font-bold">{isLogin ? 'Welcome back' : 'Create your account'}</h1>
-      <p className="mt-1 text-sm text-gray-500">
+      <h1 className="font-display text-2xl font-medium text-ink">
+        {isLogin ? 'Welcome back' : 'Create your account'}
+      </h1>
+      <p className="mt-1 text-sm text-ink-soft">
         {isLogin ? 'Log in to continue' : 'Join BookIt to start browsing'}
       </p>
 
@@ -48,32 +50,32 @@ export function AuthForm({ mode }: Props) {
 
         {!isLogin && (
           <div>
-            <label className="mb-1.5 block text-sm font-semibold">Name</label>
+            <label className="mb-1.5 block text-sm font-semibold text-ink">Name</label>
             <input
               type="text"
               required
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Shown on your reviews"
-              className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-gray-400 focus:outline-none"
+              className="w-full rounded-lg border border-line px-3 py-2.5 text-sm text-ink focus:border-accent focus:outline-none"
             />
           </div>
         )}
 
         <div>
-          <label className="mb-1.5 block text-sm font-semibold">Email</label>
+          <label className="mb-1.5 block text-sm font-semibold text-ink">Email</label>
           <input
             type="email"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@example.com"
-            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-gray-400 focus:outline-none"
+            className="w-full rounded-lg border border-line px-3 py-2.5 text-sm text-ink focus:border-accent focus:outline-none"
           />
         </div>
 
         <div>
-          <label className="mb-1.5 block text-sm font-semibold">Password</label>
+          <label className="mb-1.5 block text-sm font-semibold text-ink">Password</label>
           <input
             type="password"
             required
@@ -81,31 +83,31 @@ export function AuthForm({ mode }: Props) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={isLogin ? '' : 'At least 8 characters'}
-            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-gray-400 focus:outline-none"
+            className="w-full rounded-lg border border-line px-3 py-2.5 text-sm text-ink focus:border-accent focus:outline-none"
           />
         </div>
 
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-lg bg-red-600 py-2.5 font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+          className="w-full rounded-lg bg-accent py-2.5 font-semibold text-white hover:bg-accent-ink disabled:opacity-60"
         >
           {submitting ? 'Please wait...' : isLogin ? 'Log in' : 'Sign up'}
         </button>
       </form>
 
-      <p className="mt-5 text-center text-sm text-gray-500">
+      <p className="mt-5 text-center text-sm text-ink-soft">
         {isLogin ? (
           <>
             New here?{' '}
-            <Link to="/signup" className="font-semibold text-red-600">
+            <Link to="/signup" className="font-semibold text-accent-ink">
               Create an account
             </Link>
           </>
         ) : (
           <>
             Already have an account?{' '}
-            <Link to="/login" className="font-semibold text-red-600">
+            <Link to="/login" className="font-semibold text-accent-ink">
               Log in
             </Link>
           </>

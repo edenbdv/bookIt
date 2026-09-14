@@ -23,3 +23,19 @@ class PaymentRepository(BaseRepository[Payment]):
             )
         )
         return result.scalar_one_or_none()
+
+    # no unique constraint backs this one -- a TIMEOUT can genuinely leave
+    # more than one PENDING charge for the same reservation (each retry
+    # mints its own row), so this takes any one as "there's already an
+    # attempt in flight", not the only possible match
+    async def get_pending_charge_by_reservation_id(
+        self, reservation_id: uuid.UUID
+    ) -> Payment | None:
+        result = await self.session.execute(
+            select(Payment).where(
+                Payment.reservation_id == reservation_id,
+                Payment.kind == PaymentKind.CHARGE,
+                Payment.status == PaymentStatus.PENDING,
+            )
+        )
+        return result.scalars().first()
