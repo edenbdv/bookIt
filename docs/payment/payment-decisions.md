@@ -686,6 +686,61 @@ isn't.
 a stopgap. If BOOK-98's automatic `TIMEOUT` resolution ever gets built, this guard is what
 makes the waiting period *safe*, not just visible.
 
+## 11. BOOK-101: a reconciliation worker — the pull counterpart to BOOK-55's push
+
+**The gap this closes:** the webhook (§8) is the only path back from `PENDING` today. If
+it never arrives — lost delivery, provider outage, or (in dev) nobody runs
+`scripts/simulate_provider_webhook.py` by hand — the `Payment` stays `PENDING` forever,
+and BOOK-100's guard (§10) means the reservation is permanently stuck too. Real providers
+say this explicitly: don't rely on webhooks alone. The standard answer is a reconciliation
+job that periodically asks "what's the true status of X" for anything `PENDING` too long,
+instead of only ever waiting to be told.
+
+**The full flow, end to end:**
+1. Celery Beat fires `app.worker.reconcile_stale_payments` every 60s (`celery_app.py`'s
+   `beat_schedule`, same mechanism as BOOK-46's `expire_pending_reservations`).
+2. The task opens a `UnitOfWork` and delegates to `saga.reconcile_stale_payments(uow,
+   older_than)`, where `older_than` is now minus a 5-minute threshold.
+3. `uow.payments.list_stale_pending(older_than)` finds every `Payment` still `PENDING`
+   past that cutoff — both `CHARGE` and `REFUND`, either can get stuck this way.
+4. For each one, `provider.check_status()` asks the mock "what really happened" — and
+   `resolve_payment_and_react()`, the *same function the webhook itself calls*, resolves
+   it and (for a `CHARGE`) confirms or cancels the reservation.
+
+**Chosen: reuse `resolve_payment_and_react()`, don't duplicate it.** Reconciliation isn't
+a second way to resolve a payment — it's a second way to *trigger* the one resolution
+path that already exists, redelivery-safe guard included for free.
+
+**Chosen: `check_status()` can never return `TIMEOUT`.** `charge()`/`refund()` can time
+out because they're a fresh attempt that might not get an answer in time. A status
+*check* is a lookup against the provider's own already-decided record — a real provider's
+equivalent (e.g. "retrieve payment intent") always returns a definite state — so the mock
+only rolls `SUCCESS`/`FAILURE` (90/10).
+
+**Two knobs, not one:** the task *runs* every 60s, but only *acts* on payments already
+past the 5-minute threshold. Frequent runs keep detection latency low once something is
+actually stuck; the threshold keeps it from ever touching a payment still normally
+in flight.
+
+**Doesn't replace the manual webhook trigger.** §8's "Revisit when" row (the webhook
+trigger row in the cheat sheet below) anticipated "an automatic trigger" for the webhook
+itself — this isn't that. `scripts/simulate_provider_webhook.py` still simulates the
+provider calling *us*; BOOK-101 is a wholly separate path for when that call never
+comes, not a replacement for it.
+
+**Testing:** `reconcile_stale_payments()`'s own logic (find stale rows, check each,
+resolve each) is unit-tested — no-stale-payments, multi-payment resolution, and a stale
+`REFUND` resolving without touching a reservation. Verified live against the real
+database too: a payment backdated past the threshold resolved correctly (`SUCCEEDED` →
+reservation `CONFIRMED`), while a freshly created `PENDING` payment was correctly left
+untouched. That live run also surfaced an unrelated pre-existing debris row (a duplicate
+`PENDING` charge from days earlier, predating BOOK-100's guard) — cleaned up as test
+hygiene, not a bug in this ticket.
+
+**Revisit when:** a real payment provider exists — `check_status()`'s mock weights and
+the 5-minute threshold are both guesses standing in for a real provider's actual API and
+actual latency characteristics.
+
 ---
 
 ## Cheat sheet
@@ -719,3 +774,7 @@ makes the waiting period *safe*, not just visible.
 | BOOK-76 orchestration location | New `payment/cancellation.py` — not `reservation/service.py` (import direction), not `saga.py` (not a saga step) | Never — file layout should show "is this a saga decision" without needing a comment |
 | BOOK-76 `create_refund()` location | `payment/service.py`, mirroring `create_payment()` | Never — it's a mechanical primitive, not a saga concern |
 | BOOK-76 refund preview | Same response as the cancel action, no separate preview call | Never — a preview would still have to recompute at actual-cancel time anyway |
+| BOOK-101 reconciliation trigger | Celery Beat, 60s, same mechanism as BOOK-46's expiry job | Never — matches the existing periodic-task pattern |
+| BOOK-101 resolution logic | Reuses `resolve_payment_and_react()` — no second copy of BOOK-55's logic | Never — one resolution path regardless of push (webhook) or pull (this worker) |
+| BOOK-101 `check_status()` outcomes | `SUCCESS`/`FAILURE` only, never `TIMEOUT` | Never — a status check answers about an already-decided outcome, unlike a fresh attempt |
+| BOOK-101 staleness threshold | 5 minutes, checked every 60s | A real provider exists with known latency characteristics |

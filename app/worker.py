@@ -7,6 +7,7 @@ Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md 
 
 import smtplib
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from app.core.db.engine import async_task
 from app.core.db.unit_of_work import UnitOfWork
@@ -15,7 +16,12 @@ from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
 from app.notification import service as notification_service
+from app.payment import saga as payment_saga
 from app.reservation import service as reservation_service
+
+# BOOK-101: how long a payment sits PENDING before it's treated as stuck,
+# not just still in flight
+_STALE_PAYMENT_THRESHOLD = timedelta(minutes=5)
 
 # BOOK-47: transient only (retry-basics.md §1). Excludes
 # SMTPRecipientsRefused/SMTPSenderRefused -- a bad address won't fix itself.
@@ -65,6 +71,17 @@ async def send_reservation_received_email(reservation_id: str) -> None:
     """
     async with UnitOfWork() as uow:
         await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))
+
+
+@app.task
+@async_task
+async def reconcile_stale_payments() -> None:
+    """BOOK-101: resolve PENDING payments the webhook never confirmed.
+    Thin wrapper, same shape as expire_pending_reservations above."""
+    async with UnitOfWork() as uow:
+        await payment_saga.reconcile_stale_payments(
+            uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
+        )
 
 
 @app.task

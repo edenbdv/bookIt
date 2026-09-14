@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -39,3 +40,13 @@ class PaymentRepository(BaseRepository[Payment]):
             )
         )
         return result.scalars().first()
+
+    # BOOK-101: both kinds -- a REFUND can be left PENDING too
+    async def list_stale_pending(self, older_than: datetime) -> list[Payment]:
+        result = await self.session.execute(
+            select(Payment).where(
+                Payment.status == PaymentStatus.PENDING,
+                Payment.created_at < older_than,
+            )
+        )
+        return list(result.scalars())
