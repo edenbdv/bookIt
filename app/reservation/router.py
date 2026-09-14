@@ -99,10 +99,7 @@ async def list_reservations_for_property(
         ) from exc
 
 
-# guest-only (BOOK-38) -- host-initiated cancellation is BOOK-80, not this.
-# BOOK-76: routes through payment.cancellation, not service.cancel_reservation
-# directly -- refund calculation needs the payment/property lookups the
-# reservation module deliberately doesn't know about (cancellation.py's docstring).
+# guest-only -- host-initiated cancellation is the separate endpoint below
 @router.post("/reservations/{reservation_id}/cancel", response_model=ReservationCancelRead)
 async def cancel_reservation(
     reservation_id: uuid.UUID,
@@ -122,6 +119,32 @@ async def cancel_reservation(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only this reservation's guest may cancel it",
+        ) from exc
+    except service.IllegalTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+# BOOK-80: host-initiated cancellation, always a full refund. No penalty/
+# strike system -- deferred, see docs/property/property-decisions.md
+@router.post("/reservations/{reservation_id}/host-cancel", response_model=ReservationCancelRead)
+async def host_cancel_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
+    uow: UnitOfWork = Depends(get_uow),
+) -> Reservation:
+    try:
+        return await payment_cancellation.host_cancel_reservation_and_refund(
+            uow, reservation_id, current_user.id
+        )
+    except service.ReservationNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
+        ) from exc
+    except service.NotPropertyHostError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this reservation's property host may cancel it",
         ) from exc
     except service.IllegalTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

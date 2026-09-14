@@ -194,6 +194,12 @@ export function listReservationsForProperty(propertyId: string): Promise<Reserva
   return request<Reservation[]>(`/properties/${propertyId}/reservations`)
 }
 
+// BOOK-80: host-only (403 otherwise), always a full refund -- see
+// property-decisions.md §2
+export function hostCancelReservation(id: string): Promise<ReservationCancelRead> {
+  return request<ReservationCancelRead>(`/reservations/${id}/host-cancel`, { method: 'POST' })
+}
+
 export function createReview(reservationId: string, data: ReviewCreate): Promise<Review> {
   return request<Review>(`/reservations/${reservationId}/reviews`, {
     method: 'POST',

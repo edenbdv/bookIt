@@ -44,3 +44,22 @@ async def cancel_reservation_and_refund(
     # cover_photo/rating_avg)
     reservation.refund_amount_cents = refund_amount_cents
     return reservation
+
+
+# BOOK-80: host-cancel counterpart -- always a full refund, never
+# calculate_refund_cents' policy-based partial (property-decisions.md)
+async def host_cancel_reservation_and_refund(
+    uow: UnitOfWork, reservation_id: uuid.UUID, current_user_id: uuid.UUID
+) -> Reservation:
+    reservation = await reservation_service.host_cancel_reservation(
+        uow, reservation_id, current_user_id
+    )
+
+    charge_payment = await uow.payments.get_succeeded_charge_by_reservation_id(reservation.id)
+    refund_amount_cents = 0
+    if charge_payment is not None:
+        refund_amount_cents = charge_payment.amount_cents
+        await service.create_refund(uow, reservation, refund_amount_cents)
+
+    reservation.refund_amount_cents = refund_amount_cents
+    return reservation

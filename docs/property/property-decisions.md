@@ -101,8 +101,50 @@ the rest is reasonably left as "this is what real apps do," not re-implemented.
 ### 1.6 What this unblocks
 
 BOOK-80 (host-initiated cancellation) was deprioritized earlier specifically because
-there was no host UI to trigger it from — that blocker is gone now. BOOK-98/BOOK-85
-(a live-updating payment UI, and `GET /reservations/{id}`) remain untouched; this
-ticket's `GET /properties/{id}/reservations` answers "reservations for one property",
-not "one reservation by id" or "my reservations as a guest" — a different, still-open
-gap.
+there was no host UI to trigger it from — that blocker is gone now (see §2). BOOK-98/
+BOOK-85 (a live-updating payment UI, and `GET /reservations/{id}`) remain untouched;
+this ticket's `GET /properties/{id}/reservations` answers "reservations for one
+property", not "one reservation by id" or "my reservations as a guest" — a different,
+still-open gap.
+
+## 2. BOOK-80: host-initiated cancellation is a distinct endpoint, always a full refund
+
+**Chosen:** `POST /reservations/{id}/host-cancel`, a separate endpoint from the
+guest-only `POST /reservations/{id}/cancel` — not the same endpoint with a broadened
+auth check. The two have genuinely different consequences (refund rule, caller,
+eventual notification), so branching one endpoint on "who's calling" would hide two
+different actions behind one code path. `reservation/service.py`'s
+`host_cancel_reservation()` checks `property.host_id`, not `reservation.guest_id`, but
+shares the same `cancel_reservation_system()` transition underneath — so it inherits the
+same state machine for free: legal from `PENDING`/`CONFIRMED`, a `409` from
+`CANCELLED`/`COMPLETED`.
+
+**Refund rule:** always the full charged amount, never `calculate_refund_cents()`'s
+policy-based partial — a guest shouldn't eat a cancellation penalty for the host's
+decision. Concretely: `PENDING` (never charged) refunds `0`, and `CONFIRMED` refunds the
+full charge even same-day or past check-in, where a guest-initiated cancel would return
+`0` under the property's policy. Verified live against real seeded data, both cases.
+
+**Deliberately deferred:** a penalty/strike system for hosts (no such concept exists in
+the data model at all — a real feature on its own, not a small addition here), and
+host-cancel-specific notification copy (`send_reservation_cancelled_email`'s own
+docstring already stays neutral on purpose, "fires for both an explicit cancel and a
+silent auto-expiry" — host-cancel is just a third source that same neutral wording
+already covers, for free, today).
+
+**Testing gap, inherited, not introduced here:** `host_cancel_reservation_and_refund()`
+(the payment-orchestration layer) has no unit test, same as its guest-side sibling
+`cancel_reservation_and_refund` never had one — both call `service.create_refund()`,
+which has no `force=` override and always calls the real mock provider with its random
+weighted outcome and unconditional simulated latency. Verified live instead (three
+authorization/state cases, plus both refund cases above), matching how the guest-side
+version was verified when it shipped. `reservation/service.py`'s own
+`host_cancel_reservation()` (the authorization + transition layer, no payment call) is
+fully unit-tested — 5 cases, deterministic, no provider involved.
+
+**Frontend:** a "Cancel reservation" action on `PENDING`/`CONFIRMED` rows in the host's
+bookings list (`PropertyReservations.tsx`), inline-confirmed the same way as
+`HostProperties`' delete-property flow — no browser `confirm()`/`alert()`. Once it
+returns, the row's status badge updates in place and shows the refund outcome
+("Refunded $X in full" or "No refund — never charged"), matching `BookingForm`'s own
+guest-side cancel messaging.

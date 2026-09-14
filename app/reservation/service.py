@@ -133,9 +133,7 @@ async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Res
     return reservation
 
 
-# guest-only for now (BOOK-38) -- host-initiated cancellation is a
-# different, penalized action on real platforms (refund/notification/strike
-# behavior all differ), split off to BOOK-80 rather than folded in here
+# guest-only -- host-initiated cancellation is host_cancel_reservation below
 async def cancel_reservation(
     uow: UnitOfWork, reservation_id: uuid.UUID, current_user_id: uuid.UUID
 ) -> Reservation:
@@ -147,6 +145,21 @@ async def cancel_reservation(
     # same order as property/service.py's update_property
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
+    cancel_reservation_system(uow, reservation)
+    return reservation
+
+
+# BOOK-80: host-cancel counterpart to cancel_reservation -- authorized by
+# property host, not reservation guest
+async def host_cancel_reservation(
+    uow: UnitOfWork, reservation_id: uuid.UUID, current_user_id: uuid.UUID
+) -> Reservation:
+    reservation = await uow.reservations.get_by_id(reservation_id)
+    if reservation is None:
+        raise ReservationNotFoundError
+    property_ = await uow.properties.get_by_id(reservation.property_id)
+    if property_.host_id != current_user_id:
+        raise NotPropertyHostError
     cancel_reservation_system(uow, reservation)
     return reservation
 
