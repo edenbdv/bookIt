@@ -34,6 +34,18 @@ class ReservationRepository(BaseRepository[Reservation]):
         )
         return await self.session.scalar(stmt) is not None
 
+    # BOOK-85: a guest's own bookings view, paginated -- same order as
+    # list_by_property_id, newest first
+    async def list_by_guest_id(self, guest_id: UUID, limit: int, offset: int) -> list[Reservation]:
+        result = await self.session.execute(
+            select(Reservation)
+            .where(Reservation.guest_id == guest_id)
+            .order_by(Reservation.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars())
+
     # BOOK-46: locked (FOR UPDATE) rather than a plain SELECT -- the caller
     # still has to run transition_to() on each row (a Python-level check, not
     # expressible as a WHERE clause), so the lock is what keeps that

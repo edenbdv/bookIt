@@ -64,6 +64,13 @@ class NotPropertyHostError(Exception):
     pass
 
 
+# BOOK-85: same "participant" idea review/service.py's NotAParticipantError
+# already uses -- a reservation is visible to its own guest OR the
+# property's host, no one else
+class NotAParticipantError(Exception):
+    pass
+
+
 # CANCELLED and COMPLETED map to an empty set: terminal states, no legal
 # transition out of either. BOOK-38 (cancel) and any future confirm/complete
 # logic should go through transition_to() below rather than setting
@@ -174,6 +181,27 @@ async def list_reservations_for_property(
     if property_.host_id != current_user_id:
         raise NotPropertyHostError
     return await uow.reservations.list_by_property_id(property_id)
+
+
+# BOOK-85: a guest's own bookings view, for the "my bookings" page
+async def list_reservations_for_guest(
+    uow: UnitOfWork, guest_id: uuid.UUID, limit: int, offset: int
+) -> list[Reservation]:
+    return await uow.reservations.list_by_guest_id(guest_id, limit, offset)
+
+
+# BOOK-85: single fetch, visible to the reservation's own guest OR the
+# property's host -- same data either way, nothing branches on which
+async def get_reservation(
+    uow: UnitOfWork, reservation_id: uuid.UUID, current_user_id: uuid.UUID
+) -> Reservation:
+    reservation = await uow.reservations.get_by_id(reservation_id)
+    if reservation is None:
+        raise ReservationNotFoundError
+    property_ = await uow.properties.get_by_id(reservation.property_id)
+    if current_user_id not in (reservation.guest_id, property_.host_id):
+        raise NotAParticipantError
+    return reservation
 
 
 # BOOK-46. Called from app/worker.py's scheduled task, which owns
