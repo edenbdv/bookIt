@@ -1,5 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ApiError, createReview, listReservationsForProperty } from '../api/client'
+import {
+  ApiError,
+  createReview,
+  hostCancelReservation,
+  listReservationsForProperty,
+} from '../api/client'
 import type { Reservation } from '../types'
 import { formatPrice } from '../utils/format'
 
@@ -88,6 +93,38 @@ export function PropertyReservations({ propertyId }: { propertyId: string }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [reviewingId, setReviewingId] = useState<string | null>(null)
   const [reviewedIds, setReviewedIds] = useState<Set<string>>(new Set())
+  // BOOK-80: inline confirm (no browser confirm()/alert()), same pattern as
+  // HostProperties' delete-property flow
+  const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null)
+  const [cancellingId, setCancellingId] = useState<string | null>(null)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  // populated once a cancel actually returns -- 0 is a real "no refund"
+  // answer (e.g. a PENDING reservation was never charged), not "unknown"
+  const [refundByReservationId, setRefundByReservationId] = useState<Record<string, number>>({})
+
+  async function handleCancel(reservationId: string) {
+    setCancellingId(reservationId)
+    setCancelError(null)
+    try {
+      const cancelled = await hostCancelReservation(reservationId)
+      setState((prev) =>
+        prev.status === 'ready'
+          ? {
+              status: 'ready',
+              reservations: prev.reservations.map((r) =>
+                r.id === reservationId ? { ...r, status: cancelled.status } : r,
+              ),
+            }
+          : prev,
+      )
+      setRefundByReservationId((prev) => ({ ...prev, [reservationId]: cancelled.refund_amount_cents }))
+      setConfirmCancelId(null)
+    } catch (err) {
+      setCancelError(err instanceof ApiError ? err.message : 'Could not cancel this reservation.')
+    } finally {
+      setCancellingId(null)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -155,6 +192,49 @@ export function PropertyReservations({ propertyId }: { propertyId: string }) {
           )}
           {r.status === 'completed' && reviewedIds.has(r.id) && (
             <p className="mt-2 text-sm text-ink-soft">Review submitted.</p>
+          )}
+
+          {(r.status === 'pending' || r.status === 'confirmed') &&
+            (confirmCancelId === r.id ? (
+              <div className="mt-2 flex items-center gap-2">
+                <span className="text-sm text-ink-soft">Cancel this reservation?</span>
+                <button
+                  type="button"
+                  disabled={cancellingId === r.id}
+                  onClick={() => handleCancel(r.id)}
+                  className="rounded-lg bg-red-600 px-2.5 py-1 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                >
+                  {cancellingId === r.id ? 'Cancelling...' : 'Yes, cancel'}
+                </button>
+                <button
+                  type="button"
+                  disabled={cancellingId === r.id}
+                  onClick={() => setConfirmCancelId(null)}
+                  className="rounded-lg border border-line px-2.5 py-1 text-sm font-semibold text-ink hover:bg-ground"
+                >
+                  Keep it
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmCancelId(r.id)}
+                className="mt-2 text-sm font-semibold text-red-700 hover:underline"
+              >
+                Cancel reservation
+              </button>
+            ))}
+          {cancelError && confirmCancelId === r.id && (
+            <p role="alert" className="mt-2 text-sm text-red-700">
+              {cancelError}
+            </p>
+          )}
+          {r.status === 'cancelled' && refundByReservationId[r.id] !== undefined && (
+            <p className="mt-2 text-sm text-ink-soft">
+              {refundByReservationId[r.id] > 0
+                ? `Refunded ${formatPrice(refundByReservationId[r.id])} in full.`
+                : 'No refund -- this reservation was never charged.'}
+            </p>
           )}
         </li>
       ))}
