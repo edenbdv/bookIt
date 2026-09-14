@@ -72,6 +72,11 @@ app.conf.beat_schedule = {
         "task": "app.worker.expire_pending_reservations",
         "schedule": 60.0,
     },
+    # BOOK-101. Only acts on payments past _STALE_PAYMENT_THRESHOLD (5 min).
+    "reconcile-stale-payments": {
+        "task": "app.worker.reconcile_stale_payments",
+        "schedule": 60.0,
+    },
     # BOOK-50. Deliberately more frequent than the expiry job -- publish
     # latency here is user-facing (a guest's confirmation/cancellation
     # notification), not an internal cleanup, so it's worth a tighter poll

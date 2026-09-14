@@ -19,11 +19,13 @@ machinery _refund_and_release below uses for an actual saga step.
 
 import logging
 import uuid
+from datetime import datetime
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment import service
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.provider import PaymentOutcome
+from app.payment.provider import check_status as provider_check_status
 from app.payment.schemas import PaymentCreate
 from app.reservation import service as reservation_service
 from app.reservation.models import Reservation, ReservationStatus
@@ -122,3 +124,13 @@ async def resolve_payment_and_react(
         # only a CHARGE drives the reservation; a REFUND's hold already released
         await react_to_payment_outcome(uow, payment)
     return payment
+
+
+# BOOK-101: the pull counterpart to the webhook's push -- reuses
+# resolve_payment_and_react so both share the same redelivery-safe guarantee
+async def reconcile_stale_payments(uow: UnitOfWork, older_than: datetime) -> int:
+    stale = await uow.payments.list_stale_pending(older_than)  # find stuck rows
+    for payment in stale:
+        outcome = provider_check_status(correlation_id=payment.id)  # ask the provider
+        await resolve_payment_and_react(uow, payment.id, outcome)  # same resolver the webhook uses
+    return len(stale)

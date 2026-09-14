@@ -56,3 +56,22 @@ def refund(
     amount_cents: int, *, correlation_id: uuid.UUID, force: PaymentOutcome | None = None
 ) -> PaymentOutcome:
     return _resolve_outcome(force)
+
+
+# BOOK-101: never TIMEOUT -- a status check asks about an already-decided
+# outcome, not a fresh attempt that can go unanswered
+_STATUS_CHECK_WEIGHTS: dict[PaymentOutcome, float] = {
+    PaymentOutcome.SUCCESS: 0.90,
+    PaymentOutcome.FAILURE: 0.10,
+}
+
+
+def check_status(
+    *, correlation_id: uuid.UUID, force: PaymentOutcome | None = None
+) -> PaymentOutcome:
+    # BOOK-101: the "ask the provider directly" call
+    if force is not None:
+        return force
+    return random.choices(
+        list(_STATUS_CHECK_WEIGHTS), weights=list(_STATUS_CHECK_WEIGHTS.values()), k=1
+    )[0]
