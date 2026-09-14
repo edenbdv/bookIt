@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError, cancelReservation, getProperty, listMyReservations, payReservation } from '../api/client'
 import { Spinner } from '../components/Spinner'
 import { useAuth } from '../context/useAuth'
 import type { PropertyDetail, Reservation } from '../types'
 import { formatPrice } from '../utils/format'
+import { pollUntilResolved } from '../utils/pollReservation'
 
 type LoadState =
   | { status: 'loading' }
@@ -18,11 +19,10 @@ const STATUS_BADGE: Record<Reservation['status'], string> = {
   completed: 'bg-blue-100 text-blue-800',
 }
 
-type RowAction = 'idle' | 'paying' | 'cancelling'
+// BOOK-98: 'polling' covers a payment that came back 'pending' -- distinct
+// from 'paying' (the initial charge request itself is still in flight)
+type RowAction = 'idle' | 'paying' | 'cancelling' | 'polling'
 
-// BOOK-85: a static snapshot, not a live-updating one -- a PENDING booking
-// shows whatever its status was at page load. Keeping a still-processing
-// payment updating in real time is BOOK-98's separate scope.
 export function MyBookings() {
   const { session } = useAuth()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
@@ -32,6 +32,18 @@ export function MyBookings() {
   // populated once a cancel actually returns -- 0 is a real "no refund"
   // answer, not "unknown" (same convention as PropertyReservations)
   const [refundByReservationId, setRefundByReservationId] = useState<Record<string, number>>({})
+  // BOOK-98: a poll can run for up to ~50s -- long enough that navigating
+  // away mid-poll is realistic
+  const unmountedRef = useRef(false)
+  useEffect(() => {
+    // reset on (re)mount -- StrictMode's dev-only double-invoke (mount ->
+    // cleanup -> mount) would otherwise leave this stuck true from that
+    // first, throwaway cleanup, silently killing every poll's first check
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!session) return
@@ -74,6 +86,29 @@ export function MyBookings() {
     )
   }
 
+  // BOOK-98: shared by both paths that land on "a payment is already
+  // resolving for this reservation" -- a fresh 'pending' response, and a
+  // 409 from retrying while an earlier attempt is still stuck (below)
+  async function pollAndSettle(reservation: Reservation) {
+    setRowActions((prev) => ({ ...prev, [reservation.id]: 'polling' }))
+    const resolved = await pollUntilResolved(reservation.id, () => unmountedRef.current)
+    if (unmountedRef.current) return
+    if (resolved === null) {
+      setRowErrors((prev) => ({
+        ...prev,
+        [reservation.id]: 'This is taking longer than expected -- check back in a bit.',
+      }))
+      return
+    }
+    updateStatus(reservation.id, resolved.status)
+    if (resolved.status !== 'confirmed') {
+      setRowErrors((prev) => ({
+        ...prev,
+        [reservation.id]: 'Payment was declined -- this reservation has been released.',
+      }))
+    }
+  }
+
   // mirrors BookingForm's own confirm() -- a 201 with status 'succeeded'/
   // 'failed' is a hard guarantee confirm/cancel already happened server-side
   async function handlePay(reservation: Reservation) {
@@ -83,10 +118,7 @@ export function MyBookings() {
       const idempotencyKey = crypto.randomUUID()
       const payment = await payReservation(reservation.id, idempotencyKey)
       if (payment.status === 'pending') {
-        setRowErrors((prev) => ({
-          ...prev,
-          [reservation.id]: 'Payment is still processing -- try again in a moment.',
-        }))
+        await pollAndSettle(reservation)
         return
       }
       const succeeded = payment.status === 'succeeded'
@@ -98,6 +130,12 @@ export function MyBookings() {
         }))
       }
     } catch (err) {
+      // BOOK-100's guard: an earlier attempt already timed out and is still
+      // resolving -- go poll it instead of dead-ending on the raw 409
+      if (err instanceof ApiError && err.status === 409) {
+        await pollAndSettle(reservation)
+        return
+      }
       setRowErrors((prev) => ({
         ...prev,
         [reservation.id]: err instanceof ApiError ? err.message : 'Could not confirm this reservation.',
@@ -177,6 +215,12 @@ export function MyBookings() {
                   </span>
                 </div>
 
+                {action === 'polling' && (
+                  <p className="mt-2 flex items-center gap-2 text-sm text-amber-700">
+                    <Spinner /> Still confirming your payment -- this can take a little while.
+                  </p>
+                )}
+
                 {error && (
                   <p role="alert" className="mt-2 text-sm text-red-700">
                     {error}
@@ -200,8 +244,12 @@ export function MyBookings() {
                         onClick={() => handlePay(r)}
                         className="flex items-center gap-2 rounded-lg bg-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-accent-ink disabled:opacity-60"
                       >
-                        {action === 'paying' && <Spinner />}
-                        {action === 'paying' ? 'Processing payment...' : 'Pay & confirm'}
+                        {(action === 'paying' || action === 'polling') && <Spinner />}
+                        {action === 'paying'
+                          ? 'Processing payment...'
+                          : action === 'polling'
+                            ? 'Confirming...'
+                            : 'Pay & confirm'}
                       </button>
                     )}
 

@@ -213,6 +213,12 @@ export function listMyReservations(): Promise<Reservation[]> {
   return request<Reservation[]>('/reservations?limit=100')
 }
 
+// BOOK-98: what pollReservation.ts polls -- visible to the reservation's
+// guest or the property's host (app/reservation/router.py)
+export function getReservation(id: string): Promise<Reservation> {
+  return request<Reservation>(`/reservations/${id}`)
+}
+
 // BOOK-83. Kept separate from payReservation below -- two distinct calls,
 // not one "book it" action. idempotencyKey is caller-supplied (a fresh UUID
 // per attempt, reused only when retrying that exact attempt) since it's a

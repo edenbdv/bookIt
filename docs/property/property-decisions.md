@@ -203,3 +203,63 @@ the new pay/cancel actions were additionally verified live: real seeded accounts
 the authorization matrix, a freshly created unpaid reservation to confirm `PENDING`
 actually surfaces and pays through to `CONFIRMED`, then cancels with the correct refund
 message.
+
+## 4. BOOK-98: poll `GET /reservations/{id}` until a PENDING payment resolves
+
+**The gap this closes:** `BookingForm` and `MyBookings` both showed a one-off "still
+processing" message on a `pending` payment, then reset to idle with no way to find out
+what happened next short of clicking "Pay & confirm" again. Once BOOK-55's webhook (or
+BOOK-101's reconciliation worker) resolves it asynchronously, nothing told the browser —
+the backend discovering the truth and the guest's screen reflecting it are two separate
+problems, and this ticket is the second one.
+
+**Chosen: poll, not push** — already decided in `webhook-basics.md` §3, restated here
+because this is where it's actually implemented: a single guest watching their own
+booking doesn't need instant multi-client updates, so a WebSocket/SSE channel would be
+solving a problem this doesn't have.
+
+**What's polled:** `GET /reservations/{id}` (BOOK-85) — no new payment-status endpoint.
+Once the saga resolves the payment, `reservation.status` itself flips from `pending` to
+`confirmed`/`cancelled`, so the reservation is already the signal.
+
+**Shared, not duplicated:** `utils/pollReservation.ts`'s `pollUntilResolved()` — a
+2.5s interval, capped at ~50s total (~20 attempts) before giving up and telling the
+guest to check back later. The cap exists because, per `payment-decisions.md` §8, the
+webhook is manual-trigger-only in dev — polling with no cap would leave a guest staring
+at a spinner forever if nothing ever resolves it locally. Used by both `BookingForm`
+(the just-booked flow) and `MyBookings` (the revisit-later flow), which had the
+identical gap.
+
+**Extra, found while implementing, not part of the original ask:** retrying
+`payReservation()` on a reservation whose earlier attempt already timed out hits
+BOOK-100's `PendingChargeExistsError` guard — a `409`. That `409` was previously a
+dead-end error message, even though it literally means "a payment is already resolving
+for this one" — exactly the case polling exists for. Both `confirm()` and `handlePay()`
+now catch a `409` specifically and fall back to the same `pollAndSettle()` helper,
+rather than starting a poll only on a fresh `'pending'` response. This is the realistic
+path for a guest who closed the tab mid-`TIMEOUT` and came back later — the *original*
+payment attempt already returned, so there's no fresh `'pending'` response to trigger
+polling from; the retry's `409` is the only signal available.
+
+**A real StrictMode bug, caught by testing this live rather than trusting the code
+read:** both `unmountedRef` guards were being set to `true` immediately on mount, before
+any poll ever ran — React 18 `StrictMode`'s dev-only double-invoke (mount → cleanup →
+mount) runs the effect's cleanup once as part of that simulation, and a ref that's
+*only* ever set `true` in cleanup comes out of that already poisoned, even though the
+component is genuinely still mounted. Every poll's very first `isCancelled()` check
+returned `true` and aborted before making a single request — confirmed by watching the
+network log stay empty across three separate real attempts before tracing it to this.
+Fixed by resetting the ref to `false` at the top of the effect, not just setting it in
+the cleanup.
+
+**Verified live, end to end:** a script created a genuinely stuck `PENDING` payment
+(`force=TIMEOUT`, bypassing the mock's normal 2% odds) tied to a real reservation. In
+the browser: clicking "Pay & confirm" produced the expected `409`, the persistent
+"still confirming" state appeared, and the poll's `GET /reservations/{id}` showed up in
+the network log. Running `scripts/simulate_provider_webhook.py <payment_id> success`
+from a terminal resolved it, and the row flipped from `PENDING` to `CONFIRMED` on its
+own within one poll tick — no reload.
+
+**Not live-tested:** the ~50s "gave up, still pending" path — would need an actual 50s
+wait to observe; the logic itself is a plain, fixed attempt-count cap with nothing
+non-deterministic in it, so this was left to code review rather than a real-time wait.
