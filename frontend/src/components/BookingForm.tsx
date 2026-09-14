@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, cancelReservation, createReservation, payReservation } from '../api/client'
 import { useAuth } from '../context/useAuth'
@@ -6,6 +6,7 @@ import { Spinner } from './Spinner'
 import type { PropertyDetail, Reservation } from '../types'
 import { formatPrice } from '../utils/format'
 import { todayIso } from '../utils/dates'
+import { pollUntilResolved } from '../utils/pollReservation'
 
 interface Props {
   property: PropertyDetail
@@ -22,7 +23,10 @@ type BookingState =
   | {
       kind: 'reservation'
       reservation: Reservation
-      action: 'idle' | 'confirming' | 'cancelling'
+      // BOOK-98: 'polling' covers a payment that came back 'pending' --
+      // distinct from 'confirming' (the initial charge request itself is
+      // still in flight) so the two show different messages
+      action: 'idle' | 'confirming' | 'cancelling' | 'polling'
       actionError?: string
       // BOOK-76/99: set once a cancel actually returns -- 0 is a real "no
       // refund" answer, not "unknown", so this is only absent before any
@@ -56,6 +60,19 @@ export function BookingForm({ property }: Props) {
   const [guestCount, setGuestCount] = useState('1')
   const [validationError, setValidationError] = useState<string | null>(null)
   const [state, setState] = useState<BookingState>({ kind: 'form' })
+  // BOOK-98: a poll can run for up to ~50s -- long enough that a guest
+  // navigating away mid-poll is realistic, unlike the sub-2s requests this
+  // form otherwise makes
+  const unmountedRef = useRef(false)
+  useEffect(() => {
+    // reset on (re)mount -- StrictMode's dev-only double-invoke (mount ->
+    // cleanup -> mount) would otherwise leave this stuck true from that
+    // first, throwaway cleanup, silently killing every poll's first check
+    unmountedRef.current = false
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
 
   if (!session) {
     return (
@@ -107,6 +124,33 @@ export function BookingForm({ property }: Props) {
   // status 'succeeded'/'failed' is a hard guarantee confirm/cancel already
   // happened server-side (see client.ts's payReservation comment), so it's
   // safe to derive the reservation's new status here rather than re-fetch it.
+  // BOOK-98: shared by both paths that land on "a payment is already
+  // resolving for this reservation" -- a fresh 'pending' response, and a
+  // 409 from retrying while an earlier attempt is still stuck (below)
+  async function pollAndSettle(reservation: Reservation) {
+    setState({ kind: 'reservation', reservation, action: 'polling' })
+    const resolved = await pollUntilResolved(reservation.id, () => unmountedRef.current)
+    if (unmountedRef.current) return
+    if (resolved === null) {
+      setState({
+        kind: 'reservation',
+        reservation,
+        action: 'idle',
+        actionError: 'This is taking longer than expected -- check back in a bit.',
+      })
+      return
+    }
+    const resolvedSucceeded = resolved.status === 'confirmed'
+    setState({
+      kind: 'reservation',
+      reservation: resolved,
+      action: 'idle',
+      actionError: resolvedSucceeded
+        ? undefined
+        : 'Payment was declined -- this reservation has been released.',
+    })
+  }
+
   async function confirm(reservation: Reservation) {
     setState({ kind: 'reservation', reservation, action: 'confirming' })
     try {
@@ -114,12 +158,10 @@ export function BookingForm({ property }: Props) {
       const idempotencyKey = crypto.randomUUID()
       const payment = await payReservation(reservation.id, idempotencyKey)
       if (payment.status === 'pending') {
-        setState({
-          kind: 'reservation',
-          reservation,
-          action: 'idle',
-          actionError: 'Payment is still processing -- try again in a moment.',
-        })
+        // a persistent processing state, not a one-off error that resets to
+        // idle -- poll until BOOK-55's webhook (or BOOK-101's reconciliation
+        // worker) resolves it, or give up after ~50s
+        await pollAndSettle(reservation)
         return
       }
       const succeeded = payment.status === 'succeeded'
@@ -135,6 +177,12 @@ export function BookingForm({ property }: Props) {
           : 'Payment was declined -- this reservation has been released.',
       })
     } catch (err) {
+      // BOOK-100's guard: an earlier attempt already timed out and is still
+      // resolving -- go poll it instead of dead-ending on the raw 409
+      if (err instanceof ApiError && err.status === 409) {
+        await pollAndSettle(reservation)
+        return
+      }
       const message = err instanceof ApiError ? err.message : 'Could not confirm this reservation.'
       setState({ kind: 'reservation', reservation, action: 'idle', actionError: message })
     }
@@ -177,6 +225,12 @@ export function BookingForm({ property }: Props) {
           </p>
         )}
 
+        {action === 'polling' && (
+          <p className="mt-2 flex items-center gap-2 text-sm text-amber-700">
+            <Spinner /> Still confirming your payment -- this can take a little while.
+          </p>
+        )}
+
         {actionError && (
           <p role="alert" className="mt-2 text-sm text-red-700">
             {actionError}
@@ -204,8 +258,8 @@ export function BookingForm({ property }: Props) {
               onClick={() => confirm(reservation)}
               className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-ink disabled:opacity-70"
             >
-              {action === 'confirming' && <Spinner />}
-              {action === 'confirming' ? 'Processing payment...' : 'Pay & confirm'}
+              {(action === 'confirming' || action === 'polling') && <Spinner />}
+              {action === 'confirming' ? 'Processing payment...' : action === 'polling' ? 'Confirming...' : 'Pay & confirm'}
             </button>
           )}
           {(reservation.status === 'pending' || reservation.status === 'confirmed') && (
