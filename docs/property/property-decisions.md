@@ -148,3 +148,58 @@ bookings list (`PropertyReservations.tsx`), inline-confirmed the same way as
 returns, the row's status badge updates in place and shows the refund outcome
 ("Refunded $X in full" or "No refund — never charged"), matching `BookingForm`'s own
 guest-side cancel messaging.
+
+## 3. BOOK-85: read endpoints for reservations — two, not one, because they answer
+different questions
+
+**The gap:** `reservation/router.py` was write-only — `POST` create/confirm/cancel/
+host-cancel, but no `GET` at all. A guest could book, leave the tab, and never see that
+reservation again — it sits in the database exactly right, but the frontend has no way
+to ever ask for it back. Framed as more than a UX gap: it's the missing safety net for
+the `TIMEOUT`/`PENDING` resolution window BOOK-55/100/101 exist for — without a read
+path, nothing shows a guest whether their payment ever resolved once they leave
+checkout.
+
+**Chosen: two endpoints, not one shared endpoint, because they answer different
+questions.**
+* `GET /reservations` — "everything I've booked." Guest-only by construction
+  (`WHERE guest_id = current_user.id`) — no host branch to write at all.
+* `GET /reservations/{id}` — "this one reservation's state." Visible to either its own
+  guest **or** the property's host — the same "participant" idea `review/service.py`'s
+  `NotAParticipantError` already uses for reviews going both directions. One endpoint
+  here, unlike BOOK-80's split cancel actions, because this is a pure read: guest and
+  host see the identical data, nothing branches on who's asking beyond "are you allowed
+  to see this at all." BOOK-80 split because its two callers had different *effects*
+  (different refund rule, different mutation) — a read has no effects to differ.
+
+**Not filtered:** no status filter, no hiding an expired-but-not-yet-swept `PENDING`
+row (`BOOK-46`'s expiry job runs on its own schedule, so that window is real). Hiding it
+would hide real state from someone entitled to see it — same reasoning `TIMEOUT` was
+never collapsed into `FAILURE` elsewhere in this project.
+
+**Deliberately deferred:** a host-side aggregate across *every* property a host owns —
+BOOK-102 already gives a per-property view (`GET /properties/{id}/reservations`); a
+combined cross-property one is a separate, easy-to-add-later endpoint if actually
+wanted, not part of this ticket's original ask.
+
+**Frontend, expanded past the original "static list" plan:** partway through, it was
+clear a read-only list wasn't enough — a guest looking at a stuck `PENDING` booking had
+no way to actually act on it from this page. Those actions already existed
+(`payReservation`/`cancelReservation`), just reachable only from the exact tab that
+created the booking, via `BookingForm`. Added "Pay & confirm" and "Cancel" to each
+`PENDING`/`CONFIRMED` row on `MyBookings.tsx`, reusing that same status-derivation
+logic. `Spinner` was pulled out of `BookingForm.tsx` into its own component since it's
+now shared by both.
+
+**Still explicitly out of scope:** the list is a snapshot as of page load — a `PENDING`
+row doesn't update on its own if the payment resolves while the tab stays open. That's
+BOOK-98, which this ticket unblocks but doesn't implement.
+
+**Testing:** `get_reservation()`'s four cases (guest, host, unrelated third party,
+nonexistent id) are unit-tested. `list_reservations_for_guest()` is a thin,
+zero-branching delegation to the repository — not separately unit-tested, same
+precedent as `property/service.py`'s equally thin `list_cities()`. Both endpoints and
+the new pay/cancel actions were additionally verified live: real seeded accounts for
+the authorization matrix, a freshly created unpaid reservation to confirm `PENDING`
+actually surfaces and pays through to `CONFIRMED`, then cancels with the correct refund
+message.

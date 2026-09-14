@@ -35,6 +35,12 @@ export function Header() {
       {session ? (
         <div className="flex items-center gap-3">
           <Link
+            to="/my-bookings"
+            className="rounded-full border border-ground/30 px-4 py-2 text-sm font-semibold text-ground hover:bg-ground/10"
+          >
+            My Bookings
+          </Link>
+          <Link
             to="/host/properties"
             className="rounded-full border border-ground/30 px-4 py-2 text-sm font-semibold text-ground hover:bg-ground/10"
           >

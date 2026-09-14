@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
@@ -55,6 +55,41 @@ async def create_reservation(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This Idempotency-Key was already used with different request parameters",
+        ) from exc
+
+
+# BOOK-85: the caller's own bookings, newest first -- guest-only by
+# construction (WHERE guest_id = current_user.id), no host case to branch on
+@router.get("/reservations", response_model=list[ReservationRead])
+async def list_my_reservations(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
+    uow: UnitOfWork = Depends(get_uow),
+) -> list[Reservation]:
+    return await service.list_reservations_for_guest(uow, current_user.id, limit, offset)
+
+
+# BOOK-85: visible to this reservation's own guest OR the property's host --
+# same data either way, see service.get_reservation's own comment
+@router.get("/reservations/{reservation_id}", response_model=ReservationRead)
+async def get_reservation(
+    reservation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    _rl: None = Depends(enforce_user_rate_limit),
+    uow: UnitOfWork = Depends(get_uow),
+) -> Reservation:
+    try:
+        return await service.get_reservation(uow, reservation_id, current_user.id)
+    except service.ReservationNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
+        ) from exc
+    except service.NotAParticipantError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only this reservation's guest or property host may view it",
         ) from exc
 
 

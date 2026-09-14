@@ -207,6 +207,12 @@ export function createReview(reservationId: string, data: ReviewCreate): Promise
   })
 }
 
+// BOOK-85: the "My Bookings" page's own listing -- guest-only by
+// construction on the backend, no host_id equivalent needed here
+export function listMyReservations(): Promise<Reservation[]> {
+  return request<Reservation[]>('/reservations?limit=100')
+}
+
 // BOOK-83. Kept separate from payReservation below -- two distinct calls,
 // not one "book it" action. idempotencyKey is caller-supplied (a fresh UUID
 // per attempt, reused only when retrying that exact attempt) since it's a
