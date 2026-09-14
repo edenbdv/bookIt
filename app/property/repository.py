@@ -68,6 +68,7 @@ class PropertyRepository(BaseRepository[Property]):
         limit: int,
         offset: int,
         city: str | None = None,
+        host_id: UUID | None = None,
         guests: int | None = None,
         min_price_cents: int | None = None,
         max_price_cents: int | None = None,
@@ -105,6 +106,9 @@ class PropertyRepository(BaseRepository[Property]):
             # fine at today's data volume, worth revisiting if city search
             # ever shows up slow.
             candidate_ids = candidate_ids.where(func.lower(Property.city) == city.lower())
+            has_filters = True
+        if host_id is not None:
+            candidate_ids = candidate_ids.where(Property.host_id == host_id)
             has_filters = True
         if guests is not None:
             # guests = size of the group searching, NOT an upper bound --
