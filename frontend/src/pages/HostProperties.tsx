@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { ApiError, createProperty, deleteProperty, listPropertiesByHost } from '../api/client'
+import { PropertyPhotos } from '../components/PropertyPhotos'
 import { PropertyReservations } from '../components/PropertyReservations'
 import { useAuth } from '../context/useAuth'
 import type { CancellationPolicy, PropertyListItem } from '../types'
@@ -134,7 +135,8 @@ export function HostProperties() {
   const { session } = useAuth()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [showForm, setShowForm] = useState(false)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedBookingsId, setExpandedBookingsId] = useState<string | null>(null)
+  const [expandedPhotosId, setExpandedPhotosId] = useState<string | null>(null)
   // id pending a second click to actually delete, and any error from that
   // attempt -- inline confirmation, not a browser confirm()/alert() dialog,
   // to match how every other action in this app surfaces state and errors
@@ -243,13 +245,24 @@ export function HostProperties() {
                     </button>
                   </div>
                 ) : (
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => setExpandedId(expandedId === property.id ? null : property.id)}
+                      onClick={() =>
+                        setExpandedPhotosId(expandedPhotosId === property.id ? null : property.id)
+                      }
                       className="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold text-ink hover:bg-ground"
                     >
-                      {expandedId === property.id ? 'Hide bookings' : 'View bookings'}
+                      {expandedPhotosId === property.id ? 'Hide photos' : 'Manage photos'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedBookingsId(expandedBookingsId === property.id ? null : property.id)
+                      }
+                      className="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold text-ink hover:bg-ground"
+                    >
+                      {expandedBookingsId === property.id ? 'Hide bookings' : 'View bookings'}
                     </button>
                     <button
                       type="button"
@@ -268,7 +281,8 @@ export function HostProperties() {
                 </p>
               )}
 
-              {expandedId === property.id && <PropertyReservations propertyId={property.id} />}
+              {expandedPhotosId === property.id && <PropertyPhotos propertyId={property.id} />}
+              {expandedBookingsId === property.id && <PropertyReservations propertyId={property.id} />}
             </li>
           ))}
         </ul>

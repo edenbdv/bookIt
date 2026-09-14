@@ -5,6 +5,7 @@ import type {
   PropertyDetail,
   PropertyFilters,
   PropertyListItem,
+  PropertyPhoto,
   Reservation,
   ReservationCancelRead,
   ReservationCreate,
@@ -175,6 +176,17 @@ export function createProperty(data: PropertyCreate): Promise<PropertyCreated> {
 
 export function deleteProperty(id: string): Promise<void> {
   return request<void>(`/properties/${id}`, { method: 'DELETE' })
+}
+
+export function addPhoto(propertyId: string, url: string): Promise<PropertyPhoto> {
+  return request<PropertyPhoto>(`/properties/${propertyId}/photos`, {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  })
+}
+
+export function removePhoto(propertyId: string, photoId: string): Promise<void> {
+  return request<void>(`/properties/${propertyId}/photos/${photoId}`, { method: 'DELETE' })
 }
 
 // host-only (403 for anyone else) -- app/reservation/router.py
