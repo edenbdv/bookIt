@@ -1,6 +1,23 @@
 # BookIt
 
-A booking platform backend built as a Python/FastAPI modular monolith. See [app/README.md](app/README.md) for the code layout, or [docs/domain-layer/reservation-lifecycle.md](docs/domain-layer/reservation-lifecycle.md) for how a reservation actually moves end to end -- creation, background jobs, events, and where payment (Epic 8) will eventually plug in.
+BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental booking platform — guests search, book, and pay for stays while hosts manage their own listings and reservations. A React frontend is included, but the focus here is backend architecture: payment orchestration, event-driven messaging, and concurrency control.
+
+| Feed | Property detail | My Bookings |
+|---|---|---|
+| ![Property feed with search and filters](docs/images/feed.png) | ![Property detail page with booking widget](docs/images/property-detail.jpeg) | ![My Bookings page with booking status and cancellation](docs/images/my-bookings.png) |
+
+## Highlights
+
+- **Saga-based payment orchestration** — reservation confirmation is coordinated against an external payment call using idempotency keys, webhook-based async confirmation, and a scheduled Celery/RabbitMQ reconciliation worker as a fallback when webhook delivery fails.
+- **Event-driven notifications** — the outbox pattern plus Kafka decouple reservation state changes from email delivery, so a slow or failing notification path can never block a booking.
+- **Concurrency-safe booking** — a database-level exclusion constraint plus Redis distributed locks prevent double-booking under concurrent requests (load-tested).
+- **JWT auth with refresh-token rotation**, async SQLAlchemy, and 80+ unit tests.
+
+**Tech stack:** FastAPI · PostgreSQL · async SQLAlchemy · Redis · Kafka · Celery/RabbitMQ · React
+
+See [app/README.md](app/README.md) for the code layout, or [docs/domain-layer/reservation-lifecycle.md](docs/domain-layer/reservation-lifecycle.md) for how a reservation actually moves end to end -- creation, background jobs, events, and where payment (Epic 8) will eventually plug in.
+
+---
 
 ## Setup (first time on a machine)
 
@@ -99,6 +116,19 @@ Here the `app` container does **not** use your local `.env` — [docker-compose.
 - App running **inside Docker** → talks to infra via the service name (`db`, `redis`), which Docker's internal network resolves for you
 
 That's why there are two different sets of connection strings — `.env` for Workflow A, and the `environment:` block in `docker-compose.yml` for Workflow B — rather than one shared config.
+
+## Frontend
+
+A React + TypeScript SPA covering search, property details, booking, and booking management lives in `frontend/`. With the backend running (Workflow A or B above):
+
+```bash
+cd frontend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Visit [http://localhost:5173](http://localhost:5173). See [frontend/README.md](frontend/README.md) for structure and design notes.
 
 ## Simulating a payment provider webhook (BOOK-55)
 

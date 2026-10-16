@@ -1,6 +1,6 @@
 # BookIt frontend
 
-A React + TypeScript SPA for browsing BookIt listings: sign up / log in, browse the property feed (search by city, guests, price), and view a property's detail page. No booking or payment UI — that's intentionally out of scope for now.
+A React + TypeScript SPA for BookIt: sign up / log in, browse the property feed (search by city, guests, price), view a property's detail page, book a stay, and manage bookings (view status, cancel) from the My Bookings page.
 
 ## Stack
 
