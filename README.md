@@ -1,6 +1,6 @@
 # BookIt
 
-BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental booking platform — guests search, book, and pay for stays while hosts manage their own listings and reservations. A React frontend is included, but the focus here is backend architecture: payment orchestration, event-driven messaging, and concurrency control.
+BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental booking platform: guests search, book, and pay for stays while hosts manage their own listings and reservations. A React frontend is included, but the focus here is backend architecture: payment orchestration, event-driven messaging, and concurrency control.
 
 | Feed | Property detail | My Bookings |
 |---|---|---|
@@ -8,9 +8,9 @@ BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental
 
 ## Highlights
 
-- **Saga-based payment orchestration** — reservation confirmation is coordinated against an external payment call using idempotency keys, webhook-based async confirmation, and a scheduled Celery/RabbitMQ reconciliation worker as a fallback when webhook delivery fails.
-- **Event-driven notifications** — the outbox pattern plus Kafka decouple reservation state changes from email delivery, so a slow or failing notification path can never block a booking.
-- **Concurrency-safe booking** — a database-level exclusion constraint plus Redis distributed locks prevent double-booking under concurrent requests (load-tested).
+- **Saga-based payment orchestration:** reservation confirmation is coordinated against an external payment call using idempotency keys, webhook-based async confirmation, and a scheduled Celery/RabbitMQ reconciliation worker as a fallback when webhook delivery fails.
+- **Event-driven notifications:** the outbox pattern plus Kafka decouple reservation state changes from email delivery, so a slow or failing notification path can never block a booking.
+- **Concurrency-safe booking:** a database-level exclusion constraint plus Redis distributed locks prevent double-booking under concurrent requests (load-tested).
 - **JWT auth with refresh-token rotation**, async SQLAlchemy, and 80+ unit tests.
 
 **Tech stack:** FastAPI · PostgreSQL · async SQLAlchemy · Redis · Kafka · Celery/RabbitMQ · React
