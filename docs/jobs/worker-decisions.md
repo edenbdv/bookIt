@@ -105,9 +105,11 @@ it's actually suited to, rather than one broker stretched across two purposes:
   per-message ack/nack, and dead-lettering a single failed job.
 - **Kafka — event bus.** "*This happened*," published once, replayable, read by
   however many independent consumers want it at their own pace. This is what BOOK-48
-  designs — topics and partitions, not exchanges and bindings — and it's what makes the
-  **outbox pattern** (Epic 7) natural: the relay reads an append-only log instead of
-  publishing into a broker that doesn't retain what's already been consumed.
+  designs — topics and partitions, not exchanges and bindings. (An earlier version of
+  this bullet claimed Kafka's log is what makes the **outbox pattern** natural. That
+  doesn't hold for the relay actually built in BOOK-50 — it reads the Postgres
+  `outbox_events` table, not a Kafka log, and would work the same against RabbitMQ.
+  See §14.)
 - **Redis — cache, rate limiting, locks.** Fast, disposable, ephemeral state. Never a
   queue for anything that must not be lost.
 
@@ -757,6 +759,48 @@ to the provider, making even the narrow send→mark window safe.
 
 ---
 
+## 14. Revisited: what Kafka actually buys us, with one consumer
+
+**Context:** after Epic 7 shipped, `booking-events` has exactly one consumer group
+(`notifications`). This section checks §3's reasons against what was actually built.
+
+**Why the relay tracks `published_at`, not a Kafka offset.** Offsets are a
+*consumer-side* concept: they record how far a consumer group has read *from* Kafka.
+The relay is a *producer* — it reads from Postgres and writes *into* Kafka, so there is
+no Kafka offset for it to commit. Its progress marker has to live where its input lives:
+`outbox_events.published_at`. The "offset" equivalent on the source side would be
+Postgres's WAL position (LSN), which is exactly what CDC/Debezium tracks — and §11
+rejected CDC. Offsets *are* used where they belong: the `notifications` consumer group
+commits offsets on `booking-events`, and because that commit is at-least-once, §13's
+Inbox table handles the duplicates.
+
+**Fan-out alone isn't a reason for Kafka.** RabbitMQ (fanout/topic exchange, one queue
+per consumer) and ActiveMQ (durable topic subscriptions / Virtual Topics) both support
+adding independent consumers later, each reading at its own pace. §3 overstated this.
+
+**What Kafka genuinely adds over them:**
+
+- **Per-key ordering, used today.** One topic keyed by `reservation_id` guarantees
+  `BookingConfirmed` → `BookingCancelled` order per reservation (BOOK-48). With a single
+  consumer on a single RabbitMQ queue that would also hold — the guarantee only
+  separates the two once consumers scale out.
+- **Replay, not used yet.** A consumer group added later can start from `earliest` and
+  read every event still inside the retention window. In RabbitMQ/ActiveMQ a new
+  subscriber only sees messages published after its queue/subscription exists.
+- **One stored copy.** Each new consumer is just another offset, not another full queue
+  of copies.
+
+**Honest verdict:** at current scale, a topic exchange on the existing RabbitMQ would
+have been enough and simpler (no second broker, built-in DLX instead of the hand-rolled
+DLQ BOOK-48 calls out). Kafka is defensible for per-key ordering, future replay, and
+the learning goal — not for today's load.
+
+**Revisit when:** a second consumer is actually planned (replay becomes real value), or
+§3's "Kafka costs more than it teaches" trigger fires — then collapsing onto RabbitMQ is
+cheap, since the outbox relay doesn't depend on Kafka specifics.
+
+---
+
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
@@ -776,4 +820,5 @@ to the provider, making even the narrow send→mark window safe.
 | BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |
 | BOOK-50 relay | Polling (Celery beat, same shape as BOOK-46) — not CDC | A several-second delivery delay genuinely matters for some published event |
 | BOOK-51 consumer process | Standalone `confluent_kafka.Consumer`, own docker-compose service — not a Celery task, not folded into `worker` | Never for the process split; revisit one-at-a-time processing if this topic's throughput becomes a real bottleneck |
+| Kafka with one consumer (revisited) | Kept — for per-key ordering + future replay; fan-out alone wasn't a reason, and the relay uses `published_at` not offsets | A second consumer is planned, or Kafka's ops cost outweighs the learning |
 | BOOK-51 duplicate emails | Real dedup (Inbox pattern), not tolerated like BOOK-45/47 — keyed on `OutboxEvent.id`, marked processed *after* sending | A real email provider adds send-level idempotency keys — dedup responsibility can move there |
