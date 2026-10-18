@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
-from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
@@ -150,10 +149,11 @@ async def api_client(postgres_url: str, redis_url: str) -> AsyncIterator[AsyncCl
         yield client
 
     await get_engine().dispose()
-    await get_redis_client().aclose()
     # Redis's counterpart to _truncate_tables -- otherwise one test's
-    # rate-limit counters and refresh tokens leak into the next
-    flush_client = Redis.from_url(redis_url)
-    await flush_client.flushdb()
-    await flush_client.aclose()
+    # rate-limit counters and refresh tokens leak into the next. Through the
+    # app's own client, before closing it: reuses its pooled connection
+    # instead of opening a new one just to flush.
+    redis = get_redis_client()
+    await redis.flushdb()
+    await redis.aclose()
     _clear_cached_clients()
