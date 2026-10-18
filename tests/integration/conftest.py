@@ -133,22 +133,31 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         yield session
 
 
-# Real HTTP into the real app, in-process -- no server, no port
-# (testing-basics.md §3.6). No dependency_overrides: the app's own cached
-# settings/engine/Redis client are pointed at the containers instead, so no
-# app code is swapped out.
+# The app's own DB access (UnitOfWork(), get_uow, get_engine()) pointed at
+# the test container -- for tests that call services directly, and the base
+# api_client builds on. No dependency_overrides: the app's cached
+# settings/engine are re-pointed instead, so no app code is swapped out.
 #
 # Per test, on both ends: clearing the caches up front makes the app build a
-# fresh engine + Redis client on *this* test's event loop; disposing/closing
-# them afterwards stops either outliving that loop (testing-basics.md §3.5).
+# fresh engine on *this* test's event loop; disposing it afterwards stops it
+# outliving that loop (testing-basics.md §3.5).
 @pytest.fixture
-async def api_client(postgres_url: str, redis_url: str) -> AsyncIterator[AsyncClient]:
+async def app_db(postgres_url: str) -> AsyncIterator[None]:
     _clear_cached_clients()
+    yield
+    await get_engine().dispose()
+    _clear_cached_clients()
+
+
+# Real HTTP into the real app, in-process -- no server, no port
+# (testing-basics.md §3.6). Adds the Redis side on top of app_db: same
+# fresh-per-test client, closed afterwards.
+@pytest.fixture
+async def api_client(redis_url: str, app_db: None) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=create_app())
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
-    await get_engine().dispose()
     # Redis's counterpart to _truncate_tables -- otherwise one test's
     # rate-limit counters and refresh tokens leak into the next. Through the
     # app's own client, before closing it: reuses its pooled connection
@@ -156,4 +165,5 @@ async def api_client(postgres_url: str, redis_url: str) -> AsyncIterator[AsyncCl
     redis = get_redis_client()
     await redis.flushdb()
     await redis.aclose()
-    _clear_cached_clients()
+    # only the Redis client -- the engine is still app_db's to dispose
+    get_redis_client.cache_clear()
