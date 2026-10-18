@@ -117,6 +117,44 @@ Here the `app` container does **not** use your local `.env` — [docker-compose.
 
 That's why there are two different sets of connection strings — `.env` for Workflow A, and the `environment:` block in `docker-compose.yml` for Workflow B — rather than one shared config.
 
+## Running the tests
+
+Two suites, run from the repo root:
+
+| Suite | Where | Needs | What it uses |
+|---|---|---|---|
+| Unit | `tests/` (everything except `integration/`) | Nothing — no Docker | Hand-written fakes (`FakeUnitOfWork`) |
+| Integration | `tests/integration/` | Docker running | Throwaway Postgres + Redis containers via [testcontainers](https://testcontainers.com/), migrated with `alembic upgrade head` |
+
+```bash
+# everything
+uv run pytest
+
+# unit tests only -- fast, no Docker
+uv run pytest tests --ignore=tests/integration
+
+# integration tests only
+uv run pytest tests/integration -v
+```
+
+The integration suite never touches your dev DB or Redis: it starts its own containers, points the app at them, empties every table after each test, and removes the containers at the end. Your `docker compose` services don't need to be running.
+
+**If Docker can't pull images** (offline, or a flaky network), testcontainers fails trying to fetch its `ryuk` cleanup image. The Postgres/Redis images are reused from your local cache, so you can skip `ryuk` for that run:
+
+```bash
+# Git Bash
+TESTCONTAINERS_RYUK_DISABLED=true uv run pytest tests/integration -v
+```
+
+```powershell
+# PowerShell
+$env:TESTCONTAINERS_RYUK_DISABLED = "true"; uv run pytest tests/integration -v
+```
+
+Without `ryuk`, containers are still removed on a normal finish, but not if the run is killed mid-way — clean those up with `docker ps` / `docker rm -f`.
+
+Concepts behind the setup (unit vs. integration, fixtures, isolation, async pitfalls): [docs/testing/testing-basics.md](docs/testing/testing-basics.md).
+
 ## Frontend
 
 A React + TypeScript SPA covering search, property details, booking, and booking management lives in `frontend/`. With the backend running (Workflow A or B above):

@@ -449,6 +449,23 @@ Unit tests tell you the logic is right; integration tests tell you it's still ri
 against reality; concurrency tests tell you it's still right when reality gets busy.
 Most bugs are caught cheaply at the bottom — the expensive ones only at the top.
 
+## 6. Running BookIt's tests
+
+| Command | Runs | Needs Docker |
+|---|---|---|
+| `uv run pytest` | Everything | Yes |
+| `uv run pytest tests --ignore=tests/integration` | Unit tests only | No |
+| `uv run pytest tests/integration -v` | Integration tests only | Yes |
+
+Where things live: unit tests in `tests/<module>/`, integration tests and their fixtures
+(§3.1–3.6) in `tests/integration/` — `conftest.py` holds the containers, `TRUNCATE`
+cleanup and `api_client`.
+
+If Docker can't pull testcontainers' `ryuk` cleanup image (offline, flaky network), add
+`TESTCONTAINERS_RYUK_DISABLED=true` in front of the command (Git Bash) for that run.
+Full details, including the PowerShell form: the "Running the tests" section of the
+repo `README.md`.
+
 ## Cheat sheet
 
 | Question | Answer |
