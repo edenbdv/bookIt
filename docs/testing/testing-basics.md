@@ -3,8 +3,8 @@
 Deliberately general — mostly no BookIt specifics. Covers the three kinds of test
 Epic 10 asks for: unit tests (BOOK-60), integration tests against real infrastructure
 (BOOK-61), and a concurrency contract test (BOOK-62). For what this project actually
-chose and why, see a future `testing-decisions.md`; for the manual checks these tests
-replace, see `scripts/verify_*.py`.
+chose and why, see `testing-decisions.md`; for the manual checks these tests replace,
+see `scripts/verify_*.py`.
 
 ## 0. The mental model, if you remember nothing else
 
