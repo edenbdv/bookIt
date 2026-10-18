@@ -148,11 +148,62 @@ Also new: `test_reservation_api.py` (overlap through the API → clean 409),
 idempotency (no double charge) is already unit-tested in
 `tests/payment/test_create_payment.py`.
 
-**Not ported, deliberately:** `verify_concurrent_reservations.py` — fully concurrent
-booking through the API is BOOK-62's contract test, built on these fixtures.
+`verify_concurrent_reservations.py` wasn't part of BOOK-61 — it's superseded by
+BOOK-62's contract test (§11).
 
-**Revisit:** the four ported scripts can be deleted once the team is comfortable relying
-on the tests — they no longer check anything the suite doesn't.
+**Revisit:** all five scripts can be deleted once the team is comfortable relying on the
+tests — they no longer check anything the suite doesn't.
+
+## 11. BOOK-62: the booking-concurrency contract test
+
+`tests/integration/test_booking_concurrency.py` — the one guarantee that must survive
+Epic 11's service split: **N simultaneous bookings for the same property and dates →
+exactly one reservation.**
+
+**Choices:**
+- **Through `POST /reservations` only** ("contract" = public API, testing-basics.md
+  §4.5), so the same test still applies once booking lives in its own service.
+- **20 requests, one guest each, a fresh `Idempotency-Key` each** — the test is about
+  slot contention, not idempotency replay or one user's rate limit.
+- **A shared start gate** (`asyncio.Event`): every request is created first, waits on
+  the gate, and all are released together (§4.4). Without it, `gather()` starts them one
+  by one.
+- **Real DB-level overlap, verified, not assumed.** A temporary probe sampling
+  `pg_stat_activity` during a burst saw up to 15 app sessions in Postgres at once (the
+  engine pool's 5 + 10 overflow) and up to 14 waiting on the advisory lock together.
+  (Sampling gotcha: `pg_stat_activity` is snapshotted per transaction — commit between
+  samples, or every sample shows the same frozen picture.)
+- **Assert the invariant, never the winner:** exactly one 201, the rest 409, zero 500s,
+  one non-cancelled row. A second test cancels the winner through the API and checks a
+  new burst again yields exactly one.
+- **`.delay()` stubbed** for the "reservation received" email. With no RabbitMQ under
+  test, Celery's blocking `.delay()` retries the broker for ~4s and freezes the event
+  loop (one booking: 4.29s real vs 0.017s stubbed). Irrelevant to slot contention, so
+  the file stubs it with an `autouse` fixture: 40 runs in 59s instead of 310s. The same
+  blocking behavior is a real production issue, tracked separately.
+
+**Proven to catch what it claims (sanity checks, run locally, never committed):**
+
+| Protection removed | Result | What it shows |
+|---|---|---|
+| `no_overlapping_reservations` constraint dropped | 20 × 201 — twenty bookings for the same dates | The test catches double booking |
+| Per-property advisory lock removed | Still passed, 10 bursts in a row | See below |
+
+**The lock finding.** The advisory lock (reservation/service.py) isn't what prevents
+double booking — the constraint is. It prevents a GiST `EXCLUDE` **deadlock**
+(`docs/db/concurrency-basics.md` §4.1), which BOOK-39 hit for real. That deadlock is
+timing-dependent ("non-deterministically", per that doc), and 10 bursts without the lock
+didn't reproduce it. So: the test reliably guards no-double-booking, but is **not** a
+reliable deadlock detector — the lock's justification is BOOK-39's observed deadlock,
+not this test.
+
+**Stability:** `pytest-repeat` (dev dependency) runs the file repeatedly in one session —
+`uv run pytest tests/integration/test_booking_concurrency.py --count=20` — 40/40
+passed.
+
+**Revisit when:** the booking path moves into its own service (Epic 11) — this test
+should pass unchanged against it; or if deadlock coverage is ever wanted, try
+partially-overlapping ranges in mixed order over many more bursts.
 
 ## 10. Ryuk, and the network workaround
 
@@ -183,5 +234,8 @@ tests; a real reminder that every deployed `secret_key` must be long.
 | Async lifetimes | Fresh engine/Redis client per test, disposed after | Per-test creation becomes a real cost |
 | Fixtures | `db_session` (test) / `app_db` (app code) / `api_client` (HTTP + Redis) | — |
 | Test layer | DB for constraints, service + `patch` for commit order, HTTP for contracts | — |
-| Manual scripts | Four ported; concurrent one left for BOOK-62 | Delete the ported four once trusted |
+| Manual scripts | All five superseded (four ported in BOOK-61, concurrent one by BOOK-62) | Delete once trusted |
 | Ryuk | On by default; `TESTCONTAINERS_RYUK_DISABLED=true` per run when pulls fail | — |
+| BOOK-62 concurrency test | 20 guests via API, start gate, invariant asserts, `.delay()` stubbed | Booking moves to its own service — must pass unchanged |
+| Deadlock coverage | Not reliably tested; lock justified by BOOK-39's observed deadlock | Deadlock coverage becomes a requirement |
+| Stability runs | `pytest-repeat`, `--count=20` in one session | — |
