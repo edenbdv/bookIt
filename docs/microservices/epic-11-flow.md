@@ -4,7 +4,9 @@
 payment and booking-events flows change once Payment (BOOK-65) and Notification
 (BOOK-64) become their own services. For today's in-process flow, see
 `docs/jobs/booking-events-flow.md` and `docs/payment/saga-basics.md`; for why Kafka
-was kept with only one consumer, see `docs/jobs/worker-decisions.md` §14.
+was kept with only one consumer, see `docs/jobs/worker-decisions.md` §14. New to
+microservices? Start with `microservices-basics.md` — the theory and the
+ticket-by-ticket plan this page assumes.
 
 ## Today vs. Epic 11
 
