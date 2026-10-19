@@ -13,6 +13,9 @@ from app.notification.consumer import EventHandler, make_consumer, make_dispatch
 
 # event_type (from the Kafka payload) -> the email to send for it
 _HANDLERS: dict[str, EventHandler] = {
+    # BOOK-64: added before Booking starts publishing BookingCreated (step
+    # 3b) -- the receiver learns a new event type before the sender sends it
+    OutboxEventType.BOOKING_CREATED.value: notification_service.send_reservation_received_email,
     OutboxEventType.BOOKING_CONFIRMED.value: notification_service.send_reservation_confirmed_email,
     OutboxEventType.BOOKING_CANCELLED.value: notification_service.send_reservation_cancelled_email,
 }

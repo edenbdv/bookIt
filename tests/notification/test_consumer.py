@@ -108,15 +108,22 @@ async def test_event_type_picks_the_matching_handler(handlers, handled) -> None:
 # KeyError -- dispatch returns normally, so _process_one commits the offset
 # and the queue keeps moving instead of being stuck on a poison message
 @pytest.mark.anyio
-async def test_unknown_event_type_is_skipped_not_a_crash(handlers, handled, caplog) -> None:
+async def test_unknown_event_type_is_skipped_not_a_crash(handlers, handled) -> None:
     uow = FakeUnitOfWork(processed=set())
 
-    with patch.object(consumer, "UnitOfWork", return_value=uow):
+    # the logger itself is patched, not read through caplog: alembic's
+    # fileConfig (run by the integration suite) disables existing loggers,
+    # so caplog sees nothing when this runs after them
+    with (
+        patch.object(consumer, "UnitOfWork", return_value=uow),
+        patch.object(consumer, "logger") as logger,
+    ):
         await consumer.make_dispatcher(handlers)(_payload("booking_reviewed"))
 
     assert handled == []
     assert uow.session.added == []
-    assert "booking_reviewed" in caplog.text
+    logger.warning.assert_called_once()
+    assert "booking_reviewed" in logger.warning.call_args.args
 
 
 # mark-after-send: if sending fails, the event is NOT marked processed -- so a

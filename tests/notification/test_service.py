@@ -71,7 +71,8 @@ PAYLOAD = {
 
 
 async def _sent_email(send_fn) -> dict:
-    # "received" still reads Booking's tables until step 3 moves it to Kafka
+    # only the TEMPORARY DB-reading "received" copy still takes a uow --
+    # removed in step 3b together with that copy
     with patch.object(service, "_send") as send:
         await send_fn(FakeUnitOfWork(), RESERVATION.id)
     send.assert_called_once()
@@ -85,9 +86,24 @@ async def _sent_email_from_payload(send_fn, payload: dict = PAYLOAD) -> dict:
     return send.call_args.kwargs
 
 
+# TEMPORARY (BOOK-64, deleted in step 3b with the DB copy): the payload
+# version must produce exactly the email the DB version did -- byte for byte
+@pytest.mark.anyio
+async def test_received_email_from_payload_matches_the_db_version() -> None:
+    from_db = await _sent_email(service.send_reservation_received_email_from_db)
+    from_payload = await _sent_email_from_payload(
+        service.send_reservation_received_email,
+        {**PAYLOAD, "event_type": "booking_created"},
+    )
+
+    assert from_payload == from_db
+
+
 @pytest.mark.anyio
 async def test_received_email() -> None:
-    email = await _sent_email(service.send_reservation_received_email)
+    email = await _sent_email_from_payload(
+        service.send_reservation_received_email, {**PAYLOAD, "event_type": "booking_created"}
+    )
 
     assert email["to"] == "dana@test.com"
     assert email["subject"] == "Your reservation request for Cabin"

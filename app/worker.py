@@ -79,7 +79,10 @@ async def send_reservation_received_email(reservation_id: str) -> None:
     retried, worker-decisions.md §9/§10).
     """
     async with UnitOfWork() as uow:
-        await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))
+        # BOOK-64: the temporary DB-reading copy -- this whole task goes away in step 3b
+        await notification_service.send_reservation_received_email_from_db(
+            uow, uuid.UUID(reservation_id)
+        )
 
 
 @app.task

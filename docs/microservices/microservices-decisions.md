@@ -222,6 +222,56 @@ six callers were already `async`, so nothing else changes shape.
 **Revisit when:** a payload grows large or carries data Booking shouldn't share — then
 send only what each consumer needs, or fall back to a lookup for that one field.
 
+## 6. Changing a path without breaking it: expand and contract
+
+**The problem it solves.** In production a change never lands everywhere at once:
+- Booking and Notification are **deployed separately**, minutes or hours apart.
+- During a deploy, **old and new versions run side by side** for a while.
+- Some messages are **already in flight** — Celery tasks waiting in RabbitMQ, events
+  waiting in Kafka.
+
+Switch everything in one go and there's a window where one side sends something the
+other doesn't understand yet, or an old message arrives at code that no longer exists:
+lost emails, or a stuck consumer.
+
+**Chosen: expand and contract** (also called *parallel change*) — three phases:
+
+| Phase | What happens | Moving "reservation received" to Kafka |
+|---|---|---|
+| **1. Expand** | Add the new path **next to** the old one; both work | Notification learns `booking_created` and builds the email from the payload. The old Celery path keeps sending, through a temporary copy of the old function (`send_reservation_received_email_from_db`) |
+| **2. Switch** | Move the sender to the new path | Booking writes `BookingCreated` to the outbox instead of calling `.delay()` (step 3b) |
+| **3. Contract** | Delete the old path once nothing uses it | The Celery task and the `_from_db` copy go (step 3b — in a real deployment, only once no old tasks are left in the queue) |
+
+A temporary test pins the two versions to **byte-for-byte identical emails** while both
+exist, then goes with the old one.
+
+**The ordering rule inside it: the receiver learns first, then the sender starts.** If
+Booking published `BookingCreated` *before* Notification had a handler, the consumer
+would hit an unknown type on every one of those events. For an event contract that's
+the general rule: deploy the consumer that understands a change before the producer
+that emits it. (For *removing* a field it's the reverse: the consumer stops reading it
+first, then the producer stops sending it — §5.)
+
+**The safety net under it: unknown event types are skipped, not a crash.** Before
+BOOK-64 the dispatcher did `email_handlers[event_type]`. An unknown type raised
+`KeyError`, so the message was never committed, Kafka redelivered it forever, and
+every message behind it waited — a **poison message** blocking the whole queue. Now an
+unknown type is logged as a warning and skipped (`notification/consumer.py`). That's
+also the correct behavior long-term: Booking may publish events Notification doesn't
+care about (an analytics-only event, say), and "not mine" is a normal answer.
+**Trade-off accepted:** a handler forgotten by mistake means a silently missing email —
+but with a warning in the log, and every other email still flowing, which beats a
+stopped queue.
+
+**Why it's worth it here, not just in production:**
+- **Every commit works on its own** — CI stays green and the app runs at each step.
+- **Easy to undo** — revert only the switch, and the old path is still there.
+- It's the same discipline teams use to change APIs, DB schemas and events without
+  downtime.
+
+**Revisit when:** never as a principle. The *contract* phase can be shortened when
+there are no deployments to coordinate and no messages in flight — as in tests.
+
 ---
 
 ## Cheat sheet
@@ -234,4 +284,7 @@ send only what each consumer needs, or fall back to a lookup for that one field.
 | Why not a Celery task across services | A command makes the sender know the receiver; an event lets the receiver know the sender | — |
 | Email data | Carried in the event payload, no lookups into Booking — reverses BOOK-49's thin payload | Payload grows too large or too sensitive |
 | `_emit_outbox_event` | `async`, loads guest + property to fill the payload | — |
+| Changing a message path | Expand and contract: add the new path, switch the sender, then delete the old | — |
+| Rolling out a new event type | Receiver learns it first, then the sender starts sending | — |
+| Unknown event type at the consumer | Log a warning and skip — never a crash (poison message) | — |
 | Event payload | A cross-service contract: add freely, never remove/rename first | — |

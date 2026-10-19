@@ -46,7 +46,36 @@ def _send(to: str, subject: str, body: str) -> None:
 
 # named "received", not "confirmed" -- fires while still PENDING, before
 # confirm_reservation() (worker-decisions.md's BOOK-45 entries)
-async def send_reservation_received_email(uow: UnitOfWork, reservation_id: uuid.UUID) -> None:
+# BOOK-64: triggered by a BookingCreated event and built from its payload
+# alone, same as confirmed/cancelled below. expires_at arrives as an ISO
+# string, so it's parsed back before formatting.
+async def send_reservation_received_email(payload: dict) -> None:
+    guest, property_, reservation = payload["guest"], payload["property"], payload["reservation"]
+    expires_at = datetime.fromisoformat(reservation["expires_at"])
+
+    await asyncio.to_thread(
+        _send,
+        to=guest["email"],
+        subject=f"Your reservation request for {property_['title']}",
+        body=(
+            f"Hi {guest['display_name'] or 'there'},\n\n"
+            "We've received your reservation request:\n\n"
+            f"Property: {property_['title']}, {property_['city']}, {property_['country']}\n"
+            f"Dates: {reservation['check_in']} -> {reservation['check_out']}\n"
+            f"Guests: {reservation['guest_count']}\n"
+            f"Total: {_format_cents(reservation['total_cents'])}\n\n"
+            f"This reservation is pending and held until {_format_datetime(expires_at)} -- "
+            "it will be released automatically if not confirmed before then.\n"
+        ),
+    )
+
+
+# TEMPORARY (BOOK-64): the DB-reading original, still called by the Celery
+# task in app/worker.py until step 3b switches Booking to BookingCreated --
+# then this and that task are deleted together.
+async def send_reservation_received_email_from_db(
+    uow: UnitOfWork, reservation_id: uuid.UUID
+) -> None:
     reservation = await uow.reservations.get_by_id(reservation_id)
     guest = await uow.users.get_by_id(reservation.guest_id)
     property_ = await uow.properties.get_by_id(reservation.property_id)
