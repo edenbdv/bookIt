@@ -104,6 +104,21 @@ async def test_event_type_picks_the_matching_handler(handlers, handled) -> None:
     assert [name for name, _ in handled] == ["cancelled"]
 
 
+# BOOK-64: an event type Notification has no email for is skipped, not a
+# KeyError -- dispatch returns normally, so _process_one commits the offset
+# and the queue keeps moving instead of being stuck on a poison message
+@pytest.mark.anyio
+async def test_unknown_event_type_is_skipped_not_a_crash(handlers, handled, caplog) -> None:
+    uow = FakeUnitOfWork(processed=set())
+
+    with patch.object(consumer, "UnitOfWork", return_value=uow):
+        await consumer.make_dispatcher(handlers)(_payload("booking_reviewed"))
+
+    assert handled == []
+    assert uow.session.added == []
+    assert "booking_reviewed" in caplog.text
+
+
 # mark-after-send: if sending fails, the event is NOT marked processed -- so a
 # redelivery retries it instead of the email being silently lost
 @pytest.mark.anyio

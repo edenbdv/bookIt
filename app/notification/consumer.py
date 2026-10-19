@@ -51,12 +51,26 @@ def make_dispatcher(email_handlers: dict[str, EventHandler]) -> Callable[[dict],
     """
 
     async def dispatch(payload: dict) -> None:
+        # BOOK-64: an event type with no email is skipped, not a crash. A
+        # KeyError here would leave the message uncommitted, redelivered
+        # forever, and every message behind it stuck -- a poison message.
+        # Booking may publish events Notification doesn't care about (or
+        # doesn't know *yet* -- e.g. a new type rolled out before its
+        # handler); "not mine" is a normal answer.
+        handler = email_handlers.get(payload["event_type"])
+        if handler is None:
+            logger.warning(
+                "Skipping event %s: no email for event type %r",
+                payload.get("event_id"),
+                payload["event_type"],
+            )
+            return
+
         event_id = uuid.UUID(payload["event_id"])
         async with UnitOfWork() as uow:
             already_processed = await uow.session.get(ProcessedNotificationEvent, event_id)
             if already_processed is not None:
                 return
-            handler = email_handlers[payload["event_type"]]
             await handler(payload)
             uow.session.add(ProcessedNotificationEvent(event_id=event_id))
 
