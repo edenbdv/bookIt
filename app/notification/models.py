@@ -2,12 +2,20 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, func
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.core.db.models import Base
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
-class ProcessedNotificationEvent(Base):
+class NotificationBase(DeclarativeBase):
+    """BOOK-64: Notification's own model catalog, not the monolith's Base.
+
+    Every table registered on app.core.db.models.Base belongs to Booking's
+    database and Booking's migrations. Notification's tables live in its own
+    database (step 4c), with its own migrations -- so they register here,
+    and Booking's Alembic stops seeing them at all.
+    """
+
+
+class ProcessedNotificationEvent(NotificationBase):
     """Inbox-pattern dedup marker (worker-decisions.md §13). Existence of the
     row is all that matters -- processed_at is only for debugging.
     """
