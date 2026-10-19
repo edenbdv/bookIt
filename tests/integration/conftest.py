@@ -23,7 +23,6 @@ from testcontainers.community.redis import RedisContainer
 import app.auth.models
 import app.core.idempotency.models
 import app.core.outbox.models
-import app.notification.models
 import app.payment.models
 import app.property.models
 import app.reservation.models
@@ -33,7 +32,12 @@ from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
-from app.notification.db import get_notification_engine, get_notification_session_factory
+from app.notification import migrate as notification_migrate
+from app.notification.db import (
+    get_notification_engine,
+    get_notification_session_factory,
+    notification_database_url,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -77,6 +81,13 @@ def postgres_url() -> Iterator[str]:
             # real migrations, not Base.metadata.create_all() -- btree_gist
             # only exists in a migration (testing-basics.md §3.3)
             command.upgrade(Config(str(REPO_ROOT / "alembic.ini")), "head")
+
+            # BOOK-64: Notification's own `notifications` database, on the same
+            # server -- mirrors docker-compose. Created and migrated by the very
+            # script compose's notification-migrate runs, so that's under test too.
+            mp.setenv("NOTIFICATION_DATABASE_URL", url.rsplit("/", 1)[0] + "/notifications")
+            _clear_cached_clients()
+            notification_migrate.main()
 
             yield url
 
@@ -126,26 +137,44 @@ async def db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
     await engine.dispose()
 
 
+# BOOK-64: the test's own connection to Notification's database -- the
+# counterpart of db_engine, for reading back what the consumer wrote there
+@pytest.fixture
+async def notification_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(notification_database_url())
+    yield engine
+    await engine.dispose()
+
+
+async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
+    async with engine.begin() as conn:
+        tables = (
+            await conn.scalars(
+                text(
+                    "SELECT quote_ident(tablename) FROM pg_tables"
+                    " WHERE schemaname = 'public' AND tablename <> :version_table"
+                ),
+                {"version_table": version_table},
+            )
+        ).all()
+        if tables:
+            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+
+
 # autouse: every integration test gets this without asking for it -- one
 # forgotten fixture would otherwise leak rows into whichever test runs next.
 # TRUNCATE, not rollback-per-test: app code commits on its own on purpose
 # (e.g. BOOK-55's commit split), which would end a wrapping transaction
 # early (testing-basics.md §3.4). Table list read from the catalog rather
 # than hardcoded, so a table added by a future migration is covered too.
+# BOOK-64: both databases -- Booking's and Notification's.
 @pytest.fixture(autouse=True)
-async def _truncate_tables(db_engine: AsyncEngine) -> AsyncIterator[None]:
+async def _truncate_tables(
+    db_engine: AsyncEngine, notification_db_engine: AsyncEngine
+) -> AsyncIterator[None]:
     yield
-    async with db_engine.begin() as conn:
-        tables = (
-            await conn.scalars(
-                text(
-                    "SELECT quote_ident(tablename) FROM pg_tables"
-                    " WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
-                )
-            )
-        ).all()
-        if tables:
-            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+    await _truncate_all(db_engine, "alembic_version")
+    await _truncate_all(notification_db_engine, "notification_alembic_version")
 
 
 @pytest.fixture
@@ -153,6 +182,14 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     # expire_on_commit=False -- same as the app's own session factory
     # (core/db/engine.py), so objects stay readable after a commit
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+async def notification_db_session(
+    notification_db_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    async with AsyncSession(notification_db_engine, expire_on_commit=False) as session:
         yield session
 
 

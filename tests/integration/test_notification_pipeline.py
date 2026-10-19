@@ -101,6 +101,7 @@ async def test_confirmed_reservation_reaches_the_guest_through_kafka(
     kafka_bootstrap_servers: str,
     app_db: None,
     db_session: AsyncSession,
+    notification_db_session: AsyncSession,
     kafka_consumer,
     sent_emails: MagicMock,
 ) -> None:
@@ -121,9 +122,13 @@ async def test_confirmed_reservation_reaches_the_guest_through_kafka(
         )
     ).all()
     assert published_at is not None
-    # ...and the consumer saved its Inbox row, keyed on that same event
+    # ...and the consumer saved its Inbox row, keyed on that same event --
+    # in Notification's own database, not Booking's (BOOK-64 step 4)
     assert (
-        await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
+        await notification_db_session.scalar(
+            select(func.count()).select_from(ProcessedNotificationEvent)
+        )
+        == 1
     )
 
 
@@ -138,6 +143,7 @@ async def test_new_booking_sends_received_then_confirmed_in_order(
     kafka_bootstrap_servers: str,
     app_db: None,
     db_session: AsyncSession,
+    notification_db_session: AsyncSession,
     kafka_consumer,
     sent_emails: MagicMock,
 ) -> None:
@@ -183,6 +189,7 @@ async def test_republished_event_sends_only_one_email(
     kafka_bootstrap_servers: str,
     app_db: None,
     db_session: AsyncSession,
+    notification_db_session: AsyncSession,
     kafka_consumer,
     sent_emails: MagicMock,
 ) -> None:
@@ -203,7 +210,10 @@ async def test_republished_event_sends_only_one_email(
 
     sent_emails.assert_called_once()
     assert (
-        await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
+        await notification_db_session.scalar(
+            select(func.count()).select_from(ProcessedNotificationEvent)
+        )
+        == 1
     )
 
 
@@ -243,6 +253,7 @@ async def test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving(
     kafka_bootstrap_servers: str,
     app_db: None,
     db_session: AsyncSession,
+    notification_db_session: AsyncSession,
     kafka_consumer,
     sent_emails: MagicMock,
 ) -> None:
@@ -295,5 +306,8 @@ async def test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving(
     assert headers["error_type"] == "SMTPRecipientsRefused"
     # only the email that went out is marked processed
     assert (
-        await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
+        await notification_db_session.scalar(
+            select(func.count()).select_from(ProcessedNotificationEvent)
+        )
+        == 1
     )
