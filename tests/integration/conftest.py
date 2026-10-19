@@ -33,6 +33,7 @@ from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
+from app.notification.db import get_notification_engine, get_notification_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,6 +55,9 @@ def _clear_cached_clients() -> None:
     get_engine.cache_clear()
     get_session_factory.cache_clear()
     get_redis_client.cache_clear()
+    # BOOK-64: Notification's own engine (notification/db.py), same reason
+    get_notification_engine.cache_clear()
+    get_notification_session_factory.cache_clear()
 
 
 # scope="session": starting a container + running every migration takes
@@ -165,6 +169,7 @@ async def app_db(postgres_url: str) -> AsyncIterator[None]:
     _clear_cached_clients()
     yield
     await get_engine().dispose()
+    await get_notification_engine().dispose()
     _clear_cached_clients()
 
 

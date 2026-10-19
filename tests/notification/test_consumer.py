@@ -7,7 +7,6 @@ unchanged, once this code lives in services/notification/.
 import json
 import smtplib
 import uuid
-from typing import Self
 from unittest.mock import patch
 
 import pytest
@@ -34,8 +33,9 @@ class FakeUnitOfWork:
     def __init__(self, processed: set[uuid.UUID]) -> None:
         self.session = FakeSession(processed)
 
-    async def __aenter__(self) -> Self:
-        return self
+    # stands in for notification_session(): entering it yields the session
+    async def __aenter__(self) -> FakeSession:
+        return self.session
 
     async def __aexit__(self, *exc: object) -> None:
         pass
@@ -70,7 +70,7 @@ async def test_new_event_is_handled_and_marked_processed(handlers, handled) -> N
     uow = FakeUnitOfWork(processed=set())
     payload = _payload("booking_confirmed")
 
-    with patch.object(consumer, "UnitOfWork", return_value=uow):
+    with patch.object(consumer, "notification_session", return_value=uow):
         await consumer.make_dispatcher(handlers)(payload)
 
     # BOOK-64: the handler gets the whole event payload -- everything the
@@ -87,7 +87,7 @@ async def test_already_processed_event_is_skipped(handlers, handled) -> None:
     payload = _payload()
     uow = FakeUnitOfWork(processed={uuid.UUID(payload["event_id"])})
 
-    with patch.object(consumer, "UnitOfWork", return_value=uow):
+    with patch.object(consumer, "notification_session", return_value=uow):
         await consumer.make_dispatcher(handlers)(payload)
 
     assert handled == []
@@ -99,7 +99,7 @@ async def test_event_type_picks_the_matching_handler(handlers, handled) -> None:
     uow = FakeUnitOfWork(processed=set())
     payload = _payload("booking_cancelled")
 
-    with patch.object(consumer, "UnitOfWork", return_value=uow):
+    with patch.object(consumer, "notification_session", return_value=uow):
         await consumer.make_dispatcher(handlers)(payload)
 
     assert [name for name, _ in handled] == ["cancelled"]
@@ -116,7 +116,7 @@ async def test_unknown_event_type_is_skipped_not_a_crash(handlers, handled) -> N
     # fileConfig (run by the integration suite) disables existing loggers,
     # so caplog sees nothing when this runs after them
     with (
-        patch.object(consumer, "UnitOfWork", return_value=uow),
+        patch.object(consumer, "notification_session", return_value=uow),
         patch.object(consumer, "logger") as logger,
     ):
         await consumer.make_dispatcher(handlers)(_payload("booking_reviewed"))
@@ -136,7 +136,7 @@ async def test_failed_handler_does_not_mark_processed(handlers) -> None:
 
     uow = FakeUnitOfWork(processed=set())
     with (
-        patch.object(consumer, "UnitOfWork", return_value=uow),
+        patch.object(consumer, "notification_session", return_value=uow),
         pytest.raises(RuntimeError),
     ):
         await consumer.make_dispatcher({**handlers, "booking_confirmed": failing})(
@@ -173,7 +173,7 @@ async def test_transient_error_is_retried_then_marked_processed(no_retry_wait) -
     handler, calls = _flaky([smtplib.SMTPServerDisconnected("blip"), OSError("conn reset")])
     uow = FakeUnitOfWork(processed=set())
 
-    with patch.object(consumer, "UnitOfWork", return_value=uow):
+    with patch.object(consumer, "notification_session", return_value=uow):
         await consumer.make_dispatcher({"booking_confirmed": handler})(
             _payload("booking_confirmed")
         )
@@ -191,7 +191,7 @@ async def test_permanent_error_is_not_retried(no_retry_wait) -> None:
     uow = FakeUnitOfWork(processed=set())
 
     with (
-        patch.object(consumer, "UnitOfWork", return_value=uow),
+        patch.object(consumer, "notification_session", return_value=uow),
         pytest.raises(smtplib.SMTPRecipientsRefused),
     ):
         await consumer.make_dispatcher({"booking_confirmed": handler})(
@@ -209,7 +209,7 @@ async def test_transient_error_outlasting_every_retry_is_raised(no_retry_wait) -
     uow = FakeUnitOfWork(processed=set())
 
     with (
-        patch.object(consumer, "UnitOfWork", return_value=uow),
+        patch.object(consumer, "notification_session", return_value=uow),
         pytest.raises(OSError),
     ):
         await consumer.make_dispatcher({"booking_confirmed": handler})(

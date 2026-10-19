@@ -18,8 +18,7 @@ from datetime import UTC, datetime
 from confluent_kafka import Consumer, Producer
 
 from app.core.config import get_settings
-from app.core.db.engine import get_engine
-from app.core.db.unit_of_work import UnitOfWork
+from app.notification.db import get_notification_engine, notification_session
 from app.notification.models import ProcessedNotificationEvent
 
 logger = logging.getLogger(__name__)
@@ -112,14 +111,16 @@ def make_dispatcher(email_handlers: dict[str, EventHandler]) -> Callable[[dict],
             return
 
         event_id = uuid.UUID(payload["event_id"])
-        async with UnitOfWork() as uow:
-            already_processed = await uow.session.get(ProcessedNotificationEvent, event_id)
+        # BOOK-64: Notification's own session (notification/db.py), not the
+        # monolith's UnitOfWork -- it only ever touches its own Inbox table
+        async with notification_session() as session:
+            already_processed = await session.get(ProcessedNotificationEvent, event_id)
             if already_processed is not None:
                 return
             # retried in place, still before marking processed -- a retry that
             # succeeds is marked like any other send
             await _with_retry(handler, payload)
-            uow.session.add(ProcessedNotificationEvent(event_id=event_id))
+            session.add(ProcessedNotificationEvent(event_id=event_id))
 
     return dispatch
 
@@ -205,7 +206,7 @@ async def _run(
             await _process_one(consumer, handle, dead_letter)
     finally:
         consumer.close()
-        await get_engine().dispose()
+        await get_notification_engine().dispose()
 
 
 def run(
