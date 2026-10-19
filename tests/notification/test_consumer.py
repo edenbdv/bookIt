@@ -49,15 +49,15 @@ def _payload(event_type: str = "booking_confirmed") -> dict:
 
 
 @pytest.fixture
-def handled() -> list[tuple[str, uuid.UUID]]:
+def handled() -> list[tuple[str, dict]]:
     return []
 
 
 @pytest.fixture
-def handlers(handled: list[tuple[str, uuid.UUID]]) -> dict:
+def handlers(handled: list[tuple[str, dict]]) -> dict:
     def make(name: str):
-        async def handler(uow: object, reservation_id: uuid.UUID) -> None:
-            handled.append((name, reservation_id))
+        async def handler(payload: dict) -> None:
+            handled.append((name, payload))
 
         return handler
 
@@ -72,7 +72,9 @@ async def test_new_event_is_handled_and_marked_processed(handlers, handled) -> N
     with patch.object(consumer, "UnitOfWork", return_value=uow):
         await consumer.make_dispatcher(handlers)(payload)
 
-    assert handled == [("confirmed", uuid.UUID(payload["reservation_id"]))]
+    # BOOK-64: the handler gets the whole event payload -- everything the
+    # email needs travels in it
+    assert handled == [("confirmed", payload)]
     [marker] = uow.session.added
     assert isinstance(marker, ProcessedNotificationEvent)
     assert marker.event_id == uuid.UUID(payload["event_id"])
@@ -106,7 +108,7 @@ async def test_event_type_picks_the_matching_handler(handlers, handled) -> None:
 # redelivery retries it instead of the email being silently lost
 @pytest.mark.anyio
 async def test_failed_handler_does_not_mark_processed(handlers) -> None:
-    async def failing(uow: object, reservation_id: uuid.UUID) -> None:
+    async def failing(payload: dict) -> None:
         raise RuntimeError("SMTP down")
 
     uow = FakeUnitOfWork(processed=set())

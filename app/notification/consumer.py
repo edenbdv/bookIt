@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 TOPIC = "booking-events"
 GROUP_ID = "notifications"
 
-EventHandler = Callable[[UnitOfWork, uuid.UUID], Awaitable[None]]
+# BOOK-64: a handler gets the event payload and nothing else -- everything an
+# email needs travels in the event, so no handler reads Booking's tables
+EventHandler = Callable[[dict], Awaitable[None]]
 
 
 def make_consumer() -> Consumer:
@@ -55,7 +57,7 @@ def make_dispatcher(email_handlers: dict[str, EventHandler]) -> Callable[[dict],
             if already_processed is not None:
                 return
             handler = email_handlers[payload["event_type"]]
-            await handler(uow, uuid.UUID(payload["reservation_id"]))
+            await handler(payload)
             uow.session.add(ProcessedNotificationEvent(event_id=event_id))
 
     return dispatch

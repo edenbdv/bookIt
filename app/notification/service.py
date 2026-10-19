@@ -69,22 +69,24 @@ async def send_reservation_received_email(uow: UnitOfWork, reservation_id: uuid.
 
 
 # BOOK-51. Triggered by the Kafka consumer, not called directly (§12/§13).
-async def send_reservation_confirmed_email(uow: UnitOfWork, reservation_id: uuid.UUID) -> None:
-    reservation = await uow.reservations.get_by_id(reservation_id)
-    guest = await uow.users.get_by_id(reservation.guest_id)
-    property_ = await uow.properties.get_by_id(reservation.property_id)
+# BOOK-64: built from the event payload alone -- no reads of Booking's
+# reservations/users/properties tables (microservices-decisions.md §5).
+# Dates arrive as ISO strings ("2026-09-01"), which print the same as the
+# date objects this used to read.
+async def send_reservation_confirmed_email(payload: dict) -> None:
+    guest, property_, reservation = payload["guest"], payload["property"], payload["reservation"]
 
     await asyncio.to_thread(
         _send,
-        to=guest.email,
-        subject=f"Your reservation for {property_.title} is confirmed",
+        to=guest["email"],
+        subject=f"Your reservation for {property_['title']} is confirmed",
         body=(
-            f"Hi {guest.display_name or 'there'},\n\n"
+            f"Hi {guest['display_name'] or 'there'},\n\n"
             "Good news -- your reservation is confirmed:\n\n"
-            f"Property: {property_.title}, {property_.city}, {property_.country}\n"
-            f"Dates: {reservation.check_in} -> {reservation.check_out}\n"
-            f"Guests: {reservation.guest_count}\n"
-            f"Total: {_format_cents(reservation.total_cents)}\n\n"
+            f"Property: {property_['title']}, {property_['city']}, {property_['country']}\n"
+            f"Dates: {reservation['check_in']} -> {reservation['check_out']}\n"
+            f"Guests: {reservation['guest_count']}\n"
+            f"Total: {_format_cents(reservation['total_cents'])}\n\n"
             "We look forward to hosting your stay.\n"
         ),
     )
@@ -93,20 +95,19 @@ async def send_reservation_confirmed_email(uow: UnitOfWork, reservation_id: uuid
 # BOOK-51. Fires for both an explicit cancel (BOOK-38) and a silent
 # auto-expiry (BOOK-46) -- the payload doesn't say which, so wording stays
 # neutral rather than wrongly claiming "you cancelled this."
-async def send_reservation_cancelled_email(uow: UnitOfWork, reservation_id: uuid.UUID) -> None:
-    reservation = await uow.reservations.get_by_id(reservation_id)
-    guest = await uow.users.get_by_id(reservation.guest_id)
-    property_ = await uow.properties.get_by_id(reservation.property_id)
+# BOOK-64: from the payload alone, same as the confirmed email above.
+async def send_reservation_cancelled_email(payload: dict) -> None:
+    guest, property_, reservation = payload["guest"], payload["property"], payload["reservation"]
 
     await asyncio.to_thread(
         _send,
-        to=guest.email,
-        subject=f"Your reservation for {property_.title} has been cancelled",
+        to=guest["email"],
+        subject=f"Your reservation for {property_['title']} has been cancelled",
         body=(
-            f"Hi {guest.display_name or 'there'},\n\n"
+            f"Hi {guest['display_name'] or 'there'},\n\n"
             "Your reservation is no longer active:\n\n"
-            f"Property: {property_.title}, {property_.city}, {property_.country}\n"
-            f"Dates: {reservation.check_in} -> {reservation.check_out}\n\n"
+            f"Property: {property_['title']}, {property_['city']}, {property_['country']}\n"
+            f"Dates: {reservation['check_in']} -> {reservation['check_out']}\n\n"
             "These dates are now available again for other guests.\n"
         ),
     )
