@@ -1,19 +1,17 @@
 """Compose and send BookIt's transactional emails.
 
 Deliberately the only thing this module knows how to do -- what *triggers*
-a call here is someone else's job. send_reservation_received_email stays on
-Celery permanently (worker-decisions.md §9); the confirmed/cancelled pair
-is called by the Kafka consumer instead. Either way, this file doesn't care.
+a call here is someone else's job. Since BOOK-64 all three are called by the
+Kafka consumer, one per booking event, and each is built from the event
+payload alone -- no reads of Booking's tables (microservices-decisions.md §4-5).
 """
 
 import asyncio
 import smtplib
-import uuid
 from datetime import datetime
 from email.message import EmailMessage
 
 from app.core.config import get_settings
-from app.core.db.unit_of_work import UnitOfWork
 
 # not a real sender identity -- MailHog accepts anything, and there's no
 # domain to send "from" until a real provider exists (worker-decisions.md §8)
@@ -65,33 +63,6 @@ async def send_reservation_received_email(payload: dict) -> None:
             f"Guests: {reservation['guest_count']}\n"
             f"Total: {_format_cents(reservation['total_cents'])}\n\n"
             f"This reservation is pending and held until {_format_datetime(expires_at)} -- "
-            "it will be released automatically if not confirmed before then.\n"
-        ),
-    )
-
-
-# TEMPORARY (BOOK-64): the DB-reading original, still called by the Celery
-# task in app/worker.py until step 3b switches Booking to BookingCreated --
-# then this and that task are deleted together.
-async def send_reservation_received_email_from_db(
-    uow: UnitOfWork, reservation_id: uuid.UUID
-) -> None:
-    reservation = await uow.reservations.get_by_id(reservation_id)
-    guest = await uow.users.get_by_id(reservation.guest_id)
-    property_ = await uow.properties.get_by_id(reservation.property_id)
-
-    await asyncio.to_thread(
-        _send,
-        to=guest.email,
-        subject=f"Your reservation request for {property_.title}",
-        body=(
-            f"Hi {guest.display_name or 'there'},\n\n"
-            "We've received your reservation request:\n\n"
-            f"Property: {property_.title}, {property_.city}, {property_.country}\n"
-            f"Dates: {reservation.check_in} -> {reservation.check_out}\n"
-            f"Guests: {reservation.guest_count}\n"
-            f"Total: {_format_cents(reservation.total_cents)}\n\n"
-            f"This reservation is pending and held until {_format_datetime(reservation.expires_at)} -- "
             "it will be released automatically if not confirmed before then.\n"
         ),
     )

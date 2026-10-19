@@ -289,6 +289,13 @@ because it broke, but because it was never meant to deliver anything.
 
 ## 9. BOOK-45's trigger: a direct Celery call, permanently — `BookingCreated` never goes to Kafka
 
+> **Superseded in BOOK-64.** Once Notification became its own service, this section's
+> own "revisit when" condition was met: the "reservation received" email is now a
+> `BookingCreated` outbox event consumed from Kafka, the Celery task is gone, and
+> `UnitOfWork.on_commit()` was removed with its only caller. Why, and how it was rolled
+> out safely: `docs/microservices/microservices-decisions.md` §4 and §6. The reasoning
+> below is kept as the record of why it was the right call *for a monolith*.
+
 **Chosen:** `create_reservation_idempotent()` enqueues the email via `UnitOfWork.on_commit()`
 firing a Celery `.delay()` call, the same shape as every other Epic 6 job. **This is the
 permanent mechanism for this job, not a placeholder** — unlike the original version of
@@ -813,8 +820,8 @@ cheap, since the outbox relay doesn't depend on Kafka specifics.
 | First job | The expiry job — idempotent, no external deps | — |
 | Retry policy target | Email (BOOK-45), not expiry (BOOK-46) | The expiry job gains a non-idempotent or partially-committing step |
 | Mail transport | MailHog (local test double), not a real provider yet | A real deployment exists where someone besides the developer receives mail |
-| BOOK-45 trigger reliability | `uow.on_commit()`, not a direct `.delay()` — fixes ordering, not crash durability | A second real consumer of "reservation created" is planned before Epic 7 lands |
-| `BookingCreated`'s trigger, long-term | Stays on Celery permanently — never migrates to Kafka | A second real consumer of "reservation created" actually gets planned |
+| BOOK-45 trigger reliability | ~~`uow.on_commit()`, not a direct `.delay()`~~ — **superseded in BOOK-64**: a `BookingCreated` outbox row, durable; `on_commit()` removed | — |
+| `BookingCreated`'s trigger, long-term | ~~Stays on Celery permanently~~ — **superseded in BOOK-64**: moved to Kafka once Notification became its own service (`microservices-decisions.md` §4) | — |
 | BOOK-47 task-body retry | `autoretry_for` on connection-level errors, backoff+jitter, max_retries=5 — verified live | Never — this is the settled policy for this task |
 | BOOK-47 publish-call retry | Deliberately none — would block the guest's request | Never, for this job — see §9/§10's "retry that blocks" reasoning |
 | BOOK-47 dead-lettering | `task_failure` signal → manual publish to `notifications.dlq` — RabbitMQ's queue-level DLX doesn't fire here (Celery ACKs failed tasks) | A second job needs the same handling — generalize the signal handler beyond one queue name |

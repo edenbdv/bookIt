@@ -24,62 +24,34 @@ class FakeSession:
 
 def _uow_with_fake_session() -> tuple[UnitOfWork, FakeSession]:
     # __new__, not UnitOfWork() -- skips __aenter__'s real DB session and
-    # repositories, since on_commit()/__aexit__ don't touch either
+    # repositories, since __aexit__ doesn't touch either
     uow = UnitOfWork.__new__(UnitOfWork)
     session = FakeSession()
     uow.session = session
-    uow._on_commit = []
     return uow, session
 
 
-# BOOK-45: this is the mechanism worker-decisions.md section 9 relies on to
-# close the enqueue-before-commit gap -- a callback registered here must
-# never fire for a reservation that didn't actually get persisted.
+# (BOOK-64 removed on_commit() and its four tests -- its only caller became a
+# BookingCreated outbox event. What remains is the transaction itself.)
+
+
 @pytest.mark.anyio
-async def test_on_commit_callback_fires_after_a_clean_exit() -> None:
+async def test_clean_exit_commits_and_closes() -> None:
     uow, session = _uow_with_fake_session()
-    fired = []
-    uow.on_commit(lambda: fired.append("called"))
 
     await uow.__aexit__(None, None, None)
 
     assert session.committed
-    assert fired == ["called"]
-
-
-@pytest.mark.anyio
-async def test_on_commit_callback_does_not_fire_on_rollback() -> None:
-    uow, session = _uow_with_fake_session()
-    fired = []
-    uow.on_commit(lambda: fired.append("called"))
-
-    await uow.__aexit__(ValueError, ValueError("boom"), None)
-
-    assert session.rolled_back
-    assert fired == []
-
-
-# a failing callback (e.g. .delay() hitting an unreachable broker) must not
-# turn an already-committed transaction into a raised exception, and must
-# not stop the session from closing or unrelated callbacks from running
-@pytest.mark.anyio
-async def test_a_failing_callback_does_not_propagate_or_skip_close() -> None:
-    uow, session = _uow_with_fake_session()
-    uow.on_commit(lambda: (_ for _ in ()).throw(RuntimeError("broker down")))
-
-    await uow.__aexit__(None, None, None)  # must not raise
-
-    assert session.committed
+    assert not session.rolled_back
     assert session.closed
 
 
 @pytest.mark.anyio
-async def test_a_failing_callback_does_not_block_the_next_one() -> None:
-    uow, _session = _uow_with_fake_session()
-    fired = []
-    uow.on_commit(lambda: (_ for _ in ()).throw(RuntimeError("broker down")))
-    uow.on_commit(lambda: fired.append("second"))
+async def test_exception_rolls_back_and_closes() -> None:
+    uow, session = _uow_with_fake_session()
 
-    await uow.__aexit__(None, None, None)
+    await uow.__aexit__(ValueError, ValueError("boom"), None)
 
-    assert fired == ["second"]
+    assert session.rolled_back
+    assert not session.committed
+    assert session.closed

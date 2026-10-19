@@ -12,9 +12,7 @@ scripts/verify_concurrent_reservations.py. Concepts: testing-basics.md §4.
 
 import asyncio
 from collections import Counter
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient, Response
@@ -33,17 +31,9 @@ CONCURRENT_REQUESTS = 20
 CHECK_IN = datetime.now(UTC).date() + timedelta(days=30)
 
 
-# Every new reservation enqueues the "reservation received" email via
-# Celery's .delay() (reservation/service.py, BOOK-45). There's no RabbitMQ
-# under test, and .delay() is a *blocking* call: it retries the broker for
-# ~4s and freezes the event loop while it does (measured during BOOK-62).
-# That's irrelevant to what's under test here -- slot contention -- so stub
-# it out: ~7.5s per test down to under a second. The production side of the
-# same blocking behavior is tracked separately.
-@pytest.fixture(autouse=True)
-def _no_email_enqueue() -> Iterator[None]:
-    with patch("app.worker.send_reservation_received_email.delay"):
-        yield
+# No email stub needed (BOOK-64): a new reservation used to call Celery's
+# blocking .delay() (~4s per booking with no RabbitMQ, testing-decisions.md
+# §11); it now writes a BookingCreated outbox row in the same transaction.
 
 
 @pytest.fixture
