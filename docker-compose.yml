@@ -196,6 +196,21 @@ services:
       - .:/code
       - /code/.venv
 
+  # BOOK-64: one-shot -- creates Notification's own `notifications` database
+  # on the db server if it's missing (an existing pgdata volume never reruns
+  # Postgres init scripts), then runs Notification's migrations. Exits when done.
+  notification-migrate:
+    build: .
+    command: uv run --no-dev python -m app.notification.migrate
+    environment:
+      NOTIFICATION_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/notifications
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
+
   # BOOK-51. Its own process, deliberately not folded into `worker` or run as
   # a Celery task -- a Kafka consumer group needs a real, continuously
   # running client, which Celery's task-pull model has no equivalent of
@@ -208,12 +223,14 @@ services:
     # redelivers the uncommitted message
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-64: its own database only -- no DATABASE_URL, Booking's DB is
+      # nothing Notification connects to anymore
+      NOTIFICATION_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/notifications
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SMTP_HOST: mailhog
     depends_on:
-      db:
-        condition: service_healthy
+      notification-migrate:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
       mailhog:

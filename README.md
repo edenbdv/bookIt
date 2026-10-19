@@ -69,7 +69,13 @@ uv run uvicorn app.main:app --reload
 
 The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
 
-**MailHog** catches every email BookIt sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). Two different senders, both land here: `worker` sends the reservation-received email directly (BOOK-45), and `notification-consumer` sends the confirmed/cancelled emails after consuming them from Kafka (BOOK-51). See `docs/jobs/email-basics.md`.
+**Two databases on the one Postgres server (BOOK-64):** `bookit` for Booking, and `notifications` for the Notification service. Starting `notification-consumer` first runs the one-shot `notification-migrate` service, which creates `notifications` if it's missing and brings it up to date. To run Notification's migrations by hand from your machine instead:
+
+```bash
+uv run python -m app.notification.migrate
+```
+
+**MailHog** catches every email BookIt sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). All three booking emails (received, confirmed, cancelled) are sent by `notification-consumer`, after consuming the booking events from Kafka (BOOK-51, BOOK-64). See `docs/jobs/email-basics.md`.
 
 **Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`. The full publish → broker → consume pipeline for `booking-events` is traced end to end in `docs/jobs/booking-events-flow.md`.
 
