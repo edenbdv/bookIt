@@ -15,6 +15,7 @@ contract between two services, and the consumer moves out of the monolith.
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +29,8 @@ from app.notification import consumer
 from app.notification.models import ProcessedNotificationEvent
 from app.notification_consumer import _HANDLERS
 from app.reservation import service as reservation_service
-from tests.integration.helpers import make_pending_reservation
+from app.reservation.schemas import ReservationCreate
+from tests.integration.helpers import make_pending_reservation, make_property, make_user
 
 # first poll includes joining the consumer group and the topic being
 # auto-created -- seconds, not milliseconds
@@ -117,6 +119,54 @@ async def test_confirmed_reservation_reaches_the_guest_through_kafka(
     assert (
         await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
     )
+
+
+# BOOK-64 step 3: a new booking goes through the real creation path, so it
+# emits BookingCreated (no more Celery .delay()); confirming it emits
+# BookingConfirmed. Both wait in the outbox and go out in ONE relay cycle --
+# the "relay was down for a while" case. Same topic, same key
+# (reservation_id) -> same partition, published oldest-first -> the guest
+# gets "received" before "confirmed", never the other way round.
+@pytest.mark.anyio
+async def test_new_booking_sends_received_then_confirmed_in_order(
+    kafka_bootstrap_servers: str,
+    app_db: None,
+    db_session: AsyncSession,
+    kafka_consumer,
+    sent_emails: MagicMock,
+) -> None:
+    host = await make_user(db_session, "host@test.com")
+    guest = await make_user(db_session, "guest@test.com")
+    prop = await make_property(db_session, host)
+    await db_session.commit()
+
+    check_in = datetime.now(UTC).date() + timedelta(days=30)
+    async with UnitOfWork() as uow:
+        reservation = await reservation_service.create_reservation_idempotent(
+            uow,
+            ReservationCreate(
+                property_id=prop.id,
+                check_in=check_in,
+                check_out=check_in + timedelta(days=4),
+                guest_count=2,
+            ),
+            guest.id,
+            str(uuid.uuid4()),
+        )
+    async with UnitOfWork() as uow:
+        await reservation_service.confirm_reservation(uow, reservation.id)
+
+    await _run_relay()  # both events, one cycle
+    await _consume(kafka_consumer, consumer.make_dispatcher(_HANDLERS), messages=2)
+
+    subjects = [call.kwargs["subject"] for call in sent_emails.call_args_list]
+    assert subjects == [
+        "Your reservation request for Cabin",
+        "Your reservation for Cabin is confirmed",
+    ]
+    assert all(call.kwargs["to"] == guest.email for call in sent_emails.call_args_list)
+    # the received email's hold time survived the ISO-string round trip
+    assert " UTC -- it will be released" in sent_emails.call_args_list[0].kwargs["body"]
 
 
 # the full at-least-once story with a real broker: the same event published
