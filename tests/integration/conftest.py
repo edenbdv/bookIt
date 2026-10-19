@@ -13,6 +13,7 @@ from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from testcontainers.community.kafka import KafkaContainer
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
@@ -39,6 +40,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # against the versions the app actually runs on
 POSTGRES_IMAGE = "postgres:16-alpine"
 REDIS_IMAGE = "redis:7-alpine"
+# testcontainers' Kafka module drives Confluent's image (its startup scripts),
+# not docker-compose's apache/kafka -- same broker, both run in KRaft mode
+KAFKA_IMAGE = "confluentinc/cp-kafka:7.6.0"
 
 
 def _clear_cached_clients() -> None:
@@ -90,6 +94,21 @@ def redis_url() -> Iterator[str]:
             mp.setenv("REDIS_URL", url)
             _clear_cached_clients()
             yield url
+        _clear_cached_clients()
+
+
+# BOOK-64: a real Kafka broker, for the outbox -> relay -> Kafka -> consumer
+# pipeline. KRaft mode (no ZooKeeper), same as docker-compose. Not autouse --
+# only the pipeline tests pay for starting it.
+@pytest.fixture(scope="session")
+def kafka_bootstrap_servers() -> Iterator[str]:
+    with KafkaContainer(KAFKA_IMAGE).with_kraft() as kafka:
+        servers = kafka.get_bootstrap_server()
+        with pytest.MonkeyPatch.context() as mp:
+            # read by make_producer() / make_consumer() via get_settings()
+            mp.setenv("KAFKA_BOOTSTRAP_SERVERS", servers)
+            _clear_cached_clients()
+            yield servers
         _clear_cached_clients()
 
 

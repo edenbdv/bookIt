@@ -3,7 +3,8 @@
 The guide for Epic 11 (BOOK-13). Part 1 is general theory: what a microservice split
 actually changes and what it costs. Part 2 applies it to BookIt, ticket by ticket — what
 each one does, how, and why in that order. The concrete target event flow (diagram,
-open design points) lives in `epic-11-flow.md`; read this page first.
+open design points) lives in `epic-11-flow.md`; read this page first. What was
+actually decided along the way, and why: `microservices-decisions.md`.
 
 ---
 
