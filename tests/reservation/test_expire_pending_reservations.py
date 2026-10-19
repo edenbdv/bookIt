@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -7,6 +8,19 @@ from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.service import expire_pending_reservations
 
 PAST = datetime.now(UTC) - timedelta(minutes=1)
+
+
+# BOOK-64: writing an event now also loads the guest and property for the
+# email snapshot. That's not what this file tests (status transitions and
+# which event is written), so it's stubbed here; the payload's contents
+# have their own tests in test_event_payload.py.
+@pytest.fixture(autouse=True)
+def _no_email_snapshot():
+    async def empty(uow, reservation):
+        return {}
+
+    with patch("app.reservation.service._email_snapshot", empty):
+        yield
 
 
 # same minimal-fake approach as test_cancel_reservation.py -- only

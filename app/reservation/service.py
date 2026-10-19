@@ -91,16 +91,19 @@ def transition_to(reservation: Reservation, new_status: ReservationStatus) -> No
     reservation.status = new_status
 
 
-# BOOK-49. Thin payload -- consumers re-fetch current state by id (same
-# pattern as BOOK-45's email job), so a duplicate/delayed at-least-once
-# delivery never hands out stale data. Call after transition_to() succeeds.
+# BOOK-49, revised in BOOK-64. Originally a thin payload (ids only) so
+# consumers re-fetched current state and a delayed redelivery never showed
+# stale data. That required consumers to read Booking's DB -- which BOOK-64's
+# split removes -- so the payload now carries a snapshot instead (see
+# _email_snapshot below, microservices-decisions.md §5). Call after
+# transition_to() succeeds.
 #
 # event_id is generated here, not left to the id column's ORM-level default,
 # so the same value can go in both the row and the payload -- BOOK-51's
 # consumer dedups on it (worker-decisions.md §13), and that only works if
 # the id a consumer reads back out of Kafka is the same one the row itself
 # ends up with, not whatever the ORM happens to assign at flush time.
-def _emit_outbox_event(
+async def _emit_outbox_event(
     uow: UnitOfWork, reservation: Reservation, event_type: OutboxEventType
 ) -> None:
     event_id = uuid.uuid4()
@@ -114,18 +117,43 @@ def _emit_outbox_event(
                 "event_type": event_type.value,
                 "reservation_id": str(reservation.id),
                 "occurred_at": datetime.now(UTC).isoformat(),
+                **(await _email_snapshot(uow, reservation)),
             },
         )
     )
+
+
+# BOOK-64: everything Notification's emails need, so it never reads
+# Booking's tables -- a snapshot as of this event, not current state
+# (microservices-decisions.md §5). JSON-safe: dates/datetimes as ISO strings.
+# Additive only -- this payload is now a contract with another service.
+async def _email_snapshot(uow: UnitOfWork, reservation: Reservation) -> dict:
+    guest = await uow.users.get_by_id(reservation.guest_id)
+    property_ = await uow.properties.get_by_id(reservation.property_id)
+    return {
+        "guest": {"email": guest.email, "display_name": guest.display_name},
+        "property": {
+            "title": property_.title,
+            "city": property_.city,
+            "country": property_.country,
+        },
+        "reservation": {
+            "check_in": reservation.check_in.isoformat(),
+            "check_out": reservation.check_out.isoformat(),
+            "guest_count": reservation.guest_count,
+            "total_cents": reservation.total_cents,
+            "expires_at": (reservation.expires_at.isoformat() if reservation.expires_at else None),
+        },
+    }
 
 
 # system-triggered cancel -- no guest-ownership check. For callers that
 # aren't an HTTP request from the reservation's own guest: the expiry job
 # below, and BOOK-54's saga compensation. cancel_reservation() is the
 # guest-authorized HTTP path; this is what it and system callers share.
-def cancel_reservation_system(uow: UnitOfWork, reservation: Reservation) -> None:
+async def cancel_reservation_system(uow: UnitOfWork, reservation: Reservation) -> None:
     transition_to(reservation, ReservationStatus.CANCELLED)
-    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
+    await _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
 
 
 # stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
@@ -136,7 +164,7 @@ async def confirm_reservation(uow: UnitOfWork, reservation_id: uuid.UUID) -> Res
     if reservation is None:
         raise ReservationNotFoundError
     transition_to(reservation, ReservationStatus.CONFIRMED)
-    _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CONFIRMED)
+    await _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CONFIRMED)
     return reservation
 
 
@@ -152,7 +180,7 @@ async def cancel_reservation(
     # same order as property/service.py's update_property
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
-    cancel_reservation_system(uow, reservation)
+    await cancel_reservation_system(uow, reservation)
     return reservation
 
 
@@ -167,7 +195,7 @@ async def host_cancel_reservation(
     property_ = await uow.properties.get_by_id(reservation.property_id)
     if property_.host_id != current_user_id:
         raise NotPropertyHostError
-    cancel_reservation_system(uow, reservation)
+    await cancel_reservation_system(uow, reservation)
     return reservation
 
 
@@ -211,7 +239,7 @@ async def get_reservation(
 async def expire_pending_reservations(uow: UnitOfWork) -> int:
     reservations = await uow.reservations.list_expired_pending(datetime.now(UTC))
     for reservation in reservations:
-        cancel_reservation_system(uow, reservation)
+        await cancel_reservation_system(uow, reservation)
     return len(reservations)
 
 

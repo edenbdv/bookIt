@@ -7,6 +7,67 @@ ticket by ticket, and when each decision should be revisited. Same format as
 
 ---
 
+# Epic-wide
+
+## 0. What gets split out, and what stays together in Booking
+
+**Chosen:** only two services leave the monolith — **Notification** (BOOK-64) and
+**Payment** (BOOK-65). Everything else stays together in what this doc calls
+**Booking**: really the remaining monolith, one service with one database.
+
+```
+ Booking (remaining monolith, one DB)        Notification       Payment
+   ├── auth / users                          (own DB)           (own DB)
+   ├── properties
+   ├── reservations
+   └── reviews
+```
+
+**Honestly, none of these splits is *required* in BookIt** — the roadmap's reason for
+Epic 11 is learning (`microservices-basics.md` §2). But if parts are going to be split,
+these two are the natural candidates, because each passes **both** tests a split needs:
+
+1. **It has a reason of its own** to be separate — isolation, scale, security, or an
+   external system the rest of the app doesn't share.
+2. **It has a clean boundary** — few calls crossing it (`microservices-basics.md` §3.1).
+
+**Notification — why it's worth splitting:**
+- **Fault isolation.** A slow or down mail server must never affect bookings. As its own
+  service, an SMTP problem stays inside it.
+- **It only receives.** Events in, emails out; nobody waits on it, nobody asks it
+  anything. The split costs almost nothing.
+- **A different load pattern.** Email sending runs in the background, sometimes in
+  bursts, and can scale on its own.
+
+**Payment — why it's worth splitting:**
+- **An external system with its own failure modes** — the provider, timeouts, the
+  webhook, reconciliation. A world of its own.
+- **Security — the real-world reason.** Payment code is held to strict standards
+  (PCI-DSS). Keeping it in a small, separate service means less code and fewer people
+  ever near sensitive data.
+- **Its own data** — charges and refunds, clearly owned by one service.
+
+**Why users / properties / reservations / reviews stay together** — they fail test 1
+(no separate load, no external system of their own, no special security requirement)
+*and* test 2, because they work together on almost every request:
+- creating a reservation needs the property (price, `max_guests`, host) and the guest;
+- cancelling needs the property's cancellation policy;
+- a review needs the reservation and the property;
+- listing properties needs review stats.
+
+Splitting them would turn each of those into synchronous calls between services —
+`microservices-basics.md` §4's "chatty services" — paying every cost of distribution
+for no gain. Inside Booking they keep sharing one DB, one transaction, and plain JOINs.
+
+**Consequence for BOOK-64:** when Booking writes an event, it's free to read `users`
+and `properties` to fill the payload (§5) — same service, same DB.
+
+**Revisit when:** a part of Booking develops its own reason to split — e.g. an
+"identity" service for users/login if other systems ever need to authenticate against
+it. Not on the roadmap.
+
+---
+
 # BOOK-64 — Notification as its own service
 
 ## 1. The starting point: six ties to the monolith
@@ -141,6 +202,23 @@ happened, not whatever the reservation looks like by the time the email is sent.
 **The payload is now a contract** between two services: add fields freely; never
 remove or rename one without updating the consumer first.
 
+**This reverses BOOK-49's thin payload, on purpose.** BOOK-49 chose a thin event (just
+ids) so that consumers re-fetch the *current* state — a delayed or redelivered event
+could then never show stale data. That was right while the consumer shared Booking's
+DB. It can't survive the split: the whole point of BOOK-64 is that Notification no
+longer reads Booking's tables, so it can't re-fetch anything. The trade is the one
+above — a snapshot instead of current state — and for an email the snapshot is the
+correct one. The code comment above `_emit_outbox_event` (`reservation/service.py`) is
+updated to match.
+
+**Implementation consequence: `_emit_outbox_event` becomes `async`.** Filling the
+payload means loading the guest and the property, and every DB read in this app is an
+`await` (async SQLAlchemy). A plain `def` can't `await` — and lazy-loading
+`reservation.guest` doesn't work either: async SQLAlchemy raises `MissingGreenlet`
+instead of silently querying. So `_emit_outbox_event` and `cancel_reservation_system`
+(its only sync caller) become `async`, and their six call sites gain an `await`. All
+six callers were already `async`, so nothing else changes shape.
+
 **Revisit when:** a payload grows large or carries data Booking shouldn't share — then
 send only what each consumer needs, or fall back to a lookup for that one field.
 
@@ -150,8 +228,10 @@ send only what each consumer needs, or fall back to a lookup for that one field.
 
 | Decision | Choice | Revisit when |
 |---|---|---|
+| What gets split out | Only Notification and Payment; users / properties / reservations / reviews stay together in Booking | Part of Booking develops its own reason to split |
 | BOOK-64 repo structure | `services/notification/` in the same repo (monorepo) | Separate owners want separate release cycles |
 | "Reservation received" trigger | Kafka `BookingCreated` via the outbox — revisits `worker-decisions.md` §9 | Never back to Celery while Notification is separate |
 | Why not a Celery task across services | A command makes the sender know the receiver; an event lets the receiver know the sender | — |
-| Email data | Carried in the event payload, no lookups into Booking | Payload grows too large or too sensitive |
+| Email data | Carried in the event payload, no lookups into Booking — reverses BOOK-49's thin payload | Payload grows too large or too sensitive |
+| `_emit_outbox_event` | `async`, loads guest + property to fill the payload | — |
 | Event payload | A cross-service contract: add freely, never remove/rename first | — |

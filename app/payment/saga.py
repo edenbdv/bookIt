@@ -63,7 +63,7 @@ async def react_to_payment_outcome(uow: UnitOfWork, payment: Payment) -> None:
     elif payment.status == PaymentStatus.FAILED:
         # compensating action -- not cancel_reservation(), which requires a
         # guest current_user_id this system-triggered path doesn't have
-        reservation_service.cancel_reservation_system(uow, reservation)
+        await reservation_service.cancel_reservation_system(uow, reservation)
 
 
 # BOOK-54: charged but couldn't confirm -- refund and release the hold.
@@ -78,7 +78,7 @@ async def _refund_and_release(uow: UnitOfWork, payment: Payment, reservation: Re
 
     await service.create_refund(uow, reservation, amount_cents)
     # unconditional -- the hold releases either way (unchanged from BOOK-54)
-    reservation_service.cancel_reservation_system(uow, reservation)
+    await reservation_service.cancel_reservation_system(uow, reservation)
     await uow.session.commit()
 
 
