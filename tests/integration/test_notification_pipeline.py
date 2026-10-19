@@ -13,6 +13,8 @@ These are the guard rails for BOOK-64 itself: the event payload becomes a
 contract between two services, and the consumer moves out of the monolith.
 """
 
+import json
+import smtplib
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -29,6 +31,7 @@ from app.notification import consumer
 from app.notification.models import ProcessedNotificationEvent
 from app.notification_consumer import _HANDLERS
 from app.reservation import service as reservation_service
+from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.schemas import ReservationCreate
 from tests.integration.helpers import make_pending_reservation, make_property, make_user
 
@@ -66,20 +69,23 @@ async def _run_relay() -> None:
         await relay.publish_pending_events(uow, producer)
 
 
-async def _consume(kafka, handle, messages: int) -> None:
-    """Poll the real consumer until `messages` were handled and committed."""
-    handled = 0
+async def _consume(kafka, handle, messages: int, dead_letter=None) -> None:
+    """Poll the real consumer until `messages` arrived -- handled, or (with a
+    dead-letter sink) set aside after failing. Counted either way."""
+    arrived = 0
 
     async def counting(payload: dict) -> None:
-        nonlocal handled
-        await handle(payload)
-        handled += 1
+        nonlocal arrived
+        try:
+            await handle(payload)
+        finally:
+            arrived += 1
 
     for _ in range(CONSUME_TIMEOUT_POLLS):
-        await consumer._process_one(kafka, counting)
-        if handled >= messages:
+        await consumer._process_one(kafka, counting, dead_letter)
+        if arrived >= messages:
             return
-    raise AssertionError(f"only {handled} of {messages} message(s) arrived")
+    raise AssertionError(f"only {arrived} of {messages} message(s) arrived")
 
 
 @pytest.fixture
@@ -196,6 +202,98 @@ async def test_republished_event_sends_only_one_email(
     await _consume(kafka_consumer, consumer.make_dispatcher(_HANDLERS), messages=2)
 
     sent_emails.assert_called_once()
+    assert (
+        await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
+    )
+
+
+def _read_dead_letters(topic: str, expected: int) -> list:
+    """Read `expected` messages off the dead-letter topic with a throwaway
+    consumer group -- the DLQ is just another Kafka topic."""
+    from confluent_kafka import Consumer
+
+    from app.core.config import get_settings
+
+    reader = Consumer(
+        {
+            "bootstrap.servers": get_settings().kafka_bootstrap_servers,
+            "group.id": f"dlq-reader-{uuid.uuid4().hex[:8]}",
+            "auto.offset.reset": "earliest",
+        }
+    )
+    reader.subscribe([topic])
+    found = []
+    try:
+        for _ in range(CONSUME_TIMEOUT_POLLS):
+            msg = reader.poll(1.0)
+            if msg is not None and not msg.error():
+                found.append(msg)
+                if len(found) >= expected:
+                    break
+    finally:
+        reader.close()
+    return found
+
+
+# BOOK-64 step 3d: an email that fails for good (a refused address) is set
+# aside on booking-events.dlq with its error, and the next guest's email
+# still goes out -- one bad message no longer stops the queue
+@pytest.mark.anyio
+async def test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving(
+    kafka_bootstrap_servers: str,
+    app_db: None,
+    db_session: AsyncSession,
+    kafka_consumer,
+    sent_emails: MagicMock,
+) -> None:
+    host = await make_user(db_session, "host@test.com")
+    bad_guest = await make_user(db_session, "bounces@test.com")
+    good_guest = await make_user(db_session, "dana@test.com")
+    prop = await make_property(db_session, host)
+    check_in = datetime.now(UTC).date() + timedelta(days=30)
+    bad, good = (
+        Reservation(
+            property_id=prop.id,
+            guest_id=guest.id,
+            check_in=check_in + timedelta(days=offset),
+            check_out=check_in + timedelta(days=offset + 2),
+            guest_count=2,
+            total_cents=20000,
+            status=ReservationStatus.PENDING,
+        )
+        for guest, offset in ((bad_guest, 0), (good_guest, 10))
+    )
+    db_session.add_all([bad, good])
+    await db_session.commit()
+    for reservation in (bad, good):  # bad first -- it's ahead in the queue
+        async with UnitOfWork() as uow:
+            await reservation_service.confirm_reservation(uow, reservation.id)
+
+    def smtp(to: str, subject: str, body: str) -> None:
+        if to == "bounces@test.com":
+            raise smtplib.SMTPRecipientsRefused({to: (550, b"no such user")})
+
+    sent_emails.side_effect = smtp
+
+    await _run_relay()
+    await _consume(
+        kafka_consumer,
+        consumer.make_dispatcher(_HANDLERS),
+        messages=2,
+        dead_letter=consumer.make_dead_letter(consumer.make_producer()),
+    )
+
+    # the queue kept moving: the second guest still got their email
+    assert [c.kwargs["to"] for c in sent_emails.call_args_list] == [
+        "bounces@test.com",  # tried once -- refused addresses aren't retried
+        "dana@test.com",
+    ]
+    # ...and the failed one is on the DLQ, original bytes, error in headers
+    [dead] = _read_dead_letters(consumer.dead_letter_topic(), expected=1)
+    assert json.loads(dead.value())["reservation_id"] == str(bad.id)
+    headers = {key: value.decode() for key, value in dead.headers()}
+    assert headers["error_type"] == "SMTPRecipientsRefused"
+    # only the email that went out is marked processed
     assert (
         await db_session.scalar(select(func.count()).select_from(ProcessedNotificationEvent)) == 1
     )

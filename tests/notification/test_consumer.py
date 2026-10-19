@@ -5,6 +5,7 @@ unchanged, once this code lives in services/notification/.
 """
 
 import json
+import smtplib
 import uuid
 from typing import Self
 from unittest.mock import patch
@@ -145,12 +146,103 @@ async def test_failed_handler_does_not_mark_processed(handlers) -> None:
     assert uow.session.added == []
 
 
+# --- BOOK-64: retry with backoff, the policy the Celery email task used to have ---
+
+
+@pytest.fixture
+def no_retry_wait():
+    # same number of retries, zero wait -- fast, and keeps the policy itself under test
+    with patch.object(consumer, "RETRY_DELAYS", (0.0,) * len(consumer.RETRY_DELAYS)):
+        yield
+
+
+def _flaky(failures: list[Exception]):
+    """A handler that raises each of `failures` in turn, then succeeds."""
+    calls: list[dict] = []
+
+    async def handler(payload: dict) -> None:
+        calls.append(payload)
+        if len(calls) <= len(failures):
+            raise failures[len(calls) - 1]
+
+    return handler, calls
+
+
+@pytest.mark.anyio
+async def test_transient_error_is_retried_then_marked_processed(no_retry_wait) -> None:
+    handler, calls = _flaky([smtplib.SMTPServerDisconnected("blip"), OSError("conn reset")])
+    uow = FakeUnitOfWork(processed=set())
+
+    with patch.object(consumer, "UnitOfWork", return_value=uow):
+        await consumer.make_dispatcher({"booking_confirmed": handler})(
+            _payload("booking_confirmed")
+        )
+
+    assert len(calls) == 3  # two failures, then the send that worked
+    [marker] = uow.session.added  # marked once, like any successful send
+    assert isinstance(marker, ProcessedNotificationEvent)
+
+
+# a refused address won't fix itself -- no retries, straight back to the caller
+@pytest.mark.anyio
+async def test_permanent_error_is_not_retried(no_retry_wait) -> None:
+    refused = smtplib.SMTPRecipientsRefused({"dana@test.com": (550, b"no such user")})
+    handler, calls = _flaky([refused])
+    uow = FakeUnitOfWork(processed=set())
+
+    with (
+        patch.object(consumer, "UnitOfWork", return_value=uow),
+        pytest.raises(smtplib.SMTPRecipientsRefused),
+    ):
+        await consumer.make_dispatcher({"booking_confirmed": handler})(
+            _payload("booking_confirmed")
+        )
+
+    assert len(calls) == 1
+    assert uow.session.added == []
+
+
+@pytest.mark.anyio
+async def test_transient_error_outlasting_every_retry_is_raised(no_retry_wait) -> None:
+    attempts = len(consumer.RETRY_DELAYS) + 1
+    handler, calls = _flaky([OSError("SMTP down")] * attempts)
+    uow = FakeUnitOfWork(processed=set())
+
+    with (
+        patch.object(consumer, "UnitOfWork", return_value=uow),
+        pytest.raises(OSError),
+    ):
+        await consumer.make_dispatcher({"booking_confirmed": handler})(
+            _payload("booking_confirmed")
+        )
+
+    assert len(calls) == attempts  # the first try plus every retry
+    assert uow.session.added == []  # never marked -- the email didn't go out
+
+
+@pytest.mark.anyio
+async def test_retries_wait_with_growing_delays() -> None:
+    handler, _ = _flaky([OSError("down")] * 2)
+    waited: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    with patch.object(consumer.asyncio, "sleep", fake_sleep):
+        await consumer._with_retry(handler, _payload())
+
+    assert waited == list(consumer.RETRY_DELAYS[:2])
+    assert waited == sorted(waited)
+
+
 # --- _process_one: the Kafka offset is committed only after handling ---
 
 
 class FakeMessage:
-    def __init__(self, payload: dict | None = None, error: str | None = None) -> None:
-        self._value = json.dumps(payload).encode() if payload else b""
+    def __init__(
+        self, payload: dict | None = None, error: str | None = None, raw: bytes | None = None
+    ) -> None:
+        self._value = raw if raw is not None else (json.dumps(payload).encode() if payload else b"")
         self._error = error
 
     def value(self) -> bytes:
@@ -158,6 +250,9 @@ class FakeMessage:
 
     def error(self) -> str | None:
         return self._error
+
+    def offset(self) -> int:
+        return 42
 
 
 class FakeConsumer:
@@ -211,3 +306,81 @@ async def test_empty_poll_and_error_messages_are_ignored() -> None:
         kafka = FakeConsumer(message)
         await consumer._process_one(kafka, handle)
         assert kafka.committed == []
+
+
+# --- BOOK-64: dead-letter topic -- a message that fails for good is set aside ---
+
+
+class FakeDeadLetter:
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[tuple[bytes, Exception]] = []
+        self._fail = fail
+
+    async def __call__(self, value: bytes, error: Exception) -> None:
+        if self._fail:
+            raise RuntimeError("Kafka down too")
+        self.sent.append((value, error))
+
+
+@pytest.mark.anyio
+async def test_failed_message_is_dead_lettered_and_committed() -> None:
+    message = FakeMessage(_payload())
+    kafka = FakeConsumer(message)
+    dead_letter = FakeDeadLetter()
+
+    async def handle(payload: dict) -> None:
+        raise smtplib.SMTPRecipientsRefused({"x@test.com": (550, b"no such user")})
+
+    await consumer._process_one(kafka, handle, dead_letter)  # must not raise
+
+    [(value, error)] = dead_letter.sent
+    assert value == message.value()  # the original bytes, untouched
+    assert isinstance(error, smtplib.SMTPRecipientsRefused)
+    # committed -- the queue moves on instead of being stuck on this message
+    assert kafka.committed == [message]
+
+
+# not even valid JSON -- can never succeed, so straight to the dead-letter topic
+@pytest.mark.anyio
+async def test_malformed_message_is_dead_lettered() -> None:
+    message = FakeMessage(raw=b"not json {")
+    kafka = FakeConsumer(message)
+    dead_letter = FakeDeadLetter()
+
+    async def handle(payload: dict) -> None:
+        raise AssertionError("must not be reached")
+
+    await consumer._process_one(kafka, handle, dead_letter)
+
+    assert [value for value, _ in dead_letter.sent] == [b"not json {"]
+    assert kafka.committed == [message]
+
+
+# the one thing never allowed: losing a message. If it can't even be set
+# aside, it stays uncommitted and is redelivered after the restart
+@pytest.mark.anyio
+async def test_dead_letter_failure_leaves_the_message_uncommitted() -> None:
+    kafka = FakeConsumer(FakeMessage(_payload()))
+
+    async def handle(payload: dict) -> None:
+        raise RuntimeError("handling failed")
+
+    with pytest.raises(RuntimeError, match="Kafka down too"):
+        await consumer._process_one(kafka, handle, FakeDeadLetter(fail=True))
+
+    assert kafka.committed == []
+
+
+@pytest.mark.anyio
+async def test_successful_message_never_touches_the_dead_letter_topic() -> None:
+    message = FakeMessage(_payload())
+    kafka = FakeConsumer(message)
+    dead_letter = FakeDeadLetter()
+
+    async def handle(payload: dict) -> None:
+        pass
+
+    await consumer._process_one(kafka, handle, dead_letter)
+
+    assert dead_letter.sent == []
+    assert kafka.committed == [message]

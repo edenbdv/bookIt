@@ -204,6 +204,9 @@ services:
   notification-consumer:
     build: .
     command: uv run --no-dev python -m app.notification_consumer
+    # BOOK-64: an unhandled error ends the process -- bring it back, and Kafka
+    # redelivers the uncommitted message
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092

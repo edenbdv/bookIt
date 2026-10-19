@@ -91,6 +91,8 @@ module of the monolith wearing a separate container. Six things tie it to Bookin
 2. **Enrich the event** with everything the emails need, and switch the handlers to
    read the payload instead of the DB. Still inside the monolith. Removes ties 1–2.
 3. **Move "reservation received" to Kafka** as `BookingCreated` (§4). Removes tie 5.
+   - **3d, added along the way:** give the consumer the failure handling the Celery
+     task used to have — restart, retry, dead-letter topic (§7).
 4. **Own database + migrations** for Notification; drop the cross-service foreign key.
    Removes tie 3.
 5. **Extract the code** into its own service with no imports from `app`, its own image
@@ -272,6 +274,74 @@ stopped queue.
 **Revisit when:** never as a principle. The *contract* phase can be shortened when
 there are no deployments to coordinate and no messages in flight — as in tests.
 
+## 7. When handling an event fails: restart, retry, dead-letter (step 3d)
+
+**The problem, found while moving "reservation received".** Any exception while handling
+an event — SMTP down, the DB unreachable for the Inbox check, a missing payload field,
+a bug — escaped the consumer's `while True` loop and **ended the whole process**.
+`docker-compose.yml` had no restart policy, so it stayed down: from that moment *no*
+email went out, until someone restarted it by hand. A permanent error (a refused
+address) was worse: every restart hit the same message and died again — a crash loop.
+
+This had been true for "confirmed" / "cancelled" since BOOK-51. Moving "received" off
+Celery (§4) made it a **regression** for that email: the Celery task had retries with
+backoff, and a dead-letter queue for permanent failures (BOOK-47). So the consumer gets
+the same protection, in three layers:
+
+| Layer | What it does | Where |
+|---|---|---|
+| **1. Restart** | If the process dies anyway, Docker brings it back; Kafka redelivers the uncommitted message | `restart: unless-stopped` on `notification-consumer` |
+| **2. Retry with backoff** | A *temporary* error is retried in place — 4 retries, waiting 1, 2, 4, 8 s (~15 s) — without crashing | `_with_retry` in `notification/consumer.py` |
+| **3. Dead-letter topic** | A message that fails *for good* (permanent error, retries exhausted, not even valid JSON) is published to `booking-events.dlq` and **committed**, so the queue keeps moving | `_process_one` + `make_dead_letter` |
+
+### Temporary vs. permanent — and the bug a test found
+
+Only temporary SMTP errors are retried (`TRANSIENT_ERRORS`: connection errors,
+disconnects, `OSError`). A refused address, a refused sender, bad credentials won't fix
+themselves (`PERMANENT_ERRORS`) — straight to the DLQ, no retries.
+
+**Every `smtplib` error subclasses `OSError`.** So listing `OSError` as transient also
+caught the permanent ones — a refused address was retried anyway. The old Celery policy
+had exactly this bug: its comment said refused addresses were excluded, but `OSError` in
+`autoretry_for` caught them. Nobody noticed, because nothing tested it. The fix:
+`PERMANENT_ERRORS` is checked **first** and re-raised. `test_permanent_error_is_not_retried`
+is the test that found it.
+
+### The dead-letter topic
+
+- **Hand-rolled**, because Kafka has no broker-side dead-lettering (BOOK-48 called this
+  out). It's just another topic: `<topic>.dlq`.
+- **The value is the original message, byte for byte** — so it can be inspected, or
+  replayed onto the main topic once the cause is fixed. *Why* it failed travels in
+  headers (`error_type`, `error`, `failed_at`), not wrapped around the value.
+- **Order: publish to the DLQ, wait for Kafka to confirm, then commit.** If the DLQ
+  publish itself fails, that raises *before* the commit: the message stays uncommitted
+  and is redelivered after the restart. A message is never silently dropped — the one
+  rule none of the layers may break.
+- **Not marked processed.** The Inbox row is written only when an email actually went
+  out, so replaying a dead-lettered message later still sends it.
+
+### Accepted trade-offs
+
+- **Retries hold the partition.** While one message waits through its ~15 s of retries,
+  messages behind it on the same partition wait too. Acceptable for email; it also
+  preserves per-reservation order.
+- **The Inbox transaction stays open during retries** — one DB connection held for up to
+  ~15 s. Fine for a single consumer; worth revisiting if Notification scales out.
+- **The DLQ loses the original key** (only the value is republished). Ordering inside
+  the DLQ doesn't matter — it's for inspection and replay, not live processing.
+- **Nothing reads the DLQ yet.** Inspecting and replaying it is manual (kafka-ui at
+  `localhost:8090`). An alert on "DLQ not empty" belongs to Epic 9 (observability).
+
+**Tests:** unit tests for each layer (`tests/notification/test_consumer.py`), plus one
+against real Kafka (`test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving`):
+a refused address lands on `.dlq` with its error, and the next guest's email still goes
+out.
+
+**Revisit when:** the consumer scales to several instances (the open transaction during
+retries), or failures get frequent enough that a replay tool or a DLQ alert is worth
+building.
+
 ---
 
 ## Cheat sheet
@@ -288,3 +358,7 @@ there are no deployments to coordinate and no messages in flight — as in tests
 | Rolling out a new event type | Receiver learns it first, then the sender starts sending | — |
 | Unknown event type at the consumer | Log a warning and skip — never a crash (poison message) | — |
 | Event payload | A cross-service contract: add freely, never remove/rename first | — |
+| Consumer crashes | `restart: unless-stopped`; Kafka redelivers the uncommitted message | — |
+| Temporary SMTP error | Retry in place: 1, 2, 4, 8 s, then dead-letter | Retries holding the partition becomes a problem |
+| Permanent SMTP error | No retry, straight to the DLQ — checked *before* `OSError`, which every smtplib error subclasses | — |
+| Message that fails for good | `booking-events.dlq`: original bytes + error headers, then commit; DLQ publish fails ⇒ don't commit | Failures frequent enough to need a replay tool or alert |

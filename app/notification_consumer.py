@@ -9,7 +9,14 @@ handlers and starts it. Full pipeline: docs/jobs/booking-events-flow.md.
 
 from app.core.outbox.models import OutboxEventType
 from app.notification import service as notification_service
-from app.notification.consumer import EventHandler, make_consumer, make_dispatcher, run
+from app.notification.consumer import (
+    EventHandler,
+    make_consumer,
+    make_dead_letter,
+    make_dispatcher,
+    make_producer,
+    run,
+)
 
 # event_type (from the Kafka payload) -> the email to send for it
 _HANDLERS: dict[str, EventHandler] = {
@@ -22,8 +29,9 @@ _HANDLERS: dict[str, EventHandler] = {
 
 
 def main() -> None:
-    # make_dispatcher wraps _HANDLERS with the dedup check (§13); run() polls forever
-    run(make_consumer(), make_dispatcher(_HANDLERS))
+    # make_dispatcher wraps _HANDLERS with the dedup check (§13); run() polls
+    # forever, setting aside anything that fails for good on booking-events.dlq
+    run(make_consumer(), make_dispatcher(_HANDLERS), make_dead_letter(make_producer()))
 
 
 if __name__ == "__main__":
