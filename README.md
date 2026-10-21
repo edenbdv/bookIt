@@ -159,6 +159,8 @@ $env:TESTCONTAINERS_RYUK_DISABLED = "true"; uv run pytest tests/integration -v
 
 Without `ryuk`, containers are still removed on a normal finish, but not if the run is killed mid-way — clean those up with `docker ps` / `docker rm -f`.
 
+**`Port mapping for container … and port 8080 is not available`** (or `9093`): on Docker Desktop, right after Docker restarts, a container can be up before its port is published. The integration conftest retries that lookup for ~10s, so you shouldn't see it any more. You don't need to disable `ryuk` for it. If it still shows up, Docker itself is unhealthy: check `docker ps` and restart Docker Desktop. Details: [docs/testing/testing-decisions.md §10](docs/testing/testing-decisions.md#10-ryuk-and-the-network-workaround).
+
 Concepts behind the setup (unit vs. integration, fixtures, isolation, async pitfalls): [docs/testing/testing-basics.md](docs/testing/testing-basics.md).
 
 ## Frontend
