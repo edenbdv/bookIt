@@ -11,6 +11,9 @@ from app.core.db.models import Base
 
 
 class OutboxEventType(str, enum.Enum):
+    # BOOK-64: replaces the direct Celery trigger for the "reservation
+    # received" email (microservices-decisions.md §4)
+    BOOKING_CREATED = "booking_created"
     BOOKING_CONFIRMED = "booking_confirmed"
     BOOKING_CANCELLED = "booking_cancelled"
 

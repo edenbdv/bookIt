@@ -5,16 +5,26 @@ elsewhere in tests/ still run without Docker. Concepts behind every choice
 here: docs/testing/testing-basics.md (§ refs below).
 """
 
+import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
+from notification import migrate as notification_migrate
+from notification.config import get_notification_settings
+from notification.db import (
+    get_notification_engine,
+    get_notification_session_factory,
+    notification_database_url,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from testcontainers.community.kafka import KafkaContainer
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
+from testcontainers.core.docker_client import DockerClient
 
 # imported for their side effect, same list as alembic/env.py: every model
 # must be registered before any one of them is used, or relationship()
@@ -22,7 +32,6 @@ from testcontainers.community.redis import RedisContainer
 import app.auth.models
 import app.core.idempotency.models
 import app.core.outbox.models
-import app.notification.models
 import app.payment.models
 import app.property.models
 import app.reservation.models
@@ -39,6 +48,38 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # against the versions the app actually runs on
 POSTGRES_IMAGE = "postgres:16-alpine"
 REDIS_IMAGE = "redis:7-alpine"
+# testcontainers' Kafka module drives Confluent's image (its startup scripts),
+# not docker-compose's apache/kafka -- same broker, both run in KRaft mode
+KAFKA_IMAGE = "confluentinc/cp-kafka:7.6.0"
+
+# up to ~10s for Docker to publish a container's port (testing-decisions.md §10)
+PORT_LOOKUP_ATTEMPTS = 20
+PORT_LOOKUP_DELAY_S = 0.5
+
+
+# Docker Desktop (WSL2) can report a container "running" before its port
+# mapping is published -- most often on the first run after Docker restarts.
+# testcontainers looks the port up once and raises ConnectionError, and that
+# one lookup is behind every container we start: ryuk's 8080 (inside the
+# first container's start()), Kafka's 9093, Postgres and Redis. Retrying the
+# lookup covers all of them; retrying start() wouldn't -- ryuk's container
+# has a fixed name, so a second start() clashes with the first.
+# autouse + session scope: set up before postgres_url & co. start anything.
+@pytest.fixture(scope="session", autouse=True)
+def _retry_port_lookup() -> Iterator[None]:
+    lookup = DockerClient.port
+
+    def lookup_with_retry(self: DockerClient, container_id: str, port: int) -> str:
+        for _ in range(PORT_LOOKUP_ATTEMPTS - 1):
+            try:
+                return lookup(self, container_id, port)
+            except ConnectionError:
+                time.sleep(PORT_LOOKUP_DELAY_S)
+        return lookup(self, container_id, port)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(DockerClient, "port", lookup_with_retry)
+        yield
 
 
 def _clear_cached_clients() -> None:
@@ -50,6 +91,10 @@ def _clear_cached_clients() -> None:
     get_engine.cache_clear()
     get_session_factory.cache_clear()
     get_redis_client.cache_clear()
+    # BOOK-64: Notification's own settings and engine, same reason
+    get_notification_settings.cache_clear()
+    get_notification_engine.cache_clear()
+    get_notification_session_factory.cache_clear()
 
 
 # scope="session": starting a container + running every migration takes
@@ -69,6 +114,13 @@ def postgres_url() -> Iterator[str]:
             # real migrations, not Base.metadata.create_all() -- btree_gist
             # only exists in a migration (testing-basics.md §3.3)
             command.upgrade(Config(str(REPO_ROOT / "alembic.ini")), "head")
+
+            # BOOK-64: Notification's own `notifications` database, on the same
+            # server -- mirrors docker-compose. Created and migrated by the very
+            # script compose's notification-migrate runs, so that's under test too.
+            mp.setenv("NOTIFICATION_DATABASE_URL", url.rsplit("/", 1)[0] + "/notifications")
+            _clear_cached_clients()
+            notification_migrate.main()
 
             yield url
 
@@ -93,6 +145,21 @@ def redis_url() -> Iterator[str]:
         _clear_cached_clients()
 
 
+# BOOK-64: a real Kafka broker, for the outbox -> relay -> Kafka -> consumer
+# pipeline. KRaft mode (no ZooKeeper), same as docker-compose. Not autouse --
+# only the pipeline tests pay for starting it.
+@pytest.fixture(scope="session")
+def kafka_bootstrap_servers() -> Iterator[str]:
+    with KafkaContainer(KAFKA_IMAGE).with_kraft() as kafka:
+        servers = kafka.get_bootstrap_server()
+        with pytest.MonkeyPatch.context() as mp:
+            # read by make_producer() / make_consumer() via get_settings()
+            mp.setenv("KAFKA_BOOTSTRAP_SERVERS", servers)
+            _clear_cached_clients()
+            yield servers
+        _clear_cached_clients()
+
+
 # scope="function": a fresh engine per test, disposed at the end -- keeps the
 # engine's lifetime the same as the per-test event loop, so no connection
 # outlives the loop it was opened on (testing-basics.md §3.5)
@@ -103,26 +170,44 @@ async def db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
     await engine.dispose()
 
 
+# BOOK-64: the test's own connection to Notification's database -- the
+# counterpart of db_engine, for reading back what the consumer wrote there
+@pytest.fixture
+async def notification_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(notification_database_url())
+    yield engine
+    await engine.dispose()
+
+
+async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
+    async with engine.begin() as conn:
+        tables = (
+            await conn.scalars(
+                text(
+                    "SELECT quote_ident(tablename) FROM pg_tables"
+                    " WHERE schemaname = 'public' AND tablename <> :version_table"
+                ),
+                {"version_table": version_table},
+            )
+        ).all()
+        if tables:
+            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+
+
 # autouse: every integration test gets this without asking for it -- one
 # forgotten fixture would otherwise leak rows into whichever test runs next.
 # TRUNCATE, not rollback-per-test: app code commits on its own on purpose
 # (e.g. BOOK-55's commit split), which would end a wrapping transaction
 # early (testing-basics.md §3.4). Table list read from the catalog rather
 # than hardcoded, so a table added by a future migration is covered too.
+# BOOK-64: both databases -- Booking's and Notification's.
 @pytest.fixture(autouse=True)
-async def _truncate_tables(db_engine: AsyncEngine) -> AsyncIterator[None]:
+async def _truncate_tables(
+    db_engine: AsyncEngine, notification_db_engine: AsyncEngine
+) -> AsyncIterator[None]:
     yield
-    async with db_engine.begin() as conn:
-        tables = (
-            await conn.scalars(
-                text(
-                    "SELECT quote_ident(tablename) FROM pg_tables"
-                    " WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
-                )
-            )
-        ).all()
-        if tables:
-            await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+    await _truncate_all(db_engine, "alembic_version")
+    await _truncate_all(notification_db_engine, "notification_alembic_version")
 
 
 @pytest.fixture
@@ -130,6 +215,14 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     # expire_on_commit=False -- same as the app's own session factory
     # (core/db/engine.py), so objects stay readable after a commit
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+async def notification_db_session(
+    notification_db_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    async with AsyncSession(notification_db_engine, expire_on_commit=False) as session:
         yield session
 
 
@@ -146,6 +239,7 @@ async def app_db(postgres_url: str) -> AsyncIterator[None]:
     _clear_cached_clients()
     yield
     await get_engine().dispose()
+    await get_notification_engine().dispose()
     _clear_cached_clients()
 
 

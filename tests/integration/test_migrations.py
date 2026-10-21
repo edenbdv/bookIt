@@ -46,3 +46,20 @@ async def test_no_overlapping_reservations_constraint_exists(db_engine: AsyncEng
             )
         )
     assert constraint_type == "x"  # 'x' = exclusion constraint
+
+
+# BOOK-64 step 4: Notification's Inbox lives only in its own database --
+# Booking's migrations dropped their copy (f375ff431cb1), Notification's own
+# migrations (services/notification/src/notification/migrations) created it in `notifications`
+@pytest.mark.anyio
+async def test_inbox_table_lives_only_in_notifications_db(
+    db_engine: AsyncEngine, notification_db_engine: AsyncEngine
+) -> None:
+    query = text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+    async with db_engine.connect() as conn:
+        booking_tables = set((await conn.scalars(query)).all())
+    async with notification_db_engine.connect() as conn:
+        notification_tables = set((await conn.scalars(query)).all())
+
+    assert "processed_notification_events" not in booking_tables
+    assert notification_tables == {"processed_notification_events", "notification_alembic_version"}

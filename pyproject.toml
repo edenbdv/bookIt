@@ -25,6 +25,15 @@ dependencies = [
 [tool.uv]
 package = false
 
+# BOOK-64: a uv workspace -- each service has its own pyproject.toml (its own
+# dependencies), all resolved into this one shared uv.lock. One `uv sync`
+# installs everything. See docs/microservices/microservices-decisions.md.
+[tool.uv.workspace]
+members = ["services/notification"]
+
+[tool.uv.sources]
+notification = { workspace = true }
+
 [tool.pytest.ini_options]
 # app/ isn't an installed package ([tool.uv] package = false above) --
 # pytest doesn't put the repo root on sys.path on its own, so imports
@@ -40,6 +49,9 @@ dev = [
     "httpx>=0.28",
     "testcontainers[postgres,redis]>=4.15.0",
     "pytest-repeat>=0.9.4",
+    # BOOK-64: dev-only -- the cross-service tests (tests/integration/) drive
+    # Booking and Notification together. Booking's own code never imports it.
+    "notification",
 ]
 
 [tool.ruff]

@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 import app.auth.models
 import app.core.idempotency.models
 import app.core.outbox.models
-import app.notification.models
+
+# (BOOK-64: no app.notification.models -- Notification's tables register on
+# its own NotificationBase and have their own migrations,
+# app/notification/alembic.ini. Booking's migrations never see them.)
 import app.payment.models
 import app.property.models
 import app.reservation.models

@@ -5,8 +5,6 @@
 Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md §2.
 """
 
-import smtplib
-import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.core.db.engine import async_task
@@ -15,7 +13,6 @@ from app.core.idempotency import cleanup as idempotency_cleanup
 from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
-from app.notification import service as notification_service
 from app.payment import saga as payment_saga
 from app.reservation import service as reservation_service
 
@@ -23,14 +20,9 @@ from app.reservation import service as reservation_service
 # not just still in flight
 _STALE_PAYMENT_THRESHOLD = timedelta(minutes=5)
 
-# BOOK-47: transient only (retry-basics.md §1). Excludes
-# SMTPRecipientsRefused/SMTPSenderRefused -- a bad address won't fix itself.
-_TRANSIENT_SMTP_ERRORS = (
-    OSError,
-    smtplib.SMTPConnectError,
-    smtplib.SMTPServerDisconnected,
-    smtplib.SMTPHeloError,
-)
+# BOOK-64: the "reservation received" email task (BOOK-45/47) used to live
+# here. It moved to Notification's Kafka consumer as a BookingCreated event
+# (microservices-decisions.md §4) -- this worker no longer sends any email.
 
 
 @app.task
@@ -58,28 +50,6 @@ async def complete_past_reservations() -> None:
     Thin wrapper, same shape as expire_pending_reservations above."""
     async with UnitOfWork() as uow:
         await reservation_service.complete_past_reservations(uow)
-
-
-@app.task(
-    autoretry_for=_TRANSIENT_SMTP_ERRORS,
-    retry_backoff=True,
-    retry_backoff_max=60,
-    retry_jitter=True,
-    max_retries=5,
-)
-@async_task
-async def send_reservation_received_email(reservation_id: str) -> None:
-    """BOOK-45/47: notify the guest their reservation request arrived.
-
-    `reservation_id` is a string -- task args are JSON-serialized
-    (celery-basics.md §6). Thin wrapper; logic lives in notification/service.py.
-
-    Retries cover this task running and failing -- not the .delay() publish
-    itself failing, which happens before any task exists (deliberately not
-    retried, worker-decisions.md §9/§10).
-    """
-    async with UnitOfWork() as uow:
-        await notification_service.send_reservation_received_email(uow, uuid.UUID(reservation_id))
 
 
 @app.task

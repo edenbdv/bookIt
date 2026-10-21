@@ -1,0 +1,22 @@
+[project]
+name = "notification"
+version = "0.1.0"
+description = "BookIt's Notification service -- consumes booking events from Kafka and sends the guest emails (BOOK-64)"
+authors = [
+    { name = "Eden Ben David" }
+]
+requires-python = ">=3.12"
+# only what Notification itself uses -- no FastAPI, Celery, Redis, bcrypt...
+# (those are Booking's). Same lower bounds as the root pyproject, so the
+# shared uv.lock resolves one version of each for both.
+dependencies = [
+    "confluent-kafka>=2.15.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.19.1",
+    "pydantic-settings>=2.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
