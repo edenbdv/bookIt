@@ -12,6 +12,7 @@ from app.core.idempotency.models import (
     IdempotencyKeyStatus,
 )
 from app.payment.models import Payment, PaymentKind, PaymentStatus
+from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
@@ -80,6 +81,39 @@ OUTCOME_TO_STATUS: dict[PaymentOutcome, PaymentStatus] = {
 }
 
 
+# BOOK-65: a resolved charge is news for Booking (confirm or cancel) --
+# written in the same transaction as the status change, never on its own.
+# Same event_id-in-both-places reasoning as reservation/service.py's
+# _emit_outbox_event: the consumer's Inbox dedups on it.
+_STATUS_TO_EVENT_TYPE: dict[PaymentStatus, PaymentEventType] = {
+    PaymentStatus.SUCCEEDED: PaymentEventType.PAYMENT_SUCCEEDED,
+    PaymentStatus.FAILED: PaymentEventType.PAYMENT_FAILED,
+}
+
+
+async def emit_payment_event(uow: UnitOfWork, payment: Payment) -> None:
+    # PENDING has no outcome yet; a refund's result doesn't drive the reservation
+    if payment.kind != PaymentKind.CHARGE or payment.status == PaymentStatus.PENDING:
+        return
+    event_type = _STATUS_TO_EVENT_TYPE[payment.status]
+    event_id = uuid.uuid4()
+    uow.session.add(
+        PaymentOutboxEvent(
+            id=event_id,
+            event_type=event_type,
+            reservation_id=payment.reservation_id,
+            payload={
+                "event_id": str(event_id),
+                "event_type": event_type.value,
+                "reservation_id": str(payment.reservation_id),
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "payment_id": str(payment.id),
+                "amount_cents": payment.amount_cents,
+            },
+        )
+    )
+
+
 # not wired to confirm_reservation()/cancel_reservation() -- chaining the
 # saga's outcome into the reservation is BOOK-54's job, not this one
 async def create_payment(
@@ -126,6 +160,7 @@ async def create_payment(
     # BOOK-52's mock -- outcome maps to the payment's real status below
     outcome = charge(payment.amount_cents, correlation_id=payment.id, force=force)
     payment.status = OUTCOME_TO_STATUS[outcome]
+    await emit_payment_event(uow, payment)
     return payment
 
 

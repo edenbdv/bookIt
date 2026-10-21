@@ -22,6 +22,12 @@ class FakePaymentRepository:
 
 
 class FakeSession:
+    def __init__(self) -> None:
+        self.added: list[object] = []
+
+    def add(self, obj: object) -> None:
+        self.added.append(obj)
+
     async def commit(self) -> None:
         pass
 

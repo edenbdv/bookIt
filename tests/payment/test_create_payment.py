@@ -17,6 +17,12 @@ from app.reservation.models import Reservation, ReservationStatus
 # same minimal-fake approach as tests/reservation/*.py -- only what
 # create_payment actually calls on uow is faked
 class FakeSession:
+    def __init__(self) -> None:
+        self.added: list[object] = []
+
+    def add(self, obj: object) -> None:
+        self.added.append(obj)
+
     async def flush(self) -> None:
         pass
 

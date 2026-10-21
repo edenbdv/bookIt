@@ -118,6 +118,7 @@ async def resolve_payment_and_react(
         return payment  # already resolved -- redelivery, no-op
 
     payment.status = service.OUTCOME_TO_STATUS[outcome]
+    await service.emit_payment_event(uow, payment)
     await uow.session.commit()  # resolve first, react second -- own commits
 
     if payment.kind == PaymentKind.CHARGE:
