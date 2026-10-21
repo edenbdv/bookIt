@@ -21,6 +21,7 @@ import app.core.outbox.models
 # its own NotificationBase and have their own migrations,
 # app/notification/alembic.ini. Booking's migrations never see them.)
 import app.payment.models
+import app.payment.outbox
 import app.property.models
 import app.reservation.models
 import app.review.models  # noqa: F401
