@@ -214,6 +214,29 @@ connections), `TESTCONTAINERS_RYUK_DISABLED=true` skips it for that run — cont
 are still removed on a normal finish, just not after a hard kill. Kept out of config on
 purpose: it's a per-run escape hatch, not a default.
 
+**Port-mapping race (Docker Desktop on WSL2).** On the first run after Docker restarts
+(or wakes from a pause), setup often failed with `ConnectionError: Port mapping for
+container <id> and port 8080 is not available` -- 8080 is ryuk's port; sometimes 9093,
+Kafka's. The containers were up; Docker just hadn't published the mapping yet.
+testcontainers (4.15.0, the latest) checks only that the container is `running`, then
+reads the mapping once (`DockerClient.port()`) and gives up if it's empty.
+
+Fix: an autouse session fixture in `tests/integration/conftest.py`,
+`_retry_port_lookup`, retries that one lookup on that one `ConnectionError` -- up to
+~10s (20 × 0.5s). Alternatives weighed:
+
+- *Upgrade testcontainers* -- 4.15.0 is already the latest; nothing to upgrade to.
+- *Config / env var* -- none touches the lookup. `RYUK_RECONNECTION_TIMEOUT` is how
+  long ryuk waits for its client to reconnect, not how long we wait for its port.
+- *Disable ryuk* -- works, but loses cleanup after a killed run. Stays an escape hatch.
+- *Retry each fixture's container start* -- doesn't reach ryuk cleanly: ryuk is started
+  inside the first container's `start()` under a fixed name, so a second attempt
+  clashes with the half-started first one, and a failed Kafka `start()` leaks its
+  container. One retry at the lookup covers ryuk, Kafka, Postgres and Redis.
+
+The patch leans on a testcontainers internal (`DockerClient.port`), so recheck it when
+upgrading testcontainers -- and drop it if a release adds its own retry.
+
 ## Known noise
 
 `InsecureKeyLengthWarning` from PyJWT in API tests: the dev default `secret_key`
@@ -236,6 +259,7 @@ tests; a real reminder that every deployed `secret_key` must be long.
 | Test layer | DB for constraints, service + `patch` for commit order, HTTP for contracts | — |
 | Manual scripts | All five superseded (four ported in BOOK-61, concurrent one by BOOK-62) | Delete once trusted |
 | Ryuk | On by default; `TESTCONTAINERS_RYUK_DISABLED=true` per run when pulls fail | — |
+| Port-mapping race | Retry `DockerClient.port()` ~10s in an autouse fixture | testcontainers upgrade (internal API; may ship its own retry) |
 | BOOK-62 concurrency test | 20 guests via API, start gate, invariant asserts, `.delay()` stubbed | Booking moves to its own service — must pass unchanged |
 | Deadlock coverage | Not reliably tested; lock justified by BOOK-39's observed deadlock | Deadlock coverage becomes a requirement |
 | Stability runs | `pytest-repeat`, `--count=20` in one session | — |

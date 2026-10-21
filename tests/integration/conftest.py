@@ -5,6 +5,7 @@ elsewhere in tests/ still run without Docker. Concepts behind every choice
 here: docs/testing/testing-basics.md (§ refs below).
 """
 
+import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from testcontainers.community.kafka import KafkaContainer
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
+from testcontainers.core.docker_client import DockerClient
 
 # imported for their side effect, same list as alembic/env.py: every model
 # must be registered before any one of them is used, or relationship()
@@ -49,6 +51,35 @@ REDIS_IMAGE = "redis:7-alpine"
 # testcontainers' Kafka module drives Confluent's image (its startup scripts),
 # not docker-compose's apache/kafka -- same broker, both run in KRaft mode
 KAFKA_IMAGE = "confluentinc/cp-kafka:7.6.0"
+
+# up to ~10s for Docker to publish a container's port (testing-decisions.md §10)
+PORT_LOOKUP_ATTEMPTS = 20
+PORT_LOOKUP_DELAY_S = 0.5
+
+
+# Docker Desktop (WSL2) can report a container "running" before its port
+# mapping is published -- most often on the first run after Docker restarts.
+# testcontainers looks the port up once and raises ConnectionError, and that
+# one lookup is behind every container we start: ryuk's 8080 (inside the
+# first container's start()), Kafka's 9093, Postgres and Redis. Retrying the
+# lookup covers all of them; retrying start() wouldn't -- ryuk's container
+# has a fixed name, so a second start() clashes with the first.
+# autouse + session scope: set up before postgres_url & co. start anything.
+@pytest.fixture(scope="session", autouse=True)
+def _retry_port_lookup() -> Iterator[None]:
+    lookup = DockerClient.port
+
+    def lookup_with_retry(self: DockerClient, container_id: str, port: int) -> str:
+        for _ in range(PORT_LOOKUP_ATTEMPTS - 1):
+            try:
+                return lookup(self, container_id, port)
+            except ConnectionError:
+                time.sleep(PORT_LOOKUP_DELAY_S)
+        return lookup(self, container_id, port)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(DockerClient, "port", lookup_with_retry)
+        yield
 
 
 def _clear_cached_clients() -> None:
