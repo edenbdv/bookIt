@@ -86,6 +86,10 @@ module of the monolith wearing a separate container. Six things tie it to Bookin
 
 ## 2. The plan: six small steps, the app works after each
 
+**Status: done.** All six ties are gone — Notification runs from `services/notification/`,
+its own image and its own `notifications` database, and imports nothing from Booking
+(§8, §9).
+
 1. **Lock the current behavior with tests** — the Inbox dedup and the email contents —
    before changing anything (BOOK-60 item 3).
 2. **Enrich the event** with everything the emails need, and switch the handlers to
@@ -333,14 +337,172 @@ is the test that found it.
 - **Nothing reads the DLQ yet.** Inspecting and replaying it is manual (kafka-ui at
   `localhost:8090`). An alert on "DLQ not empty" belongs to Epic 9 (observability).
 
-**Tests:** unit tests for each layer (`tests/notification/test_consumer.py`), plus one
-against real Kafka (`test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving`):
-a refused address lands on `.dlq` with its error, and the next guest's email still goes
-out.
+**Tests:** unit tests for each layer (`services/notification/tests/test_consumer.py`),
+plus one against real Kafka
+(`test_failing_event_goes_to_dead_letter_and_the_queue_keeps_moving`): a refused
+address lands on `.dlq` with its error, and the next guest's email still goes out.
 
 **Revisit when:** the consumer scales to several instances (the open transaction during
 retries), or failures get frequent enough that a replay tool or a DLQ alert is worth
 building.
+
+## 8. Notification's own database (step 4)
+
+Notification owns exactly one table: `processed_notification_events`, its Inbox (dedup
+by `event_id`). Step 4 moved it out of Booking's database, in the same expand-and-contract
+shape as §6.
+
+### Where the new database lives: same server, new database
+
+**Chosen:** a `notifications` database on the **same Postgres server** (the `db`
+container) as Booking's `bookit` — not a second Postgres container.
+
+| Option | Why not / why |
+|---|---|
+| **A. New database, same server** ✅ | The separation that matters is the *database*: its own tables, its own migrations, its own connection string, no foreign key or JOIN across. One container less to run and to start in tests |
+| B. Its own Postgres container | Closer to production, but another container for no gain the code can see — it's just a different URL, so moving later is a config change |
+
+**Revisit when:** there's a real deployment — there you'd likely separate servers too,
+and only `NOTIFICATION_DATABASE_URL` changes.
+
+### Existing Inbox rows: start empty
+
+**Chosen:** the new Inbox started **empty**; the old rows weren't copied.
+
+Safe here: dev data only, and those events' Kafka offsets were already committed, so
+none of them comes back to be deduped. The theoretical risk — a message redelivered
+exactly at the switch could send one duplicate email — is accepted for a dev stack.
+**In a real deployment** you'd copy the rows into the new database *before* the contract
+step (expand and contract, §6).
+
+### The cross-service foreign key had to go — and it was hiding a bug
+
+`processed_notification_events.event_id` had a foreign key into Booking's
+`outbox_events.id`. It went first (step 4a, migration `1db36abe6069`), for three reasons:
+
+- **A foreign key can't cross databases**, and the two tables were about to live in two.
+- **Dedup never needed it.** The `event_id` arrives in the event payload; uniqueness is
+  the primary key's job, and that stays. The same value is the key in both services'
+  tables — the *value* links them, not a rule in the database.
+- **It was a live bug.** The daily outbox cleanup (`core/outbox/cleanup.py`) deletes
+  published events older than 7 days. The foreign key (no `ON DELETE`) made that
+  `DELETE` fail as soon as Notification had handled any such event — so since BOOK-51
+  the cleanup job would have failed every day once old processed events existed.
+  `tests/integration/test_outbox_cleanup.py` pins the fix.
+
+### Its own connection, model catalog and migrations
+
+| Piece | What | Why |
+|---|---|---|
+| Connection | `notification/db.py` — its own engine + `notification_session()`, on `NOTIFICATION_DATABASE_URL` | The monolith's `UnitOfWork` builds a repository for every Booking table; Notification needs one table |
+| Model catalog | `NotificationBase`, its own `DeclarativeBase` | Every table on Booking's `Base` belongs to Booking's DB and migrations. On its own base, Booking's Alembic never sees the Inbox at all |
+| Migrations | Its own Alembic setup inside the package (`alembic.ini`, `migrations/`) | A separate database needs its own recipe — one that knows only its own tables |
+| Version table | `notification_alembic_version`, not `alembic_version` | If both setups ever run against one database (tests, mid-switch), they can't overwrite each other's version |
+
+### Creating the database: a one-shot `migrate` step
+
+Postgres runs its init scripts (`docker-entrypoint-initdb.d`) **only on a brand-new,
+empty volume**. An existing dev `pgdata` volume would never get `notifications` that
+way. So `notification/migrate.py` (`python -m notification.migrate`) does both, safely on
+every run: create the database if it's missing, then `alembic upgrade head`.
+
+In docker-compose it runs as **`notification-migrate`**, a one-shot service that exits
+(`Exited (0)` is success); `notification-consumer` waits on it with
+`condition: service_completed_successfully`, so the consumer never starts before its
+database is ready. The same pattern as a production pre-deploy migration job. The test
+fixtures call the very same script, so it's under test too.
+
+### Rollout: expand, switch, contract
+
+1. **Expand** — the new database and its table exist; the old copy is still there.
+2. **Switch** — the consumer's `NOTIFICATION_DATABASE_URL` points at `notifications`.
+   Verified live: a booking added rows to the new Inbox while the old one stopped
+   changing.
+3. **Contract** — Booking's migration `f375ff431cb1` drops the old table.
+
+**Revisit when:** a real deployment exists (separate servers; copy rows before contract).
+
+## 9. Its own package, image and boundary (step 5)
+
+### No imports from Booking — first, while still inside `app/` (5a)
+
+Before moving any file, Notification stopped importing anything from the monolith, so
+the move itself was only a move:
+
+- **Its own settings** (`notification/config.py`) with only the four values it uses —
+  its DB URL, Kafka, SMTP host and port. No fallback to `DATABASE_URL`: Notification
+  doesn't know Booking's database exists.
+- **Its own event-type names** (`notification/events.py`) as plain strings, instead of
+  importing Booking's `OutboxEventType`. **Separate services share a contract, not
+  code**: these exact strings are what Booking writes as `event_type`. If they drift,
+  Notification skips the unknown type (§6), no email goes out, and the real-Kafka
+  pipeline tests fail.
+
+### Dependencies: a uv workspace, one lockfile
+
+**Chosen:** `services/notification` is a **uv workspace member** — its own
+`pyproject.toml` with only its own dependencies (Kafka, SQLAlchemy, asyncpg, Alembic,
+pydantic-settings; no FastAPI, Celery, Redis, bcrypt), all resolved into **one shared
+`uv.lock`** at the root.
+
+| Option | Why not / why |
+|---|---|
+| **A. uv workspace, one lockfile** ✅ | One `uv sync` installs both; one CI; the same version of every shared library in both services. The standard monorepo setup for uv |
+| B. Fully separate (own lockfile, own venv) | Two environments to sync and keep updated, two CI setups — overhead with no payoff for one developer |
+
+Notification is a **dev-only** dependency of the root project: the cross-service tests
+need both packages in one environment, but Booking's code never imports it and Booking's
+image (`uv sync --no-dev`) never contains it.
+
+**One trap, caught before it shipped:** with a workspace, uv reads *every member's*
+`pyproject.toml` even when it installs none of them. Booking's `Dockerfile` copied only
+the root `pyproject.toml` + `uv.lock` before its first `uv sync`, so that step would
+have failed ("is not a workspace member"). It now also copies the member's
+`pyproject.toml` — only that file, so the dependency layer stays cached across code edits.
+
+### Layout and entrypoints
+
+```
+services/notification/
+├── pyproject.toml
+├── Dockerfile
+├── src/notification/       consumer, service, db, models, config, events, migrate,
+│   ├── __main__.py         ← python -m notification         (the consumer)
+│   ├── migrate.py          ← python -m notification.migrate (one-shot)
+│   └── alembic.ini, migrations/
+└── tests/                  its unit tests
+```
+
+Moved with `git mv`, so each file keeps its history. The empty `router.py` /
+`schemas.py` leftovers were deleted — a service with no API needs neither.
+
+### Its own image
+
+`services/notification/Dockerfile`, **built from the repo root** (that's where the
+workspace `uv.lock` lives): `docker build -f services/notification/Dockerfile .`. It
+installs only `--package notification`. Both compose services (`notification-migrate`,
+`notification-consumer`) build from it, and mount **only Notification's own source**
+for live edits — the container never sees Booking's code at all.
+
+### The boundary, enforced
+
+`tests/test_service_boundaries.py` parses (never imports) every file of each service
+and fails if Booking imports `notification` or Notification imports `app` — including
+imports inside function bodies. Checked once against a deliberate violation: it failed
+with `events.py imports 'app'`. CI additionally builds Notification's image and asserts
+it contains no `app`, `fastapi` or `celery`.
+
+### Where the tests live
+
+| Tests | Where | Why |
+|---|---|---|
+| Notification's unit tests | `services/notification/tests/` | They test only Notification — they move with it |
+| Cross-service tests (outbox → relay → Kafka → consumer → email) | `tests/integration/` at the root | They test the **contract between** the services — splitting them per service would leave nobody checking that the two sides actually match |
+
+A plain `uv run pytest` from the root runs all of them, so CI needed no new test job.
+
+**Revisit when:** Payment (BOOK-65) joins as `services/payment/` — the same layout,
+workspace membership, Dockerfile pattern and boundary test (add it to `BOUNDARIES`).
 
 ---
 
@@ -362,3 +524,12 @@ building.
 | Temporary SMTP error | Retry in place: 1, 2, 4, 8 s, then dead-letter | Retries holding the partition becomes a problem |
 | Permanent SMTP error | No retry, straight to the DLQ — checked *before* `OSError`, which every smtplib error subclasses | — |
 | Message that fails for good | `booking-events.dlq`: original bytes + error headers, then commit; DLQ publish fails ⇒ don't commit | Failures frequent enough to need a replay tool or alert |
+| Notification's database | `notifications` on the same Postgres server; Inbox started empty | A real deployment: separate servers, copy rows before contract |
+| Cross-service foreign key | Dropped — the shared `event_id` *value* links the services; also fixed the outbox cleanup failing on it | — |
+| Notification's tables | Own `NotificationBase`, own Alembic setup, own version table `notification_alembic_version` | — |
+| Creating its database | `python -m notification.migrate` (create if missing + upgrade), one-shot `notification-migrate` before the consumer | — |
+| Event-type names | Notification's own constants — a shared contract, not shared code | — |
+| Dependencies | uv workspace member, one shared `uv.lock`; dev-only dependency of the root | Separate owners need separate release cycles |
+| Notification's image | `services/notification/Dockerfile`, built from the repo root, installs only `--package notification` | — |
+| Service boundary | `tests/test_service_boundaries.py` (AST scan both ways) + CI image check | Payment joins: add it to `BOUNDARIES` |
+| Cross-service tests | Stay at the root `tests/integration/` — they test the contract between the services | — |
