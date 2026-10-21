@@ -61,9 +61,23 @@ jobs:
       - run: uv run pytest
 
   build:
-    name: Docker image build
+    name: Docker image builds
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # build only, no push -- proves the Dockerfile still builds
-      - run: docker build -t bookit:ci .
+      # build only, no push -- proves each Dockerfile still builds
+      - name: Booking image
+        run: docker build -t bookit:ci .
+      # BOOK-64: Notification's own image, built from the repo root because
+      # the workspace uv.lock lives there
+      - name: Notification image
+        run: docker build -f services/notification/Dockerfile -t bookit-notification:ci .
+      # it starts, and it really is separate: none of Booking's code or
+      # Booking-only dependencies made it into the image
+      - name: Notification image is self-contained
+        run: >
+          docker run --rm --entrypoint python bookit-notification:ci -c
+          "import importlib.util as u, notification.__main__;
+          leaked = [m for m in ('app', 'fastapi', 'celery') if u.find_spec(m)];
+          assert not leaked, f'Booking code/deps in Notification image: {leaked}';
+          print('ok: notification image is self-contained')"
