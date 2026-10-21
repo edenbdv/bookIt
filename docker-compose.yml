@@ -243,6 +243,28 @@ services:
     volumes:
       - ./services/notification/src:/code/services/notification/src
 
+  # BOOK-65: Booking's consumer for payment-events (consumer group "booking")
+  # -- confirms/cancels a reservation when Payment reports a charge's
+  # outcome. Same image as `app`/`worker` (it's Booking's code, on Booking's
+  # DB), different command. Own process, not Celery (worker-decisions.md §12).
+  booking-consumer:
+    build: .
+    command: uv run --no-dev python -m app.reservation.payment_consumer
+    # an unhandled error ends the process -- bring it back, and Kafka
+    # redelivers the uncommitted message
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
+
 volumes:
   pgdata:
   rabbitmq-data:
