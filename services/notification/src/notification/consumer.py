@@ -3,7 +3,7 @@
 Not a Celery task -- own process (worker-decisions.md §12).
 
 `handle` is a parameter, not an import of notification/service.py, so the
-loop is testable with a fake. app/notification_consumer.py wires the real
+loop is testable with a fake. notification/__main__.py wires the real
 one via make_dispatcher() below.
 """
 
@@ -17,9 +17,9 @@ from datetime import UTC, datetime
 
 from confluent_kafka import Consumer, Producer
 
-from app.notification.config import get_notification_settings
-from app.notification.db import get_notification_engine, notification_session
-from app.notification.models import ProcessedNotificationEvent
+from notification.config import get_notification_settings
+from notification.db import get_notification_engine, notification_session
+from notification.models import ProcessedNotificationEvent
 
 logger = logging.getLogger(__name__)
 

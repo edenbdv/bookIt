@@ -12,13 +12,13 @@ can't even see it -- this pins that down.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from notification.models import ProcessedNotificationEvent
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox.cleanup import OUTBOX_RETENTION_DAYS, delete_published_events
 from app.core.outbox.models import OutboxEvent
-from app.notification.models import ProcessedNotificationEvent
 from app.reservation import service as reservation_service
 from tests.integration.helpers import make_pending_reservation
 

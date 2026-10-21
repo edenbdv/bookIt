@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.notification.config import get_notification_settings
+from notification.config import get_notification_settings
 
 
 def notification_database_url() -> str:

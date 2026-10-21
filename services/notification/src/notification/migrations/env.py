@@ -12,13 +12,13 @@ Same async shape as the monolith's alembic/env.py, with three differences:
 import asyncio
 from logging.config import fileConfig
 
+from notification.db import notification_database_url
+from notification.models import NotificationBase
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from app.notification.db import notification_database_url
-from app.notification.models import NotificationBase
 
 VERSION_TABLE = "notification_alembic_version"
 

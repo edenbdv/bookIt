@@ -10,9 +10,8 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-
-from app.notification import consumer
-from app.notification.models import ProcessedNotificationEvent
+from notification import consumer
+from notification.models import ProcessedNotificationEvent
 
 
 # minimal fakes -- dispatch() only ever calls session.get (the "already

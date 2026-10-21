@@ -11,6 +11,13 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
+from notification import migrate as notification_migrate
+from notification.config import get_notification_settings
+from notification.db import (
+    get_notification_engine,
+    get_notification_session_factory,
+    notification_database_url,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.community.kafka import KafkaContainer
@@ -32,13 +39,6 @@ from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
-from app.notification import migrate as notification_migrate
-from app.notification.config import get_notification_settings
-from app.notification.db import (
-    get_notification_engine,
-    get_notification_session_factory,
-    notification_database_url,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

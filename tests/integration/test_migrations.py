@@ -50,7 +50,7 @@ async def test_no_overlapping_reservations_constraint_exists(db_engine: AsyncEng
 
 # BOOK-64 step 4: Notification's Inbox lives only in its own database --
 # Booking's migrations dropped their copy (f375ff431cb1), Notification's own
-# migrations (app/notification/migrations) created it in `notifications`
+# migrations (services/notification/src/notification/migrations) created it in `notifications`
 @pytest.mark.anyio
 async def test_inbox_table_lives_only_in_notifications_db(
     db_engine: AsyncEngine, notification_db_engine: AsyncEngine

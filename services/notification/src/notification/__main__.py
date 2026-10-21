@@ -1,15 +1,15 @@
 """BOOK-51: entrypoint for the Kafka notification consumer. Run with:
 
-    uv run python -m app.notification_consumer
+    uv run python -m notification
 
 Own process, not Celery (worker-decisions.md §12). Thin wrapper -- just
-wires app/notification/consumer.py's loop to app/notification/service.py's
+wires notification/consumer.py's loop to notification/service.py's
 handlers and starts it. Full pipeline: docs/jobs/booking-events-flow.md.
 """
 
-from app.notification import events
-from app.notification import service as notification_service
-from app.notification.consumer import (
+from notification import events
+from notification import service as notification_service
+from notification.consumer import (
     EventHandler,
     make_consumer,
     make_dead_letter,

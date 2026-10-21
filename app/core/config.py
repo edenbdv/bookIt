@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
     # (BOOK-64: Notification's database URL lives in its own settings,
-    # app/notification/config.py -- Booking doesn't need to know it)
+    # services/notification -- Booking doesn't need to know it)
     redis_url: str = "redis://localhost:6379/0"
 
     # BOOK-44: Celery's broker. RabbitMQ, not Redis -- see

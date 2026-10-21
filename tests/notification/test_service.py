@@ -12,8 +12,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-
-from app.notification import service
+from notification import service
 
 # one booking, in the shape reservation/service.py's _email_snapshot writes
 # (ISO strings, not date objects) -- the cross-service contract

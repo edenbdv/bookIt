@@ -21,15 +21,15 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from notification import consumer
+from notification.__main__ import _HANDLERS
+from notification.models import ProcessedNotificationEvent
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox import relay
 from app.core.outbox.models import OutboxEvent
-from app.notification import consumer
-from app.notification.models import ProcessedNotificationEvent
-from app.notification_consumer import _HANDLERS
 from app.reservation import service as reservation_service
 from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.schemas import ReservationCreate
@@ -52,7 +52,7 @@ def _isolated_topic() -> Iterator[str]:
 
 @pytest.fixture
 def sent_emails() -> Iterator[MagicMock]:
-    with patch("app.notification.service._send") as send:
+    with patch("notification.service._send") as send:
         yield send
 
 

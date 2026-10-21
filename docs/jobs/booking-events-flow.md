@@ -28,7 +28,7 @@ flowchart TD
     F --> G{{"Kafka: topic booking-events\npartitioned by reservation_id"}}
     F -. "producer.flush() confirms" .-> H["sets published_at"]
 
-    subgraph consumer ["app/notification/consumer.py\ngroup: notifications"]
+    subgraph consumer ["services/notification/.../consumer.py\ngroup: notifications"]
         I["_process_one(): poll(), parse JSON payload"]
         J["make_dispatcher()'s dispatch():\ncheck ProcessedNotificationEvent by event_id"]
         K{"already processed?"}
@@ -55,7 +55,7 @@ flowchart TD
 | 5 | `app/worker.py`'s `publish_outbox_events` (Celery beat, every 5s) → `relay.py`'s `publish_pending_events()` | Reads unpublished rows oldest-first, `producer.produce()`s each to `booking-events`, keyed on `reservation_id` | `worker-decisions.md` §11 |
 | 6 | Kafka broker | Appends to the partition `reservation_id` hashes to — same-reservation events stay on one partition, in creation order | `kafka-basics.md` §3, `worker-decisions.md` §9 point 2 |
 | 7 | `relay.py`, after `producer.flush()` | Only rows Kafka actually confirmed get `published_at` set — never set optimistically before that | `worker-decisions.md` §11 |
-| 8 | `app/notification/consumer.py`'s `_process_one()` (its own process, group `notifications`) | Polls, parses the JSON payload | `worker-decisions.md` §12 |
+| 8 | `notification/consumer.py`'s `_process_one()` (`services/notification/src/`) (its own process, group `notifications`) | Polls, parses the JSON payload | `worker-decisions.md` §12 |
 | 9 | `make_dispatcher()`'s `dispatch()` | Checks `ProcessedNotificationEvent` by `event_id`; already there → skip | `worker-decisions.md` §13 |
 | 10 | `dispatch()` | Not yet processed → calls the matching email handler with `reservation_id` | `worker-decisions.md` §13 |
 | 11 | `dispatch()`, after the handler returns | Marks `ProcessedNotificationEvent`, `UnitOfWork` commits | `worker-decisions.md` §13 |
@@ -75,7 +75,7 @@ the consumer reads it back off Kafka:
 }
 ```
 
-`make_dispatcher()`'s `dispatch()` (`app/notification/consumer.py`) runs once this
+`make_dispatcher()`'s `dispatch()` (`notification/consumer.py`) runs once this
 reaches `_process_one()`:
 
 ```python
@@ -122,7 +122,7 @@ that harmless-but-wasted redelivery; it does no part of the actual deduplication
 
 ## What this diagram assumes isn't built yet
 
-- The `docker-compose.yml` service that actually runs `app/notification_consumer.py` as its own container.
+- The `docker-compose.yml` service that actually runs `python -m notification` (`services/notification/src/notification/__main__.py`) as its own container, built from `services/notification/Dockerfile` (BOOK-64).
 
 Everything else in this diagram — outbox writes, the relay, both email handlers, and
 the entrypoint that wires them into the consumer loop — is built today. The only thing

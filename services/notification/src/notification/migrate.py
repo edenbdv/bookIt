@@ -1,12 +1,12 @@
 """BOOK-64 step 4c: bring Notification's own database up to date. Run with:
 
-    uv run python -m app.notification.migrate
+    uv run python -m notification.migrate
 
 Two things, both safe to repeat on every start:
 1. create the database named in NOTIFICATION_DATABASE_URL if it doesn't exist
    yet -- Postgres only runs init scripts on a brand-new volume, so an
    existing dev volume would never get the `notifications` database otherwise;
-2. run Notification's own migrations (app/notification/alembic.ini) to head.
+2. run Notification's own migrations (notification/alembic.ini) to head.
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 
 from alembic import command
-from app.notification.db import notification_database_url
+from notification.db import notification_database_url
 
 logger = logging.getLogger(__name__)
 

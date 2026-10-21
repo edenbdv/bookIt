@@ -11,7 +11,7 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 
-from app.notification.config import get_notification_settings
+from notification.config import get_notification_settings
 
 # not a real sender identity -- MailHog accepts anything, and there's no
 # domain to send "from" until a real provider exists (worker-decisions.md §8)

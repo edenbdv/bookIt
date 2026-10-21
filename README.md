@@ -72,7 +72,7 @@ The app reads `.env` (see `.env.example`), which points at `localhost` — this 
 **Two databases on the one Postgres server (BOOK-64):** `bookit` for Booking, and `notifications` for the Notification service. Starting `notification-consumer` first runs the one-shot `notification-migrate` service, which creates `notifications` if it's missing and brings it up to date. To run Notification's migrations by hand from your machine instead:
 
 ```bash
-uv run python -m app.notification.migrate
+uv run python -m notification.migrate
 ```
 
 **MailHog** catches every email BookIt sends without delivering it anywhere — view them at [http://localhost:8025](http://localhost:8025). All three booking emails (received, confirmed, cancelled) are sent by `notification-consumer`, after consuming the booking events from Kafka (BOOK-51, BOOK-64). See `docs/jobs/email-basics.md`.
