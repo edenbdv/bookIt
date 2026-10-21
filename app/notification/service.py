@@ -11,7 +11,7 @@ import smtplib
 from datetime import datetime
 from email.message import EmailMessage
 
-from app.core.config import get_settings
+from app.notification.config import get_notification_settings
 
 # not a real sender identity -- MailHog accepts anything, and there's no
 # domain to send "from" until a real provider exists (worker-decisions.md §8)
@@ -36,7 +36,7 @@ def _send(to: str, subject: str, body: str) -> None:
     message["To"] = to
     message.set_content(body)
 
-    settings = get_settings()
+    settings = get_notification_settings()
     # blocking call -- callers await it via asyncio.to_thread, not directly
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
         smtp.send_message(message)

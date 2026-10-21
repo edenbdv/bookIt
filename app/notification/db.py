@@ -3,10 +3,9 @@
 Instead of the monolith's UnitOfWork -- which opens one session and builds a
 repository for every Booking table (users, reservations, payments...) --
 Notification gets its own engine, on its own setting, for the only table it
-owns: processed_notification_events (its Inbox).
-
-Until step 4c the setting falls back to the shared database_url, so nothing
-changes in behavior; only the wiring does.
+owns: processed_notification_events (its Inbox) -- in its own `notifications`
+database (step 4). Read from Notification's own settings (step 5a); it no
+longer knows Booking's database_url at all.
 """
 
 from collections.abc import AsyncIterator
@@ -20,12 +19,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.core.config import get_settings
+from app.notification.config import get_notification_settings
 
 
 def notification_database_url() -> str:
-    settings = get_settings()
-    return settings.notification_database_url or settings.database_url
+    return get_notification_settings().notification_database_url
 
 
 # same lru_cache singleton shape as core/db/engine.py's get_engine()

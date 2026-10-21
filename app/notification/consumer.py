@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 from confluent_kafka import Consumer, Producer
 
-from app.core.config import get_settings
+from app.notification.config import get_notification_settings
 from app.notification.db import get_notification_engine, notification_session
 from app.notification.models import ProcessedNotificationEvent
 
@@ -77,7 +77,7 @@ async def _with_retry(handler: EventHandler, payload: dict) -> None:
 def make_consumer() -> Consumer:
     return Consumer(
         {
-            "bootstrap.servers": get_settings().kafka_bootstrap_servers,
+            "bootstrap.servers": get_notification_settings().kafka_bootstrap_servers,
             "group.id": GROUP_ID,
             # manual commit, after handling succeeds -- see _process_one
             "enable.auto.commit": False,
@@ -166,7 +166,7 @@ def make_dead_letter(producer: Producer) -> DeadLetter:
 
 
 def make_producer() -> Producer:
-    return Producer({"bootstrap.servers": get_settings().kafka_bootstrap_servers})
+    return Producer({"bootstrap.servers": get_notification_settings().kafka_bootstrap_servers})
 
 
 async def _process_one(

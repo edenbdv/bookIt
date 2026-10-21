@@ -7,7 +7,7 @@ wires app/notification/consumer.py's loop to app/notification/service.py's
 handlers and starts it. Full pipeline: docs/jobs/booking-events-flow.md.
 """
 
-from app.core.outbox.models import OutboxEventType
+from app.notification import events
 from app.notification import service as notification_service
 from app.notification.consumer import (
     EventHandler,
@@ -22,9 +22,9 @@ from app.notification.consumer import (
 _HANDLERS: dict[str, EventHandler] = {
     # BOOK-64: added before Booking starts publishing BookingCreated (step
     # 3b) -- the receiver learns a new event type before the sender sends it
-    OutboxEventType.BOOKING_CREATED.value: notification_service.send_reservation_received_email,
-    OutboxEventType.BOOKING_CONFIRMED.value: notification_service.send_reservation_confirmed_email,
-    OutboxEventType.BOOKING_CANCELLED.value: notification_service.send_reservation_cancelled_email,
+    events.BOOKING_CREATED: notification_service.send_reservation_received_email,
+    events.BOOKING_CONFIRMED: notification_service.send_reservation_confirmed_email,
+    events.BOOKING_CANCELLED: notification_service.send_reservation_cancelled_email,
 }
 
 

@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
 from app.notification import migrate as notification_migrate
+from app.notification.config import get_notification_settings
 from app.notification.db import (
     get_notification_engine,
     get_notification_session_factory,
@@ -59,7 +60,8 @@ def _clear_cached_clients() -> None:
     get_engine.cache_clear()
     get_session_factory.cache_clear()
     get_redis_client.cache_clear()
-    # BOOK-64: Notification's own engine (notification/db.py), same reason
+    # BOOK-64: Notification's own settings and engine, same reason
+    get_notification_settings.cache_clear()
     get_notification_engine.cache_clear()
     get_notification_session_factory.cache_clear()
 

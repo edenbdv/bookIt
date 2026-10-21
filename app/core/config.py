@@ -11,10 +11,8 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
-    # BOOK-64: Notification's own database. Unset = fall back to database_url
-    # -- step 4b gives Notification its own connection while still pointing
-    # at the shared DB; step 4c points this at its own `notifications` DB.
-    notification_database_url: str | None = None
+    # (BOOK-64: Notification's database URL lives in its own settings,
+    # app/notification/config.py -- Booking doesn't need to know it)
     redis_url: str = "redis://localhost:6379/0"
 
     # BOOK-44: Celery's broker. RabbitMQ, not Redis -- see
