@@ -23,6 +23,7 @@ import app.core.outbox.models
 import app.payment.models
 import app.payment.outbox
 import app.property.models
+import app.reservation.inbox
 import app.reservation.models
 import app.review.models  # noqa: F401
 from alembic import context
