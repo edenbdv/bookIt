@@ -13,6 +13,7 @@ from app.core.idempotency import cleanup as idempotency_cleanup
 from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
+from app.payment import relay as payment_relay
 from app.payment import saga as payment_saga
 from app.reservation import service as reservation_service
 
@@ -72,6 +73,17 @@ async def publish_outbox_events() -> None:
     producer = outbox_relay.make_producer()
     async with UnitOfWork() as uow:
         await outbox_relay.publish_pending_events(uow, producer)
+
+
+@app.task
+@async_task
+async def publish_payment_events() -> None:
+    """BOOK-65: Payment's relay -- publishes `payment_outbox_events` rows to
+    `payment-events`; logic lives in payment/relay.py. Runs here only while
+    Payment is still inside the monolith."""
+    producer = outbox_relay.make_producer()
+    async with UnitOfWork() as uow:
+        await payment_relay.publish_pending_payment_events(uow, producer)
 
 
 @app.task

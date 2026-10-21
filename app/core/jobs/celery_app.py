@@ -93,6 +93,13 @@ app.conf.beat_schedule = {
         "task": "app.worker.publish_outbox_events",
         "schedule": 5.0,
     },
+    # BOOK-65: same 5s as Booking's relay -- once Booking consumes
+    # payment-events, this delay is part of how long a guest waits to
+    # see their reservation confirmed
+    "publish-payment-events": {
+        "task": "app.worker.publish_payment_events",
+        "schedule": 5.0,
+    },
     # BOOK-50's last step. Housekeeping, not latency-sensitive like the
     # relay above -- a daily crontab, not a tight interval, is the right
     # tool here (outbox-basics.md/BOOK-50: published rows are redundant
