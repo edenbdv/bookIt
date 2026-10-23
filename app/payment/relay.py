@@ -7,6 +7,7 @@ Booking's relay stays behind with Booking's outbox.
 
 import json
 import logging
+import uuid
 from datetime import UTC, datetime
 
 from confluent_kafka import Producer
@@ -22,9 +23,15 @@ TOPIC = "payment-events"
 
 async def publish_pending_payment_events(uow: UnitOfWork, producer: Producer) -> None:
     """Publish every unpublished row, oldest first, then mark only the ones
-    Kafka actually confirmed -- at-least-once, same reasoning as Booking's
-    relay: an unmarked row just gets retried next cycle. Keyed by
-    reservation_id, so one reservation's events stay in order."""
+    Kafka actually confirmed -- at-least-once: an unmarked row just gets
+    retried next cycle. Keyed by reservation_id, so one reservation's
+    events stay in order.
+
+    "Confirmed" means a delivery callback with no error, not "no error
+    yet": a message still waiting when flush() times out (topic missing,
+    broker slow or down) has had no callback at all, and must stay
+    unmarked. Retrying it may duplicate it on the topic -- fine, consumers
+    dedup on event_id; a lost event is not."""
     result = await uow.session.execute(
         select(PaymentOutboxEvent)
         .where(PaymentOutboxEvent.published_at.is_(None))
@@ -34,11 +41,15 @@ async def publish_pending_payment_events(uow: UnitOfWork, producer: Producer) ->
     if not pending:
         return
 
-    failures: list[tuple[PaymentOutboxEvent, Exception]] = []
+    delivered: set[uuid.UUID] = set()
 
     def _on_delivery(err: Exception | None, _msg: object, event: PaymentOutboxEvent) -> None:
-        if err is not None:
-            failures.append((event, err))
+        if err is None:
+            delivered.add(event.id)  # the broker stored it
+        else:
+            logger.error(
+                "Failed to publish payment event %s (%s): %s", event.id, event.event_type, err
+            )
 
     for event in pending:
         producer.produce(
@@ -49,13 +60,12 @@ async def publish_pending_payment_events(uow: UnitOfWork, producer: Producer) ->
             on_delivery=lambda err, msg, event=event: _on_delivery(err, msg, event),
         )
 
-    producer.flush(timeout=30)
-
-    for event, err in failures:
-        logger.error("Failed to publish payment event %s (%s): %s", event.id, event.event_type, err)
+    # callbacks only fire inside flush()/poll(); returns how many are still waiting
+    remaining = producer.flush(timeout=30)
+    if remaining:
+        logger.warning("%d payment event(s) not confirmed yet -- retried next run", remaining)
 
     now = datetime.now(UTC)
-    failed_ids = {event.id for event, _ in failures}
     for event in pending:
-        if event.id not in failed_ids:
+        if event.id in delivered:
             event.published_at = now

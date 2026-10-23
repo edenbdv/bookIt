@@ -236,12 +236,12 @@ export function createReservation(
 }
 
 // BOOK-97. Replaces the old confirmReservationStub -- POST /payments (BOOK-53)
-// triggers the real saga (BOOK-54): a succeeded charge confirms the
-// reservation, a failed one cancels it, both inside the same request. There's
-// no GET /reservations/:id yet (BOOK-85) to re-fetch the result, so callers
-// derive the new status from the returned Payment themselves -- see
-// BookingForm.tsx's confirm(). idempotencyKey follows createReservation's
-// same convention: a fresh UUID per attempt.
+// charges the reservation. BOOK-65: the returned Payment's status says
+// nothing about the reservation's -- Booking confirms/cancels it a few
+// seconds later, from the payment-events topic -- so callers poll
+// getReservation() for the result (pollReservation.ts), never derive it from
+// the Payment. idempotencyKey follows createReservation's same convention: a
+// fresh UUID per attempt.
 export function payReservation(reservationId: string, idempotencyKey: string): Promise<Payment> {
   return request<Payment>('/payments', {
     method: 'POST',

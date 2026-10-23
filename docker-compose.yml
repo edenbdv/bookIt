@@ -97,6 +97,25 @@ services:
       kafka:
         condition: service_healthy
 
+  # BOOK-65: auto-create is off on purpose (BOOK-48) -- so every topic is
+  # created here, explicitly, with its partition count, instead of by hand
+  # once per machine (payment-events and both .dlq topics were simply never
+  # created). --if-not-exists makes it safe on every `up`. Exits when done.
+  # $$ = a literal $ for the shell -- compose would otherwise interpolate it.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for t in booking-events:3 booking-events.dlq:1 payment-events:3 payment-events.dlq:1; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$${t%%:*}" --partitions "$${t##*:}" --replication-factor 1
+        done
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   # BOOK-45: local SMTP test double, not a real mail server -- see
   # docs/jobs/email-basics.md section 3 and docs/jobs/worker-decisions.md
   # section 8. Catches every message `worker` sends and shows it at
@@ -167,6 +186,9 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - .:/code
       - /code/.venv
@@ -238,6 +260,9 @@ services:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
       mailhog:
         condition: service_started
     volumes:
@@ -261,6 +286,9 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - .:/code
       - /code/.venv

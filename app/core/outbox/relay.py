@@ -7,6 +7,7 @@ by the existing worker (`app/worker.py`) -- not a separate process.
 
 import json
 import logging
+import uuid
 from datetime import UTC, datetime
 
 from confluent_kafka import Producer
@@ -36,6 +37,13 @@ async def publish_pending_events(uow: UnitOfWork, producer: Producer) -> None:
     instead of silently dropping an event that never actually left the
     process (outbox-basics.md §1) -- an unmarked row just gets retried next
     cycle.
+
+    BOOK-65: "confirmed" means a delivery callback with no error, not "no
+    error yet". A message still waiting when flush() times out (topic
+    missing, broker slow or down) has had no callback at all; the old
+    "mark everything that didn't fail" logic marked those too, and lost
+    them. Retrying one may duplicate it on the topic -- fine, consumers
+    dedup on event_id; a lost event is not.
     """
     result = await uow.session.execute(
         select(OutboxEvent)
@@ -46,11 +54,15 @@ async def publish_pending_events(uow: UnitOfWork, producer: Producer) -> None:
     if not pending:
         return
 
-    failures: list[tuple[OutboxEvent, Exception]] = []
+    delivered: set[uuid.UUID] = set()
 
     def _on_delivery(err: Exception | None, _msg: object, event: OutboxEvent) -> None:
-        if err is not None:
-            failures.append((event, err))
+        if err is None:
+            delivered.add(event.id)  # the broker stored it
+        else:
+            logger.error(
+                "Failed to publish outbox event %s (%s): %s", event.id, event.event_type, err
+            )
 
     for event in pending:
         producer.produce(
@@ -63,13 +75,12 @@ async def publish_pending_events(uow: UnitOfWork, producer: Producer) -> None:
             on_delivery=lambda err, msg, event=event: _on_delivery(err, msg, event),
         )
 
-    producer.flush(timeout=30)
-
-    for event, err in failures:
-        logger.error("Failed to publish outbox event %s (%s): %s", event.id, event.event_type, err)
+    # callbacks only fire inside flush()/poll(); returns how many are still waiting
+    remaining = producer.flush(timeout=30)
+    if remaining:
+        logger.warning("%d outbox event(s) not confirmed yet -- retried next run", remaining)
 
     now = datetime.now(UTC)
-    failed_ids = {event.id for event, _ in failures}
     for event in pending:
-        if event.id not in failed_ids:
+        if event.id in delivered:
             event.published_at = now

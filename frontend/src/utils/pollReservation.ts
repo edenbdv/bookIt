@@ -2,7 +2,9 @@ import { getReservation } from '../api/client'
 import type { Reservation } from '../types'
 
 // BOOK-98: shared by BookingForm and MyBookings -- both hit the identical
-// "payment came back pending" gap. ~50s total before giving up: long enough
+// "payment came back pending" gap. BOOK-65: now also every successful or
+// failed payment, since the reservation's status follows a few seconds
+// later over Kafka. ~50s total before giving up: long enough
 // to cover BOOK-55's webhook actually firing, short enough not to leave a
 // guest staring at a spinner forever if nothing ever resolves it (see
 // property-decisions.md -- the webhook is manual-trigger-only in dev).
@@ -20,7 +22,9 @@ export async function pollUntilResolved(
   isCancelled: () => boolean,
 ): Promise<Reservation | null> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+    // BOOK-65: first check right away, not after a wait -- it's now the
+    // normal path after every payment, and often already resolved
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
     if (isCancelled()) return null
 
     try {

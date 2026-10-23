@@ -120,3 +120,43 @@ async def test_running_the_relay_again_publishes_nothing_new(
     # ask for 2 -- only 1 may ever arrive
     messages = _read(_isolated_topic, expected=2)
     assert [json.loads(m.value())["event_type"] for m in messages] == ["payment_failed"]
+
+
+class _NeverConfirmsProducer:
+    """Accepts messages but never calls their delivery callback -- what a
+    real producer does while the topic is missing or the broker is slow or
+    down: no success, no failure, just still waiting when flush() times out."""
+
+    def __init__(self) -> None:
+        self.produced = 0
+
+    def produce(self, *_args: object, **_kwargs: object) -> None:
+        self.produced += 1
+
+    def flush(self, timeout: float) -> int:
+        return self.produced  # all still waiting
+
+
+# the bug this guards against: "no error yet" was treated as published, so a
+# message still waiting at flush's timeout was marked and lost for good
+@pytest.mark.anyio
+async def test_an_unconfirmed_event_stays_unpublished_and_is_retried(
+    app_db: None, db_session: AsyncSession
+) -> None:
+    reservation, guest = await make_pending_reservation(db_session)
+    async with UnitOfWork() as uow:
+        await create_payment_and_react(
+            uow,
+            PaymentCreate(reservation_id=reservation.id),
+            guest.id,
+            str(uuid.uuid4()),
+            force=PaymentOutcome.SUCCESS,
+        )
+    producer = _NeverConfirmsProducer()
+
+    async with UnitOfWork() as uow:
+        await relay.publish_pending_payment_events(uow, producer)
+
+    assert producer.produced == 1
+    published_at = await db_session.scalar(select(PaymentOutboxEvent.published_at))
+    assert published_at is None  # still pending -- the next run sends it again
