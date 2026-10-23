@@ -1,11 +1,11 @@
-"""BOOK-61: the payment saga's commit boundaries against a real Postgres --
+"""BOOK-61: the payment's commit boundaries against a real Postgres --
 what FakeUnitOfWork can't show, since its commit() persists nothing.
 
-Ported from scripts/verify_saga_commit_split.py (BOOK-54), plus BOOK-55's
-commit-before-provider-call guarantee. Both simulate a crash at a precise
-point and then check what actually survived in the DB. Service-level, not
-HTTP: the crash is injected with patch(), and what's under test is commit
-order, not the router.
+BOOK-55's commit-before-provider-call guarantee: simulate a crash at a
+precise point, then check what actually survived in the DB. (BOOK-54's
+"crash after charge -> compensate" test went with BOOK-65: confirming moved
+to Booking's payment-events consumer, and a payment it can't use is
+refunded via booking_payment_rejected -- tests/integration/test_payment_booking_*.py.)
 """
 
 from unittest.mock import patch
@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import PaymentKind, PaymentStatus
-from app.payment.provider import PaymentOutcome
 from app.payment.saga import create_payment_and_react
 from app.payment.schemas import PaymentCreate
 from app.reservation.models import Reservation, ReservationStatus
@@ -26,37 +25,6 @@ from tests.integration.helpers import make_pending_reservation, payment_rows, re
 @pytest.fixture
 async def pending_reservation(db_session: AsyncSession) -> tuple[Reservation, User]:
     return await make_pending_reservation(db_session)
-
-
-# BOOK-54: charge succeeds, then confirm_reservation() crashes. The charge's
-# record must survive (it's committed on its own, before the reaction step),
-# and the saga must compensate -- refund + release -- not just survive.
-@pytest.mark.anyio
-async def test_crash_after_charge_keeps_the_charge_and_compensates(
-    app_db: None, db_session: AsyncSession, pending_reservation: tuple[Reservation, User]
-) -> None:
-    reservation, guest = pending_reservation
-
-    with (
-        patch(
-            "app.payment.saga.reservation_service.confirm_reservation",
-            side_effect=RuntimeError("simulated crash after charge succeeded"),
-        ),
-        pytest.raises(RuntimeError),  # compensating doesn't mean hiding the failure
-    ):
-        async with UnitOfWork() as uow:
-            await create_payment_and_react(
-                uow,
-                PaymentCreate(reservation_id=reservation.id),
-                guest.id,
-                "commit-split",
-                force=PaymentOutcome.SUCCESS,
-            )
-
-    payments = [(kind, status) for _, kind, status in await payment_rows(db_session, reservation)]
-    assert (PaymentKind.CHARGE, PaymentStatus.SUCCEEDED) in payments  # charge not lost
-    assert any(kind == PaymentKind.REFUND for kind, _ in payments)  # and compensated
-    assert await reservation_status(db_session, reservation) == ReservationStatus.CANCELLED
 
 
 # BOOK-55: the PENDING payment row is committed *before* calling the

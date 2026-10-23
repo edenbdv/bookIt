@@ -15,14 +15,17 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import PaymentKind, PaymentStatus
+from app.payment.outbox import PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
 from app.payment.saga import create_payment_and_react
 from app.payment.schemas import PaymentCreate
+from app.payment.service import create_refund
 from app.payment.webhook_auth import sign_webhook_payload
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
@@ -68,13 +71,24 @@ async def _send_webhook(
     )
 
 
+# BOOK-65: the webhook no longer confirms/cancels itself -- it writes the
+# payment-events row Booking confirms/cancels from (tested on Booking's side)
+async def _events(db_session: AsyncSession, reservation: Reservation) -> list[str]:
+    result = await db_session.scalars(
+        select(PaymentOutboxEvent.event_type).where(
+            PaymentOutboxEvent.reservation_id == reservation.id
+        )
+    )
+    return [e.value for e in result]
+
+
 async def _payment_status(db_session: AsyncSession, reservation: Reservation, kind: PaymentKind):
     [status] = [s for _, k, s in await payment_rows(db_session, reservation) if k == kind]
     return status
 
 
 @pytest.mark.anyio
-async def test_webhook_success_resolves_the_charge_and_confirms(
+async def test_webhook_success_resolves_the_charge_and_writes_its_event(
     api_client: AsyncClient,
     db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -88,11 +102,11 @@ async def test_webhook_success_resolves_the_charge_and_confirms(
     assert await _payment_status(db_session, reservation, PaymentKind.CHARGE) == (
         PaymentStatus.SUCCEEDED
     )
-    assert await reservation_status(db_session, reservation) == ReservationStatus.CONFIRMED
+    assert await _events(db_session, reservation) == ["payment_succeeded"]
 
 
 # providers retry deliveries -- a repeat, even with a contradicting outcome,
-# must be a no-op, not a second reaction
+# must be a no-op, not a second event
 @pytest.mark.anyio
 async def test_redelivered_webhook_is_a_no_op(
     api_client: AsyncClient,
@@ -109,11 +123,11 @@ async def test_redelivered_webhook_is_a_no_op(
     assert await _payment_status(db_session, reservation, PaymentKind.CHARGE) == (
         PaymentStatus.SUCCEEDED
     )
-    assert await reservation_status(db_session, reservation) == ReservationStatus.CONFIRMED
+    assert await _events(db_session, reservation) == ["payment_succeeded"]
 
 
 @pytest.mark.anyio
-async def test_webhook_failure_cancels_the_reservation(
+async def test_webhook_failure_resolves_the_charge_and_writes_its_event(
     api_client: AsyncClient,
     db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -127,35 +141,24 @@ async def test_webhook_failure_cancels_the_reservation(
     assert await _payment_status(db_session, reservation, PaymentKind.CHARGE) == (
         PaymentStatus.FAILED
     )
-    assert await reservation_status(db_session, reservation) == ReservationStatus.CANCELLED
+    assert await _events(db_session, reservation) == ["payment_failed"]
 
 
-# a REFUND left PENDING (crash mid-refund, during BOOK-54's compensation)
-# resolves the same way -- with no further reaction, since the hold was
-# already released when the refund was issued
+# a REFUND left PENDING (crash mid-call to the provider) resolves the same
+# way -- with no event, since a refund's outcome drives no reservation
 @pytest.mark.anyio
 async def test_webhook_resolves_a_pending_refund(
     api_client: AsyncClient,
     db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
 ) -> None:
-    reservation, guest = pending_reservation
+    reservation, _ = pending_reservation
     with (
-        patch(
-            "app.payment.saga.reservation_service.confirm_reservation",
-            side_effect=RuntimeError("simulated confirm failure"),
-        ),
         patch("app.payment.service.provider_refund", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
         async with UnitOfWork() as uow:
-            await create_payment_and_react(
-                uow,
-                PaymentCreate(reservation_id=reservation.id),
-                guest.id,
-                str(uuid.uuid4()),
-                force=PaymentOutcome.SUCCESS,
-            )
+            await create_refund(uow, reservation.id, reservation.total_cents)
     [refund_id] = [
         pid
         for pid, kind, _ in await payment_rows(db_session, reservation)
@@ -168,6 +171,7 @@ async def test_webhook_resolves_a_pending_refund(
     assert await _payment_status(db_session, reservation, PaymentKind.REFUND) == (
         PaymentStatus.SUCCEEDED
     )
+    assert await _events(db_session, reservation) == []
 
 
 # anyone who finds the URL can POST to it -- the signature is the only thing

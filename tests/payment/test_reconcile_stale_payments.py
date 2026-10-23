@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -60,27 +60,22 @@ async def test_each_stale_charge_is_checked_and_resolved() -> None:
     p1, p2 = _payment(), _payment()
     uow = FakeUnitOfWork([p1, p2])
 
-    with (
-        patch(
-            "app.payment.saga.provider_check_status",
-            side_effect=[PaymentOutcome.SUCCESS, PaymentOutcome.FAILURE],
-        ) as check_status,
-        # this fake has no uow.reservations -- patched out, already covered
-        # by test_resolve_payment.py
-        patch("app.payment.saga.react_to_payment_outcome", new_callable=AsyncMock) as react,
-    ):
+    with patch(
+        "app.payment.saga.provider_check_status",
+        side_effect=[PaymentOutcome.SUCCESS, PaymentOutcome.FAILURE],
+    ) as check_status:
         count = await reconcile_stale_payments(uow, datetime.now(UTC))
 
     assert count == 2
     assert p1.status == PaymentStatus.SUCCEEDED
     assert p2.status == PaymentStatus.FAILED
     assert check_status.call_count == 2
-    assert react.await_count == 2
+    assert len(uow.session.added) == 2  # one payment-events row each
 
 
 @pytest.mark.anyio
 async def test_a_stale_refund_resolves_without_reacting() -> None:
-    # only CHARGE reacts -- a REFUND needs no reservation lookup
+    # only a CHARGE writes an event -- a REFUND's outcome drives nothing
     refund = _payment(kind=PaymentKind.REFUND)
     uow = FakeUnitOfWork([refund])
 

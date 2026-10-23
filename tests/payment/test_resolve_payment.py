@@ -1,9 +1,9 @@
 import uuid
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.payment.models import Payment, PaymentKind, PaymentStatus
+from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
 from app.payment.saga import resolve_payment_and_react
 from app.payment.service import PaymentNotFoundError
@@ -57,33 +57,34 @@ async def test_already_resolved_payment_is_a_noop() -> None:
     payment = _payment(PaymentKind.CHARGE, PaymentStatus.SUCCEEDED)
     uow = FakeUnitOfWork(payment)
 
-    with patch("app.payment.saga.react_to_payment_outcome", new_callable=AsyncMock) as react:
-        result = await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
+    result = await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
 
     assert result is payment
     assert payment.status == PaymentStatus.SUCCEEDED  # untouched -- redelivery, no-op
-    react.assert_not_called()
+    assert uow.session.added == []  # and no second event
 
 
+# BOOK-65: resolving no longer confirms anything itself -- it writes the
+# payment-events row, and Booking confirms from that
 @pytest.mark.anyio
-async def test_pending_charge_resolves_and_reacts() -> None:
+async def test_pending_charge_resolves_and_writes_its_event() -> None:
     payment = _payment(PaymentKind.CHARGE, PaymentStatus.PENDING)
     uow = FakeUnitOfWork(payment)
 
-    with patch("app.payment.saga.react_to_payment_outcome", new_callable=AsyncMock) as react:
-        await resolve_payment_and_react(uow, payment.id, PaymentOutcome.SUCCESS)
+    await resolve_payment_and_react(uow, payment.id, PaymentOutcome.SUCCESS)
 
     assert payment.status == PaymentStatus.SUCCEEDED
-    react.assert_awaited_once_with(uow, payment)
+    [event] = uow.session.added
+    assert isinstance(event, PaymentOutboxEvent)
+    assert event.event_type == PaymentEventType.PAYMENT_SUCCEEDED
 
 
 @pytest.mark.anyio
-async def test_pending_refund_resolves_without_reacting() -> None:
+async def test_pending_refund_resolves_without_an_event() -> None:
     payment = _payment(PaymentKind.REFUND, PaymentStatus.PENDING)
     uow = FakeUnitOfWork(payment)
 
-    with patch("app.payment.saga.react_to_payment_outcome", new_callable=AsyncMock) as react:
-        await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
+    await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
 
     assert payment.status == PaymentStatus.FAILED
-    react.assert_not_called()
+    assert uow.session.added == []
