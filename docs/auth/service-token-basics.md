@@ -1,6 +1,9 @@
 # Service token basics (BOOK-66)
 
-**Status: design — not built yet.** For the general theory see
+**Status: built** — `require_service()` (`app/auth/dependencies.py`), Booking's
+`/internal/reservations/{id}` (`app/reservation/internal_router.py`) and Payment's
+`booking_client.py`; tests in `tests/integration/test_internal_reservations.py` and
+`test_booking_client.py`. For the general theory see
 `docs/microservices/microservices-basics.md` §3.8; for why Payment calls Booking
 synchronously at all, `docs/microservices/microservices-decisions.md` §17. JWT itself is
 explained in `jwt-basics.md`.
@@ -148,3 +151,27 @@ decide before Payment gets its own database:
   against (unless tokens move to public-key signing, RS256, where Payment only holds the
   public key).
 - **The gateway verifies it** (BOOK-67) and passes the user id on to Payment.
+
+Leaning towards the gateway — it's also what keeps `/internal` closed from outside (§6).
+
+## 9. Rotating the secret
+
+**Rotation** = replacing `SERVICE_TOKEN_SECRET` — on a schedule as good practice, or
+right away if it leaks (whoever has it can sign tokens as Payment).
+
+**Today's procedure (enough for BookIt):** set the new value for **both** services and
+restart both (`app`, which is both of them while Payment is still inside it — later
+`app` and the Payment service). The two don't restart at the same instant, so for a few
+seconds one signs with the new secret while the other verifies with the old: Payment's
+calls get 401 and guests trying to pay get a 503 "try again" (nothing is charged — the
+call happens before any commit). Tokens already issued die within their 5-minute `exp`.
+
+**Zero-downtime rotation (not built):** Booking accepts **two** secrets for a while —
+
+1. Booking: add `SERVICE_TOKEN_SECRET_PREVIOUS` = the old value, `SERVICE_TOKEN_SECRET` =
+   the new one; `require_service` tries the current secret, then the previous.
+2. Payment: switch to the new secret. Every call keeps working — Booking accepts both.
+3. After 5 minutes (the token lifetime), remove `SERVICE_TOKEN_SECRET_PREVIOUS`.
+
+**Revisit when:** a few seconds of failed payments during a rotation is no longer
+acceptable, or rotation becomes routine (scheduled) rather than rare.
