@@ -37,7 +37,7 @@ async def cancel_reservation_and_refund(
             datetime.now(UTC),
             charge_payment.amount_cents,
         )
-        await service.create_refund(uow, reservation, refund_amount_cents)
+        await service.create_refund(uow, reservation.id, refund_amount_cents)
 
     # non-persisted -- attached purely for ReservationCancelRead's
     # from_attributes read (same technique as property/service.py's
@@ -59,7 +59,7 @@ async def host_cancel_reservation_and_refund(
     refund_amount_cents = 0
     if charge_payment is not None:
         refund_amount_cents = charge_payment.amount_cents
-        await service.create_refund(uow, reservation, refund_amount_cents)
+        await service.create_refund(uow, reservation.id, refund_amount_cents)
 
     reservation.refund_amount_cents = refund_amount_cents
     return reservation

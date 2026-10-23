@@ -76,7 +76,7 @@ async def _refund_and_release(uow: UnitOfWork, payment: Payment, reservation: Re
     await uow.session.rollback()  # discard confirm_reservation()'s half-mutated state
     reservation = await uow.reservations.get_by_id(reservation_id)
 
-    await service.create_refund(uow, reservation, amount_cents)
+    await service.create_refund(uow, reservation.id, amount_cents)
     # unconditional -- the hold releases either way (unchanged from BOOK-54)
     await reservation_service.cancel_reservation_system(uow, reservation)
     await uow.session.commit()

@@ -16,7 +16,7 @@ from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
-from app.reservation.models import Reservation, ReservationStatus
+from app.reservation.models import ReservationStatus
 
 # real card networks/issuing banks take real time to answer -- this mock
 # resolves in zero time otherwise, which reads as fake ("did that actually
@@ -210,18 +210,13 @@ async def create_payment_idempotent(
     return payment
 
 
-async def create_refund(uow: UnitOfWork, reservation: Reservation, amount_cents: int) -> Payment:
-    """The refund-side mirror of create_payment() above: mint the row,
-    commit it PENDING, then call the provider. Shared by BOOK-54's saga
-    (_refund_and_release, always the full charge) and BOOK-76's
-    policy-based partial refund on guest cancellation (payment/cancellation.py)
-    -- neither is this function's concern, it just processes an amount.
-
-    BOOK-55's commit split: PENDING committed before calling the provider,
-    so a crash mid-call still leaves a row a webhook can resolve later.
-    """
+async def create_refund(uow: UnitOfWork, reservation_id: uuid.UUID, amount_cents: int) -> Payment:
+    """Mirror of create_payment(): commit the refund PENDING, then call the
+    provider -- a crash mid-call still leaves a row to resolve (BOOK-55).
+    Takes a reservation_id, not a Reservation: Payment won't have Booking's
+    objects once split out (BOOK-65)."""
     refund_payment = Payment(
-        reservation_id=reservation.id,
+        reservation_id=reservation_id,
         kind=PaymentKind.REFUND,
         amount_cents=amount_cents,
         status=PaymentStatus.PENDING,
