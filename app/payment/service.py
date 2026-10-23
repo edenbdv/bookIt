@@ -11,13 +11,14 @@ from app.core.idempotency.models import (
     IdempotencyKey,
     IdempotencyKeyStatus,
 )
+from app.payment import booking_client
+from app.payment.booking_client import BookingReservationStatus
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import check_status as provider_check_status
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
-from app.reservation.models import ReservationStatus
 
 # real card networks/issuing banks take real time to answer -- this mock
 # resolves in zero time otherwise, which reads as fake ("did that actually
@@ -115,8 +116,6 @@ async def emit_payment_event(uow: UnitOfWork, payment: Payment) -> None:
     )
 
 
-# not wired to confirm_reservation()/cancel_reservation() -- chaining the
-# saga's outcome into the reservation is BOOK-54's job, not this one
 async def create_payment(
     uow: UnitOfWork,
     reservation_id: uuid.UUID,
@@ -125,13 +124,15 @@ async def create_payment(
     force: PaymentOutcome | None = None,
 ) -> Payment:
     # only the reservation's own guest can pay for it, and only while
-    # PENDING -- nothing left to pay for/against otherwise
-    reservation = await uow.reservations.get_by_id(reservation_id)
+    # PENDING -- nothing left to pay for/against otherwise. BOOK-66: asked of
+    # Booking over HTTP, before anything is committed -- so a
+    # BookingUnavailableError here charges nothing and rolls the key back
+    reservation = await booking_client.get_reservation(reservation_id)
     if reservation is None:
         raise ReservationNotFoundError
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
-    if reservation.status != ReservationStatus.PENDING:
+    if reservation.status != BookingReservationStatus.PENDING:
         raise ReservationNotPayableError
 
     # blocks a second charge attempt while an earlier TIMEOUT for this
@@ -188,11 +189,13 @@ async def create_payment_idempotent(
         existing = await uow.session.get(IdempotencyKey, idempotency_key)
         if existing.status == IdempotencyKeyStatus.COMPLETED:
             existing_payment = await uow.payments.get_by_id(existing.payment_id)
-            existing_reservation = await uow.reservations.get_by_id(existing_payment.reservation_id)
+            existing_reservation = await booking_client.get_reservation(
+                existing_payment.reservation_id
+            )
             # keys aren't scoped per-guest -- without this check, a different
             # guest reusing/guessing this key would get back someone else's
             # payment as their own request's result
-            if existing_reservation.guest_id != current_user_id:
+            if existing_reservation is None or existing_reservation.guest_id != current_user_id:
                 raise PaymentIdempotencyKeyInProgressError
             # same key, different reservation_id than the original request
             if existing_payment.reservation_id != data.reservation_id:

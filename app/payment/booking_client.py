@@ -3,12 +3,13 @@ charging (microservices-decisions.md §17). Payment mints the service token
 here; Booking only verifies it (docs/auth/service-token-basics.md §4).
 """
 
+import enum
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import get_settings
 
@@ -21,13 +22,21 @@ class BookingUnavailableError(Exception):
     """Booking didn't answer in time, or answered with an error -- not "not found"."""
 
 
-@dataclass(frozen=True)
-class ReservationInfo:
-    # the contract -- plain values, not Booking's ORM model. status is a
-    # string ("pending"...), not Booking's ReservationStatus enum
+# Payment's own copy of the contract, not an import of Booking's ReservationStatus
+# -- shared contract, not shared code. A status Payment doesn't know fails
+# validation (loudly) rather than being guessed at: Payment learns it first.
+class BookingReservationStatus(str, enum.Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+
+
+class ReservationInfo(BaseModel):
+    # Booking's ReservationInternalRead, as Payment reads it
     id: uuid.UUID
     guest_id: uuid.UUID
-    status: str
+    status: BookingReservationStatus
     total_cents: int
 
 
@@ -62,10 +71,7 @@ async def get_reservation(reservation_id: uuid.UUID) -> ReservationInfo | None:
         return None
     if response.status_code != 200:
         raise BookingUnavailableError(f"Booking answered {response.status_code}")
-    data = response.json()
-    return ReservationInfo(
-        id=uuid.UUID(data["id"]),
-        guest_id=uuid.UUID(data["guest_id"]),
-        status=data["status"],
-        total_cents=data["total_cents"],
-    )
+    try:
+        return ReservationInfo.model_validate_json(response.content)
+    except ValidationError as exc:  # an answer that doesn't match the contract
+        raise BookingUnavailableError(f"unexpected answer from Booking: {exc}") from exc

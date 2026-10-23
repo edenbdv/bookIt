@@ -11,7 +11,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.payment import booking_client
-from app.payment.booking_client import BookingUnavailableError, ReservationInfo
+from app.payment.booking_client import (
+    BookingReservationStatus,
+    BookingUnavailableError,
+    ReservationInfo,
+)
 from tests.integration.helpers import make_pending_reservation
 
 
@@ -24,7 +28,10 @@ async def test_reads_the_reservation_payment_needs(
     info = await booking_client.get_reservation(reservation.id)
 
     assert info == ReservationInfo(
-        id=reservation.id, guest_id=guest.id, status="pending", total_cents=40000
+        id=reservation.id,
+        guest_id=guest.id,
+        status=BookingReservationStatus.PENDING,
+        total_cents=40000,
     )
 
 

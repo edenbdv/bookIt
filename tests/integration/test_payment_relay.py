@@ -26,6 +26,9 @@ from app.payment.schemas import PaymentCreate
 from app.payment.service import pay_reservation
 from tests.integration.helpers import make_pending_reservation
 
+# BOOK-66: paying asks Booking over HTTP -- reach it in-process
+pytestmark = pytest.mark.usefixtures("booking_in_process")
+
 # first poll includes joining the group and the topic being auto-created
 CONSUME_TIMEOUT_POLLS = 30
 

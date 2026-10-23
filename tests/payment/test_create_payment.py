@@ -1,7 +1,11 @@
 import uuid
+from collections.abc import Iterator
+from unittest.mock import patch
 
 import pytest
 
+from app.payment import booking_client
+from app.payment.booking_client import BookingReservationStatus, ReservationInfo
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.provider import PaymentOutcome
 from app.payment.service import (
@@ -11,7 +15,6 @@ from app.payment.service import (
     ReservationNotPayableError,
     create_payment,
 )
-from app.reservation.models import Reservation, ReservationStatus
 
 
 # same minimal-fake approach as tests/reservation/*.py -- only what
@@ -44,19 +47,33 @@ class FakePaymentRepository:
         return self._pending_charge
 
 
-class FakeReservationRepository:
-    def __init__(self, reservation: Reservation | None) -> None:
-        self._reservation = reservation
+# BOOK-66: create_payment asks Booking over HTTP, not uow.reservations -- so the
+# "reservation" a test hands FakeUnitOfWork is what booking_client answers with
+_booking_answer: dict[str, ReservationInfo | None] = {"reservation": None}
 
-    async def get_by_id(self, id: uuid.UUID) -> Reservation | None:
-        return self._reservation
+
+@pytest.fixture(autouse=True)
+def _fake_booking() -> Iterator[None]:
+    async def get_reservation(reservation_id: uuid.UUID) -> ReservationInfo | None:
+        return _booking_answer["reservation"]
+
+    with patch.object(booking_client, "get_reservation", get_reservation):
+        yield
+
+
+def _reservation(
+    guest_id: uuid.UUID, status: BookingReservationStatus, total_cents: int
+) -> ReservationInfo:
+    return ReservationInfo(
+        id=uuid.uuid4(), guest_id=guest_id, status=status, total_cents=total_cents
+    )
 
 
 class FakeUnitOfWork:
     def __init__(
-        self, reservation: Reservation | None, pending_charge: Payment | None = None
+        self, reservation: ReservationInfo | None, pending_charge: Payment | None = None
     ) -> None:
-        self.reservations = FakeReservationRepository(reservation)
+        _booking_answer["reservation"] = reservation
         self.payments = FakePaymentRepository(pending_charge)
         self.session = FakeSession()
 
@@ -71,9 +88,7 @@ async def test_nonexistent_reservation_raises_not_found() -> None:
 
 @pytest.mark.anyio
 async def test_paying_for_someone_elses_reservation_raises_not_guest() -> None:
-    reservation = Reservation(
-        guest_id=uuid.uuid4(), status=ReservationStatus.PENDING, total_cents=10_000
-    )
+    reservation = _reservation(uuid.uuid4(), BookingReservationStatus.PENDING, 10_000)
     uow = FakeUnitOfWork(reservation)
 
     with pytest.raises(NotReservationGuestError):
@@ -83,9 +98,7 @@ async def test_paying_for_someone_elses_reservation_raises_not_guest() -> None:
 @pytest.mark.anyio
 async def test_paying_for_a_non_pending_reservation_raises_not_payable() -> None:
     guest_id = uuid.uuid4()
-    reservation = Reservation(
-        guest_id=guest_id, status=ReservationStatus.CONFIRMED, total_cents=10_000
-    )
+    reservation = _reservation(guest_id, BookingReservationStatus.CONFIRMED, 10_000)
     uow = FakeUnitOfWork(reservation)
 
     with pytest.raises(ReservationNotPayableError):
@@ -95,9 +108,7 @@ async def test_paying_for_a_non_pending_reservation_raises_not_payable() -> None
 @pytest.mark.anyio
 async def test_success_outcome_marks_payment_succeeded() -> None:
     guest_id = uuid.uuid4()
-    reservation = Reservation(
-        guest_id=guest_id, status=ReservationStatus.PENDING, total_cents=10_000
-    )
+    reservation = _reservation(guest_id, BookingReservationStatus.PENDING, 10_000)
     uow = FakeUnitOfWork(reservation)
 
     payment = await create_payment(uow, uuid.uuid4(), guest_id, force=PaymentOutcome.SUCCESS)
@@ -111,9 +122,7 @@ async def test_success_outcome_marks_payment_succeeded() -> None:
 @pytest.mark.anyio
 async def test_failure_outcome_marks_payment_failed() -> None:
     guest_id = uuid.uuid4()
-    reservation = Reservation(
-        guest_id=guest_id, status=ReservationStatus.PENDING, total_cents=10_000
-    )
+    reservation = _reservation(guest_id, BookingReservationStatus.PENDING, 10_000)
     uow = FakeUnitOfWork(reservation)
 
     payment = await create_payment(uow, uuid.uuid4(), guest_id, force=PaymentOutcome.FAILURE)
@@ -124,9 +133,7 @@ async def test_failure_outcome_marks_payment_failed() -> None:
 @pytest.mark.anyio
 async def test_timeout_outcome_leaves_payment_pending() -> None:
     guest_id = uuid.uuid4()
-    reservation = Reservation(
-        guest_id=guest_id, status=ReservationStatus.PENDING, total_cents=10_000
-    )
+    reservation = _reservation(guest_id, BookingReservationStatus.PENDING, 10_000)
     uow = FakeUnitOfWork(reservation)
 
     payment = await create_payment(uow, uuid.uuid4(), guest_id, force=PaymentOutcome.TIMEOUT)
@@ -139,9 +146,7 @@ async def test_retry_while_a_charge_is_still_pending_is_rejected() -> None:
     # simulates: an earlier attempt timed out and is still unresolved --
     # a second attempt must not start a second, independent charge
     guest_id = uuid.uuid4()
-    reservation = Reservation(
-        guest_id=guest_id, status=ReservationStatus.PENDING, total_cents=10_000
-    )
+    reservation = _reservation(guest_id, BookingReservationStatus.PENDING, 10_000)
     stuck_payment = Payment(
         reservation_id=uuid.uuid4(),
         kind=PaymentKind.CHARGE,

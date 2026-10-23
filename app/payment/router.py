@@ -4,6 +4,7 @@ from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
 from app.payment import service
+from app.payment.booking_client import BookingUnavailableError
 from app.payment.models import Payment
 from app.payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
 from app.payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
@@ -21,6 +22,12 @@ async def create_payment(
 ) -> Payment:
     try:
         return await service.pay_reservation(uow, data, current_user.id, idempotency_key)
+    # BOOK-66: Booking couldn't be asked -- nothing was charged, try again
+    except BookingUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Couldn't check this reservation right now -- please try again",
+        ) from exc
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"

@@ -29,6 +29,9 @@ from app.payment.webhook_auth import sign_webhook_payload
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
 
+# BOOK-66: paying asks Booking over HTTP -- reach it in-process
+pytestmark = pytest.mark.usefixtures("booking_in_process")
+
 
 @pytest.fixture
 async def pending_reservation(db_session: AsyncSession) -> tuple[Reservation, User]:
