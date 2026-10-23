@@ -98,6 +98,12 @@ async def send_reservation_confirmed_email(payload: dict) -> None:
 # BOOK-64: from the payload alone, same as the confirmed email above.
 async def send_reservation_cancelled_email(payload: dict) -> None:
     guest, property_, reservation = payload["guest"], payload["property"], payload["reservation"]
+    # BOOK-65: .get() -- events from before BOOK-65 don't carry refund_cents.
+    # No line at all for 0, so an unpaid reservation doesn't read "$0.00 refund".
+    refund_cents = payload.get("refund_cents", 0)
+    refund_line = (
+        f"You'll be refunded {_format_cents(refund_cents)}.\n\n" if refund_cents > 0 else ""
+    )
 
     await asyncio.to_thread(
         _send,
@@ -108,6 +114,7 @@ async def send_reservation_cancelled_email(payload: dict) -> None:
             "Your reservation is no longer active:\n\n"
             f"Property: {property_['title']}, {property_['city']}, {property_['country']}\n"
             f"Dates: {reservation['check_in']} -> {reservation['check_out']}\n\n"
+            f"{refund_line}"
             "These dates are now available again for other guests.\n"
         ),
     )

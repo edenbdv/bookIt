@@ -13,11 +13,21 @@ from app.payment.inbox import ProcessedBookingEvent
 from app.payment.models import PaymentKind, PaymentStatus
 
 
+def _has_effect(payload: dict) -> bool:
+    if payload["event_type"] == "booking_payment_rejected":
+        return True
+    # refund_cents is Booking's policy decision (0 = unpaid, or nothing back);
+    # .get(): booking_cancelled events from before BOOK-65 don't carry it
+    if payload["event_type"] == "booking_cancelled":
+        return payload.get("refund_cents", 0) > 0
+    return False
+
+
 async def handle_booking_event(uow: UnitOfWork, payload: dict) -> None:
     """Payment's reaction to one booking-events message."""
-    # every other type (booking_created/confirmed/cancelled) has no effect
-    # here -- skipped without an Inbox row, which only guards real effects
-    if payload["event_type"] != "booking_payment_rejected":
+    # anything with no effect here (booking_created/confirmed, a cancel with
+    # nothing to refund) is skipped without an Inbox row -- it only guards effects
+    if not _has_effect(payload):
         return
 
     event_id = uuid.UUID(payload["event_id"])
@@ -29,6 +39,17 @@ async def handle_booking_event(uow: UnitOfWork, payload: dict) -> None:
     # refund on redelivery. Reconcile finishes the PENDING refund.
     uow.session.add(ProcessedBookingEvent(event_id=event_id))
 
+    if payload["event_type"] == "booking_cancelled":
+        charge = await uow.payments.get_succeeded_charge_by_reservation_id(
+            uuid.UUID(payload["reservation_id"])
+        )
+        if charge is not None:
+            # the amount is Booking's (the policy lives there); the cap is ours
+            amount = min(payload["refund_cents"], charge.amount_cents)
+            await service.create_refund(uow, charge.reservation_id, amount)
+        return
+
+    # booking_payment_rejected
     charge = await uow.payments.get_by_id(uuid.UUID(payload["payment_id"]))
     # only a charge that really succeeded has money to give back. The amount
     # comes from Payment's own row, not the event -- the source of truth.

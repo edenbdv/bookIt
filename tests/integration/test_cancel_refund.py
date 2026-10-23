@@ -1,8 +1,8 @@
-"""BOOK-65 safety net: cancel -> refund end to end, through the real HTTP
-endpoint and a real Postgres. Today the refund is a direct call in
-payment/cancellation.py; BOOK-65 moves it to an event consumer. These tests
-only check what a guest or host can observe (the response, the refund row),
-so they should keep passing unchanged across that move.
+"""Cancel -> refund end to end, through the real HTTP endpoint and a real
+Postgres. Since BOOK-65 the refund isn't part of the request: Booking writes
+booking_cancelled (with refund_cents) and Payment refunds when it reads it.
+_deliver_to_payment stands in for the relay + Kafka hop, which is tested
+separately (test_payment_booking_consumer.py).
 """
 
 import pytest
@@ -11,6 +11,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
+from app.core.db.unit_of_work import UnitOfWork
+from app.core.outbox.models import OutboxEvent, OutboxEventType
+from app.payment.booking_events import handle_booking_event
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import CancellationPolicy, Property
 from app.reservation.models import Reservation, ReservationStatus
@@ -62,6 +65,23 @@ async def _refund_amounts(db_session: AsyncSession, reservation: Reservation) ->
     return list(result)
 
 
+# BOOK-65: what Payment will refund from -- the booking_cancelled payload
+async def _cancelled_event(db_session: AsyncSession, reservation: Reservation) -> dict:
+    return await db_session.scalar(
+        select(OutboxEvent.payload).where(
+            OutboxEvent.reservation_id == reservation.id,
+            OutboxEvent.event_type == OutboxEventType.BOOKING_CANCELLED,
+        )
+    )
+
+
+# what Payment's consumer does once booking_cancelled reaches it
+async def _deliver_to_payment(db_session: AsyncSession, reservation: Reservation) -> None:
+    payload = await _cancelled_event(db_session, reservation)
+    async with UnitOfWork() as uow:
+        await handle_booking_event(uow, payload)
+
+
 # STRICT + 30 days ahead -> 50%, not the full amount -- proves the policy
 # was applied, not just that some refund happened
 @pytest.mark.anyio
@@ -77,7 +97,11 @@ async def test_guest_cancels_a_paid_reservation_and_gets_a_policy_refund(
     assert response.status_code == 200
     assert response.json()["refund_amount_cents"] == 20000
     assert await reservation_status(db_session, reservation) == ReservationStatus.CANCELLED
+    assert await _refund_amounts(db_session, reservation) == []  # not in the request anymore
+    await _deliver_to_payment(db_session, reservation)
     assert await _refund_amounts(db_session, reservation) == [20000]
+    event = await _cancelled_event(db_session, reservation)
+    assert (event["cancelled_by"], event["refund_cents"]) == ("guest", 20000)
 
 
 # BOOK-80: same STRICT property, but the host cancels -> always the full
@@ -95,4 +119,26 @@ async def test_host_cancels_a_paid_reservation_and_the_guest_gets_a_full_refund(
     assert response.status_code == 200
     assert response.json()["refund_amount_cents"] == 40000
     assert await reservation_status(db_session, reservation) == ReservationStatus.CANCELLED
+    assert await _refund_amounts(db_session, reservation) == []  # not in the request anymore
+    await _deliver_to_payment(db_session, reservation)
     assert await _refund_amounts(db_session, reservation) == [40000]
+    event = await _cancelled_event(db_session, reservation)
+    assert (event["cancelled_by"], event["refund_cents"]) == ("host", 40000)
+
+
+# nothing was paid yet -> nothing to refund, whoever cancels
+@pytest.mark.anyio
+async def test_guest_cancels_an_unpaid_reservation_with_nothing_to_refund(
+    api_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    reservation, guest = await make_pending_reservation(db_session)
+
+    response = await api_client.post(
+        f"/reservations/{reservation.id}/cancel", headers=auth_headers(guest)
+    )
+
+    assert response.json()["refund_amount_cents"] == 0
+    await _deliver_to_payment(db_session, reservation)
+    assert await _refund_amounts(db_session, reservation) == []
+    event = await _cancelled_event(db_session, reservation)
+    assert (event["cancelled_by"], event["refund_cents"]) == ("guest", 0)
