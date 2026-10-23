@@ -506,6 +506,103 @@ workspace membership, Dockerfile pattern and boundary test (add it to `BOUNDARIE
 
 ---
 
+# BOOK-65 — Payment as its own service
+
+Flow and open points: `epic-11-flow.md`. This section records what was decided along
+the way.
+
+## 10. The starting point: Payment's ties to Booking
+
+| # | Coupling | Where |
+|---|---|---|
+| 1 | The saga confirms/cancels by calling Booking's functions | `payment/saga.py` — `confirm_reservation()`, `cancel_reservation_system()` |
+| 2 | Refunds on cancel are a direct call from Booking's cancel endpoints | `payment/cancellation.py` |
+| 3 | Payment reads the reservation from Booking's table | `payment/service.py` — `uow.reservations` |
+| 4 | A foreign key into Booking's table | `payments.reservation_id` |
+| 5 | Its jobs (reconcile) run in Booking's Celery worker | `app/worker.py` |
+| 6 | Same image, same database | `docker-compose.yml` |
+
+## 11. The plan, and where it stands
+
+Same approach as BOOK-64: small steps, still inside the monolith first, the app works
+after each.
+
+- **Done:** Payment's own outbox + `payment-events` (§12); Booking consumes it (§13);
+  the relay bug and `kafka-init` (§14); a payment for an already-cancelled reservation
+  becomes a refund (§15); the frontend polls (§16).
+- **Next:** Payment's consumer for `booking-events`; remove the saga's direct calls
+  (tie 1); refunds on `BookingCancelled` (tie 2); a sync call + service auth for the
+  reservation read (tie 3, BOOK-66); own database (tie 4); extract to
+  `services/payment/` with its own scheduler (ties 5–6).
+
+## 12. Payment's own outbox and `payment-events`
+
+**Chosen:** its own `payment_outbox_events` table and its own relay
+(`payment/relay.py`), not Booking's `outbox_events` with a topic column. A resolved
+**charge** writes `payment_succeeded` / `payment_failed` in the same transaction as its
+status — right after charging, and on webhook/reconcile. PENDING (a timeout) and
+refunds write nothing: there's no outcome yet, and a refund changes no reservation.
+
+- Own table: it moves with Payment's own database later; no FK to `reservations`.
+- Own relay copy: Payment can't import Booking's once extracted.
+- Key = `reservation_id`: one reservation's events stay in order. 3 partitions.
+
+## 13. Booking consumes `payment-events`
+
+**Chosen:** a `booking-consumer` process (group `booking`), its own Inbox
+(`processed_payment_events`), DLQ `payment-events.dlq`. The Inbox row and the
+confirm/cancel are **one transaction** — stronger than Notification's (§7), whose side
+effect (an email) can't share one. No retry loop: no flaky external call here.
+
+It only acts on a `pending` reservation. While the saga's direct call still runs, the
+event usually arrives after it already confirmed — a no-op, so both paths can run side
+by side until the switch-over.
+
+## 14. A bug found: "not failed yet" is not "published"
+
+Both relays marked every row that hadn't *failed* by `flush(timeout=30)`. A message
+still waiting then — topic missing, broker slow or down — has had no delivery callback
+at all, so it was marked and **lost**. Found when `payment-events` didn't exist.
+
+**Fix:** mark only rows Kafka *confirmed* (`err is None` in the callback); anything
+unconfirmed is retried next run. A retry may duplicate a message — fine, every
+consumer dedups on `event_id`. Tests use a producer that never confirms; testcontainers'
+Kafka auto-creates topics, which is why the bug never showed there.
+
+**`kafka-init`:** auto-create is off on purpose (BOOK-48), but topics were created by
+hand once per machine — `payment-events` and both `.dlq` topics never were. A one-shot
+compose service now creates every topic with `--if-not-exists`; consumers and the
+worker wait for it.
+
+## 15. A payment for an already-cancelled reservation
+
+A charge can resolve *after* its reservation's hold expired (a timeout, reconcile
+minutes later). Checking "pending" before charging can't prevent it — across services
+it can only be made rare, so it needs compensation.
+
+**Chosen:** Booking's handler writes `booking_payment_rejected` (`payment_id`,
+`amount_cents`) to its outbox, in the same transaction as its Inbox row. Payment's
+handler (`payment/booking_events.py`) refunds it in full:
+
+- **Amount from Payment's own charge row**, not the event — Payment is the source of
+  truth for what it charged.
+- **Inbox row added before `create_refund()`**, so it commits together with the PENDING
+  refund row, before the provider call. A crash mid-call can't cause a second refund on
+  redelivery; reconcile finishes the PENDING one.
+- **Inbox rows only for events with an effect** — the other `booking-events` types are
+  skipped without one.
+
+`create_refund()` now takes a `reservation_id`, not a `Reservation`.
+
+## 16. The frontend polls the reservation
+
+`BookingForm` and `MyBookings` used to derive the reservation's status from the
+payment's response. Once Booking confirms from an event, "payment succeeded" no longer
+means "reservation confirmed", so both always poll `GET /reservations/{id}` after
+paying. The first check is immediate, so nothing feels slower before the switch-over.
+
+---
+
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
@@ -533,3 +630,12 @@ workspace membership, Dockerfile pattern and boundary test (add it to `BOUNDARIE
 | Notification's image | `services/notification/Dockerfile`, built from the repo root, installs only `--package notification` | — |
 | Service boundary | `tests/test_service_boundaries.py` (AST scan both ways) + CI image check | Payment joins: add it to `BOUNDARIES` |
 | Cross-service tests | Stay at the root `tests/integration/` — they test the contract between the services | — |
+| BOOK-65 Payment's outbox | Own `payment_outbox_events` + own relay → `payment-events` (3 partitions, key `reservation_id`) | — |
+| Which payments emit an event | Only a resolved charge (`payment_succeeded` / `payment_failed`); not PENDING, not refunds | Something needs refund outcomes |
+| Booking's `payment-events` consumer | Group `booking`, Inbox + confirm/cancel in one transaction, DLQ `payment-events.dlq`, no retry loop | — |
+| Saga's direct calls | Still run beside the event path until the switch-over | Removed once "can't use this payment" refunds work end to end |
+| Relay marking | Only Kafka-*confirmed* rows are marked published (both relays) | — |
+| Kafka topics | Created by the one-shot `kafka-init` service, `--if-not-exists`; auto-create stays off | — |
+| Payment for a cancelled reservation | Booking emits `booking_payment_rejected` → Payment refunds in full, amount from its own charge row | Prevention (don't expire mid-payment) is worth adding too |
+| Payment's Inbox | `processed_booking_events`, committed with the PENDING refund row, only for events with an effect | — |
+| Frontend after paying | Always poll the reservation, first check immediate | Push (SSE/WebSocket) if the wait gets noticeable |

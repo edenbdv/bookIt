@@ -107,18 +107,17 @@ async def test_a_rejection_for_a_failed_charge_refunds_nothing(
     assert await _inbox_count(db_session) == 1  # still marked handled
 
 
-# Payment reads all of booking-events -- the other types are just marked
+# Payment reads all of booking-events -- the other types are skipped, with no
+# Inbox row (it only guards events that actually do something)
 @pytest.mark.anyio
-async def test_other_booking_events_are_marked_but_do_nothing(
-    app_db: None, db_session: AsyncSession
-) -> None:
+async def test_other_booking_events_are_skipped(app_db: None, db_session: AsyncSession) -> None:
     reservation, charge = await _charge(db_session)
     payload = {**_rejected(charge), "event_type": "booking_confirmed"}
 
     await _handle(payload)
 
     assert await _refunds(db_session, reservation) == []
-    assert await _inbox_count(db_session) == 1
+    assert await _inbox_count(db_session) == 0
 
 
 # the reason the Inbox row is added first: a crash during the provider call

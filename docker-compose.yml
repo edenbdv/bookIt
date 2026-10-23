@@ -108,7 +108,7 @@ services:
     command:
       - |
         set -e
-        for t in booking-events:3 booking-events.dlq:1 payment-events:3 payment-events.dlq:1; do
+        for t in booking-events:3 booking-events.dlq:1 booking-events.payment.dlq:1 payment-events:3 payment-events.dlq:1; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
             --topic "$${t%%:*}" --partitions "$${t##*:}" --replication-factor 1
         done
@@ -287,6 +287,29 @@ services:
       kafka:
         condition: service_healthy
       # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/code
+      - /code/.venv
+
+  # BOOK-65: Payment's consumer for booking-events (consumer group "payment")
+  # -- refunds a payment Booking rejected. Same image as `app` while Payment
+  # is still inside the monolith; moves to its own image when extracted.
+  payment-consumer:
+    build: .
+    command: uv run --no-dev python -m app.payment.booking_consumer
+    # an unhandled error ends the process -- bring it back, and Kafka
+    # redelivers the uncommitted message
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
     volumes:
