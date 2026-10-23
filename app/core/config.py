@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # docs/payment/webhook-basics.md §8. dev-only default, same as secret_key.
     payment_webhook_secret: str = "dev-webhook-secret-change-me"
 
+    # BOOK-66: signs/verifies service tokens (Payment -> Booking's /internal
+    # routes) -- its own secret, never secret_key (docs/auth/service-token-basics.md §4).
+    # dev-only default, same as secret_key.
+    service_token_secret: str = "dev-service-secret-change-me"
+
     # BOOK-78: how long a just-spent refresh token is still accepted, answering
     # with the token that replaced it instead of counting as reuse. This is the
     # two-open-tabs case -- each tab has its own interceptor and neither knows

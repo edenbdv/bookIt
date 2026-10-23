@@ -1,5 +1,7 @@
 import uuid
+from collections.abc import Awaitable, Callable
 
+import jwt
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -46,6 +48,36 @@ async def get_current_user(
         raise unauthorized
 
     return user
+
+
+def require_service(*allowed: str) -> Callable[..., Awaitable[str]]:
+    """BOOK-66: a dependency for /internal routes -- only a valid service token
+    from one of `allowed` gets through (docs/auth/service-token-basics.md).
+    A factory, so each route names its own callers: require_service("payment")."""
+
+    async def dependency(
+        credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    ) -> str:
+        unauthorized = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid service token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        settings = get_settings()
+        try:
+            # service_token_secret, not secret_key -- a guest's token fails right here
+            payload = jwt.decode(
+                credentials.credentials,
+                settings.service_token_secret,
+                algorithms=[settings.jwt_algorithm],
+            )
+        except jwt.PyJWTError as exc:  # bad signature, expired, malformed
+            raise unauthorized from exc
+        if payload.get("type") != "service" or payload.get("sub") not in allowed:
+            raise unauthorized
+        return payload["sub"]  # the calling service's name
+
+    return dependency
 
 
 async def enforce_user_rate_limit(

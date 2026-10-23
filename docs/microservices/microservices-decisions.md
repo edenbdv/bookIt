@@ -601,6 +601,46 @@ payment's response. Once Booking confirms from an event, "payment succeeded" no 
 means "reservation confirmed", so both always poll `GET /reservations/{id}` after
 paying. The first check is immediate, so nothing feels slower before the switch-over.
 
+## 17. Reading the reservation before charging: a sync call, not a local copy
+
+Before charging, `POST /payments` needs three things that Booking owns: **who the guest
+is** (only they may pay), the **status** (only `pending` is payable) and
+**`total_cents`** (how much to charge). Today Payment reads them straight from Booking's
+table (`uow.reservations`); with its own database it can't.
+
+**Chosen:** a **sync call** to Booking (`GET /internal/reservations/{id}`, service-auth
+per BOOK-66) — not a local copy of reservations kept up to date from `booking-events`.
+
+**Why a local copy works for Notification but not here** — it's not about being a
+consumer (Payment consumes `booking-events` too, for refunds); it's about what the data
+is *for*:
+
+| | Notification (and Payment's refunds) | Payment, before charging |
+|---|---|---|
+| What it does | **Reports** something that already happened | **Decides** something now — may this person pay, and how much |
+| Data it needs | A snapshot **as of the event** — exactly what the event carries | The **current** state — a few seconds old can be wrong |
+| Who's waiting | Nobody; 5 s late is fine | The guest, on the HTTP response |
+| When it arrives | After the event, by definition | Often *before* any event could — book, then pay at once |
+
+With a local copy instead:
+
+- **Book-then-pay race:** the guest pays half a second after booking, but `booking_created`
+  takes up to ~5 s (relay) to reach Payment → "reservation not found".
+- **Stale status:** the hold expired a second ago, Booking cancelled it, the event hasn't
+  arrived → Payment's copy still says `pending` and charges a cancelled reservation — then
+  refunds it via `booking_payment_rejected` (§15). Money out and back for nothing.
+
+**Rule of thumb:** *react* to something that happened → the event carries the data;
+*decide* something now while someone waits → ask the owner synchronously. Same service,
+two needs: Payment's refund path uses events, its charge path uses the sync call.
+
+**Accepted trade-off:** if Booking is down, nobody can pay. Acceptable — nobody can book
+either. A local copy would let Payment keep charging while Booking is down, which isn't
+worth the two problems above.
+
+**Revisit when:** paying must work while Booking is down, or the call's latency becomes a
+problem — then a local copy plus a short wait/retry for the book-then-pay race.
+
 ---
 
 ## Cheat sheet
@@ -639,3 +679,4 @@ paying. The first check is immediate, so nothing feels slower before the switch-
 | Payment for a cancelled reservation | Booking emits `booking_payment_rejected` → Payment refunds in full, amount from its own charge row | Prevention (don't expire mid-payment) is worth adding too |
 | Payment's Inbox | `processed_booking_events`, committed with the PENDING refund row, only for events with an effect | — |
 | Frontend after paying | Always poll the reservation, first check immediate | Push (SSE/WebSocket) if the wait gets noticeable |
+| Payment reading the reservation before charging | Sync call to Booking (`/internal/...`, BOOK-66 auth), not a local copy from events — it *decides* on current state while the guest waits | Paying must work while Booking is down |

@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     from app.core.router import router as core_router
     from app.payment.router import router as payment_router
     from app.property.router import router as property_router
+    from app.reservation.internal_router import router as reservation_internal_router
     from app.reservation.router import router as reservation_router
     from app.review.router import router as review_router
 
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(payment_router)
     app.include_router(property_router)
     app.include_router(reservation_router)
+    app.include_router(reservation_internal_router)
     app.include_router(review_router)
 
     return app
