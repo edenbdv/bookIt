@@ -129,7 +129,7 @@ Chosen per test by **what the guarantee actually lives in**:
 
 Where a script called service functions directly, the port went through HTTP when that
 adds coverage for free — e.g. the webhook tests send a real signed
-`POST /payments/webhook` instead of calling `resolve_payment_and_react`, so the
+`POST /payments/webhook` instead of calling `resolve_payment`, so the
 signature check and router are in the loop too.
 
 ## 9. The `scripts/verify_*.py` ports
@@ -140,6 +140,9 @@ signature check and router are in the loop too.
 | `verify_idempotency_keys.py` | `test_reservation_idempotency.py` | Through HTTP, so each error's status code is checked |
 | `verify_saga_commit_split.py` | `test_payment_saga.py` | BOOK-55's crash-mid-provider-call case |
 | `verify_webhook_resolution.py` | `test_payment_webhook.py` | Real signed webhook; bad signature → 401 |
+
+BOOK-65 deleted the two payment scripts: they depended on the saga's direct
+confirm call, which became an event (`microservices-decisions.md` §11–§16).
 
 Also new: `test_reservation_api.py` (overlap through the API → clean 409),
 `test_migrations.py`, `test_health.py`.

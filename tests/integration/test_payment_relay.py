@@ -22,8 +22,8 @@ from app.core.outbox.relay import make_producer
 from app.payment import relay
 from app.payment.outbox import PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
-from app.payment.saga import create_payment_and_react
 from app.payment.schemas import PaymentCreate
+from app.payment.service import pay_reservation
 from tests.integration.helpers import make_pending_reservation
 
 # first poll includes joining the group and the topic being auto-created
@@ -74,7 +74,7 @@ async def test_a_succeeded_charge_reaches_payment_events(
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
     async with UnitOfWork() as uow:
-        payment = await create_payment_and_react(
+        payment = await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
             guest.id,
@@ -106,7 +106,7 @@ async def test_running_the_relay_again_publishes_nothing_new(
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
     async with UnitOfWork() as uow:
-        await create_payment_and_react(
+        await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
             guest.id,
@@ -145,7 +145,7 @@ async def test_an_unconfirmed_event_stays_unpublished_and_is_retried(
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
     async with UnitOfWork() as uow:
-        await create_payment_and_react(
+        await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
             guest.id,

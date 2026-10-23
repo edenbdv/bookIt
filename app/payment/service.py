@@ -14,6 +14,7 @@ from app.core.idempotency.models import (
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome, charge
+from app.payment.provider import check_status as provider_check_status
 from app.payment.provider import refund as provider_refund
 from app.payment.schemas import PaymentCreate
 from app.reservation.models import ReservationStatus
@@ -229,3 +230,50 @@ async def create_refund(uow: UnitOfWork, reservation_id: uuid.UUID, amount_cents
     outcome = provider_refund(amount_cents, correlation_id=refund_payment.id)
     refund_payment.status = OUTCOME_TO_STATUS[outcome]
     return refund_payment
+
+
+# BOOK-65: moved here from saga.py -- these no longer react to the outcome
+# themselves. The saga is choreography over Kafka now: Booking confirms/cancels
+# from payment-events (reservation/payment_events.py), and a payment it can't
+# use comes back as booking_payment_rejected (payment/booking_events.py).
+async def pay_reservation(
+    uow: UnitOfWork,
+    data: PaymentCreate,
+    current_user_id: uuid.UUID,
+    idempotency_key: str,
+    *,
+    force: PaymentOutcome | None = None,
+) -> Payment:
+    """POST /payments: charge, then commit the status with its outbox event."""
+    payment = await create_payment_idempotent(
+        uow, data, current_user_id, idempotency_key, force=force
+    )
+    await uow.session.commit()
+    return payment
+
+
+async def resolve_payment(
+    uow: UnitOfWork, payment_id: uuid.UUID, outcome: PaymentOutcome
+) -> Payment:
+    """BOOK-55: webhook entrypoint -- resolve a PENDING payment and commit its
+    event. No-ops on an already-resolved payment (redelivery-safe)."""
+    payment = await uow.payments.get_by_id(payment_id)
+    if payment is None:
+        raise PaymentNotFoundError
+    if payment.status != PaymentStatus.PENDING:
+        return payment  # already resolved -- redelivery, no-op
+
+    payment.status = OUTCOME_TO_STATUS[outcome]
+    await emit_payment_event(uow, payment)
+    await uow.session.commit()
+    return payment
+
+
+# BOOK-101: the pull counterpart to the webhook's push -- reuses
+# resolve_payment so both share the same redelivery-safe guarantee
+async def reconcile_stale_payments(uow: UnitOfWork, older_than: datetime) -> int:
+    stale = await uow.payments.list_stale_pending(older_than)  # find stuck rows
+    for payment in stale:
+        outcome = provider_check_status(correlation_id=payment.id)  # ask the provider
+        await resolve_payment(uow, payment.id, outcome)  # same resolver the webhook uses
+    return len(stale)

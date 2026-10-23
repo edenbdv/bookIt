@@ -1,10 +1,7 @@
-"""BOOK-76: the guest-cancel entrypoint. Deliberately its own module, not
-inside saga.py -- this isn't a saga step (payment-decisions.md §9: nothing
-branches on the refund's outcome, no compensation), just a caller of
-service.create_refund(), the external-call durability machinery saga.py's
-actual saga also happens to use. Keeping it out of saga.py makes "is this a
-saga decision" visible from the file layout, not just a comment.
-"""
+"""BOOK-76/80: cancel a reservation, then refund any succeeded charge
+(policy-based for a guest, full for a host). Not a saga step -- nothing
+branches on the refund's outcome (payment-decisions.md §9). BOOK-65 moves
+this to a booking-events consumer next."""
 
 import uuid
 from datetime import UTC, datetime

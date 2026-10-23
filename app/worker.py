@@ -14,7 +14,7 @@ from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
 from app.payment import relay as payment_relay
-from app.payment import saga as payment_saga
+from app.payment import service as payment_service
 from app.reservation import service as reservation_service
 
 # BOOK-101: how long a payment sits PENDING before it's treated as stuck,
@@ -59,7 +59,7 @@ async def reconcile_stale_payments() -> None:
     """BOOK-101: resolve PENDING payments the webhook never confirmed.
     Thin wrapper, same shape as expire_pending_reservations above."""
     async with UnitOfWork() as uow:
-        await payment_saga.reconcile_stale_payments(
+        await payment_service.reconcile_stale_payments(
             uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
         )
 

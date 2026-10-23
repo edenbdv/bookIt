@@ -4,7 +4,7 @@ against a real Postgres -- ported from scripts/verify_webhook_resolution.py.
 Each test first leaves a payment PENDING the way production would: a crash
 during the provider call, after the row is already committed (see
 test_payment_saga.py). Then, unlike the script (which called
-resolve_payment_and_react directly), the provider's callback goes through
+resolve_payment directly), the provider's callback goes through
 POST /payments/webhook with a real HMAC signature -- so the signature check
 and the router are in the loop too.
 """
@@ -23,9 +23,8 @@ from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import PaymentKind, PaymentStatus
 from app.payment.outbox import PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
-from app.payment.saga import create_payment_and_react
 from app.payment.schemas import PaymentCreate
-from app.payment.service import create_refund
+from app.payment.service import create_refund, pay_reservation
 from app.payment.webhook_auth import sign_webhook_payload
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
@@ -45,7 +44,7 @@ async def _charge_left_pending(
         pytest.raises(RuntimeError),
     ):
         async with UnitOfWork() as uow:
-            await create_payment_and_react(
+            await pay_reservation(
                 uow, PaymentCreate(reservation_id=reservation.id), guest.id, str(uuid.uuid4())
             )
     [(payment_id, _, _)] = await payment_rows(db_session, reservation)

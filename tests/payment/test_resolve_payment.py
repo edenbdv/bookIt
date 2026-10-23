@@ -5,8 +5,7 @@ import pytest
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
-from app.payment.saga import resolve_payment_and_react
-from app.payment.service import PaymentNotFoundError
+from app.payment.service import PaymentNotFoundError, resolve_payment
 
 
 class FakePaymentRepository:
@@ -49,7 +48,7 @@ async def test_unknown_payment_raises_not_found() -> None:
     uow = FakeUnitOfWork(None)
 
     with pytest.raises(PaymentNotFoundError):
-        await resolve_payment_and_react(uow, uuid.uuid4(), PaymentOutcome.SUCCESS)
+        await resolve_payment(uow, uuid.uuid4(), PaymentOutcome.SUCCESS)
 
 
 @pytest.mark.anyio
@@ -57,7 +56,7 @@ async def test_already_resolved_payment_is_a_noop() -> None:
     payment = _payment(PaymentKind.CHARGE, PaymentStatus.SUCCEEDED)
     uow = FakeUnitOfWork(payment)
 
-    result = await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
+    result = await resolve_payment(uow, payment.id, PaymentOutcome.FAILURE)
 
     assert result is payment
     assert payment.status == PaymentStatus.SUCCEEDED  # untouched -- redelivery, no-op
@@ -71,7 +70,7 @@ async def test_pending_charge_resolves_and_writes_its_event() -> None:
     payment = _payment(PaymentKind.CHARGE, PaymentStatus.PENDING)
     uow = FakeUnitOfWork(payment)
 
-    await resolve_payment_and_react(uow, payment.id, PaymentOutcome.SUCCESS)
+    await resolve_payment(uow, payment.id, PaymentOutcome.SUCCESS)
 
     assert payment.status == PaymentStatus.SUCCEEDED
     [event] = uow.session.added
@@ -84,7 +83,7 @@ async def test_pending_refund_resolves_without_an_event() -> None:
     payment = _payment(PaymentKind.REFUND, PaymentStatus.PENDING)
     uow = FakeUnitOfWork(payment)
 
-    await resolve_payment_and_react(uow, payment.id, PaymentOutcome.FAILURE)
+    await resolve_payment(uow, payment.id, PaymentOutcome.FAILURE)
 
     assert payment.status == PaymentStatus.FAILED
     assert uow.session.added == []

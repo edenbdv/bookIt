@@ -16,8 +16,8 @@ from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import Payment, PaymentStatus
 from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
-from app.payment.saga import create_payment_and_react, resolve_payment_and_react
 from app.payment.schemas import PaymentCreate
+from app.payment.service import pay_reservation, resolve_payment
 from app.reservation.models import Reservation
 from tests.integration.helpers import make_pending_reservation
 
@@ -63,7 +63,7 @@ async def test_a_resolved_charge_commits_its_event_with_its_status(
     reservation, guest = pending_reservation
 
     async with UnitOfWork() as uow:
-        await create_payment_and_react(
+        await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
             guest.id,
@@ -92,7 +92,7 @@ async def test_a_charge_left_pending_has_no_event(
         pytest.raises(RuntimeError),
     ):
         async with UnitOfWork() as uow:
-            await create_payment_and_react(
+            await pay_reservation(
                 uow, PaymentCreate(reservation_id=reservation.id), guest.id, str(uuid.uuid4())
             )
 
@@ -102,14 +102,14 @@ async def test_a_charge_left_pending_has_no_event(
 
 
 # the webhook/reconcile path: PENDING -> resolved later, and only then does
-# the event appear -- committed by resolve_payment_and_react's own commit
+# the event appear -- committed by resolve_payment's own commit
 @pytest.mark.anyio
 async def test_resolving_a_pending_charge_later_commits_its_event(
     app_db: None, db_session: AsyncSession, pending_reservation: tuple[Reservation, User]
 ) -> None:
     reservation, guest = pending_reservation
     async with UnitOfWork() as uow:
-        await create_payment_and_react(
+        await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
             guest.id,
@@ -120,7 +120,7 @@ async def test_resolving_a_pending_charge_later_commits_its_event(
     assert await _events(db_session, reservation) == []  # nothing yet
 
     async with UnitOfWork() as uow:
-        await resolve_payment_and_react(uow, payment_id, PaymentOutcome.SUCCESS)
+        await resolve_payment(uow, payment_id, PaymentOutcome.SUCCESS)
 
     [(_, payment_status)] = await _payment_status(db_session, reservation)
     assert payment_status == PaymentStatus.SUCCEEDED

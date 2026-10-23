@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
-from app.payment import saga, service
+from app.payment import service
 from app.payment.models import Payment
 from app.payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
 from app.payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
@@ -20,7 +20,7 @@ async def create_payment(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Payment:
     try:
-        return await saga.create_payment_and_react(uow, data, current_user.id, idempotency_key)
+        return await service.pay_reservation(uow, data, current_user.id, idempotency_key)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -72,7 +72,7 @@ async def payment_webhook(
 
     payload = PaymentWebhookPayload.model_validate_json(body)  # only parsed once verified
     try:
-        await saga.resolve_payment_and_react(uow, payload.payment_id, payload.outcome)
+        await service.resolve_payment(uow, payload.payment_id, payload.outcome)
     except service.PaymentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found"

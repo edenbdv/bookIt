@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment.models import PaymentKind, PaymentStatus
-from app.payment.saga import create_payment_and_react
 from app.payment.schemas import PaymentCreate
+from app.payment.service import pay_reservation
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
 
@@ -44,7 +44,7 @@ async def test_crash_during_provider_call_leaves_a_pending_payment(
         pytest.raises(RuntimeError),
     ):
         async with UnitOfWork() as uow:
-            await create_payment_and_react(
+            await pay_reservation(
                 uow, PaymentCreate(reservation_id=reservation.id), guest.id, "mid-call-crash"
             )
 
