@@ -156,6 +156,33 @@ async def cancel_reservation_system(uow: UnitOfWork, reservation: Reservation) -
     await _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
 
 
+# BOOK-65: a payment succeeded for a reservation that can no longer use it
+# (already cancelled -- e.g. its hold expired while the charge was still
+# PENDING). Booking can't undo a charge itself; this tells Payment to refund
+# it in full. No status change, no email -- so no _email_snapshot, just what
+# Payment's refund needs. Same event_id-in-both-places rule as above.
+async def reject_payment(
+    uow: UnitOfWork, reservation: Reservation, payment_id: str, amount_cents: int
+) -> None:
+    event_id = uuid.uuid4()
+    event_type = OutboxEventType.BOOKING_PAYMENT_REJECTED
+    uow.session.add(
+        OutboxEvent(
+            id=event_id,
+            event_type=event_type,
+            reservation_id=reservation.id,
+            payload={
+                "event_id": str(event_id),
+                "event_type": event_type.value,
+                "reservation_id": str(reservation.id),
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "payment_id": payment_id,
+                "amount_cents": amount_cents,
+            },
+        )
+    )
+
+
 # stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
 # transition_to() on success. Manually callable for now so the state machine
 # is testable end-to-end before payments exist -- see docs/domain-layer/state-machine-basics.md

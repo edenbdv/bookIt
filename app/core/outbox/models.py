@@ -16,6 +16,10 @@ class OutboxEventType(str, enum.Enum):
     BOOKING_CREATED = "booking_created"
     BOOKING_CONFIRMED = "booking_confirmed"
     BOOKING_CANCELLED = "booking_cancelled"
+    # BOOK-65: a payment succeeded for a reservation that can't use it
+    # (already cancelled, e.g. its hold expired mid-charge) -- Payment
+    # refunds it in full. No email; Notification skips unknown types.
+    BOOKING_PAYMENT_REJECTED = "booking_payment_rejected"
 
 
 class OutboxEvent(Base):

@@ -39,13 +39,16 @@ async def handle_payment_event(uow: UnitOfWork, payload: dict) -> None:
         and payload["event_type"] == "payment_succeeded"
     ):
         # money taken for a reservation that's already gone (e.g. its hold
-        # expired while the charge was still PENDING) -- nobody refunds it
-        # yet. Same gap as today's saga; the fix is an event Payment refunds
-        # on (BOOK-68). Logged so it's at least visible.
+        # expired while the charge was still PENDING) -- Booking can't undo
+        # the charge, so it tells Payment to refund it, in this same
+        # transaction as the Inbox row below
         logger.warning(
-            "Payment %s succeeded for already-cancelled reservation %s -- needs a refund",
+            "Payment %s succeeded for already-cancelled reservation %s -- rejecting it",
             payload["payment_id"],
             reservation.id,
+        )
+        await service.reject_payment(
+            uow, reservation, payload["payment_id"], payload["amount_cents"]
         )
 
     uow.session.add(ProcessedPaymentEvent(event_id=event_id))

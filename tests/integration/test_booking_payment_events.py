@@ -104,10 +104,10 @@ async def test_an_already_confirmed_reservation_is_left_alone(
     assert await _inbox_count(db_session) == 2  # both marked handled
 
 
-# the known gap: money taken for a reservation that's already cancelled --
-# nothing refunds it yet (BOOK-68), but it must at least be logged
+# money taken for a reservation that's already cancelled -- Booking can't use
+# it, so it publishes booking_payment_rejected for Payment to refund
 @pytest.mark.anyio
-async def test_payment_succeeded_for_a_cancelled_reservation_is_logged(
+async def test_payment_succeeded_for_a_cancelled_reservation_is_rejected(
     app_db: None, db_session: AsyncSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     reservation, _ = await make_pending_reservation(db_session)
@@ -118,11 +118,25 @@ async def test_payment_succeeded_for_a_cancelled_reservation_is_logged(
     )
     await db_session.commit()
 
+    payload = _payload(reservation, "payment_succeeded")
+
     with caplog.at_level(logging.WARNING, logger="app.reservation.payment_events"):
-        await _handle(_payload(reservation, "payment_succeeded"))
+        await _handle(payload)
 
     assert await reservation_status(db_session, reservation) == ReservationStatus.CANCELLED
-    assert "needs a refund" in caplog.text
+    assert "rejecting it" in caplog.text
+    [rejected] = (
+        await db_session.scalars(
+            select(OutboxEvent.payload).where(
+                OutboxEvent.reservation_id == reservation.id,
+                OutboxEvent.event_type == OutboxEventType.BOOKING_PAYMENT_REJECTED,
+            )
+        )
+    ).all()
+    # what Payment's refund needs -- which charge, and how much
+    assert rejected["payment_id"] == payload["payment_id"]
+    assert rejected["amount_cents"] == reservation.total_cents
+    assert await _inbox_count(db_session) == 1  # same transaction as the event
 
 
 # both or neither: if confirming fails, the Inbox row rolls back with it,

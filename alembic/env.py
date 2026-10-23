@@ -20,6 +20,7 @@ import app.core.outbox.models
 # (BOOK-64: no app.notification.models -- Notification's tables register on
 # its own NotificationBase and have their own migrations,
 # app/notification/alembic.ini. Booking's migrations never see them.)
+import app.payment.inbox
 import app.payment.models
 import app.payment.outbox
 import app.property.models
