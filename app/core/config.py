@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # routes) -- its own secret, never secret_key (docs/auth/service-token-basics.md §4).
     # dev-only default, same as secret_key.
     service_token_secret: str = "dev-service-secret-change-me"
+    # BOOK-66: where Payment reaches Booking's /internal routes. The host default;
+    # containers override it to http://app:8000 (docker-compose.yml).
+    booking_base_url: str = "http://localhost:8000"
 
     # BOOK-78: how long a just-spent refresh token is still accepted, answering
     # with the token that replaced it instead of counting as reuse. This is the

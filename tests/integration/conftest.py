@@ -8,6 +8,7 @@ here: docs/testing/testing-basics.md (§ refs below).
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from alembic.config import Config
@@ -261,3 +262,22 @@ async def api_client(redis_url: str, app_db: None) -> AsyncIterator[AsyncClient]
     await redis.aclose()
     # only the Redis client -- the engine is still app_db's to dispose
     get_redis_client.cache_clear()
+
+
+# BOOK-66: Payment's booking_client, pointed at the app in-process instead of a
+# real host:port -- the real /internal endpoint, service-token auth included,
+# with no server running. While both still live in one app, Payment is in effect
+# calling itself.
+@pytest.fixture
+def booking_in_process(app_db: None) -> Iterator[None]:
+    from app.payment import booking_client
+
+    def in_process_client() -> AsyncClient:
+        return AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://booking",
+            timeout=booking_client._TIMEOUT_SECONDS,
+        )
+
+    with patch.object(booking_client, "_client", in_process_client):
+        yield
