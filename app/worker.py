@@ -5,26 +5,20 @@
 Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md §2.
 """
 
-from datetime import UTC, datetime, timedelta
-
 from app.core.db.engine import async_task
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.idempotency import cleanup as idempotency_cleanup
 from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
-from app.payment import relay as payment_relay
-from app.payment import service as payment_service
-from app.payment.db import PaymentUnitOfWork, get_payment_engine
 from app.reservation import service as reservation_service
-
-# BOOK-101: how long a payment sits PENDING before it's treated as stuck,
-# not just still in flight
-_STALE_PAYMENT_THRESHOLD = timedelta(minutes=5)
 
 # BOOK-64: the "reservation received" email task (BOOK-45/47) used to live
 # here. It moved to Notification's Kafka consumer as a BookingCreated event
 # (microservices-decisions.md §4) -- this worker no longer sends any email.
+#
+# BOOK-65: Payment's two jobs (reconcile_stale_payments, publish_payment_events)
+# moved to Payment's own payment-scheduler (app/payment/scheduler.py, §20).
 
 
 @app.task
@@ -56,22 +50,6 @@ async def complete_past_reservations() -> None:
 
 @app.task
 @async_task
-async def reconcile_stale_payments() -> None:
-    """BOOK-101: resolve PENDING payments the webhook never confirmed.
-    Thin wrapper, same shape as expire_pending_reservations above."""
-    try:
-        async with PaymentUnitOfWork() as uow:
-            await payment_service.reconcile_stale_payments(
-                uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
-            )
-    finally:
-        # BOOK-65: async_task only disposes Booking's engine -- Payment's needs the
-        # same, or the next task's new event loop finds connections bound to this one
-        await get_payment_engine().dispose()
-
-
-@app.task
-@async_task
 async def publish_outbox_events() -> None:
     """BOOK-50: the outbox relay. Publishes `outbox_events` rows nothing has
     sent to Kafka yet, oldest first; logic lives in core/outbox/relay.py.
@@ -79,20 +57,6 @@ async def publish_outbox_events() -> None:
     producer = outbox_relay.make_producer()
     async with UnitOfWork() as uow:
         await outbox_relay.publish_pending_events(uow, producer)
-
-
-@app.task
-@async_task
-async def publish_payment_events() -> None:
-    """BOOK-65: Payment's relay -- publishes `payment_outbox_events` rows to
-    `payment-events`; logic lives in payment/relay.py. Runs here only while
-    Payment is still inside the monolith."""
-    producer = outbox_relay.make_producer()
-    try:
-        async with PaymentUnitOfWork() as uow:
-            await payment_relay.publish_pending_payment_events(uow, producer)
-    finally:
-        await get_payment_engine().dispose()  # same reason as reconcile_stale_payments
 
 
 @app.task

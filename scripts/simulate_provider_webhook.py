@@ -17,7 +17,7 @@ import httpx
 
 from app.payment.webhook_auth import sign_webhook_payload
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8001"  # BOOK-65: the webhook is Payment's own service now
 
 
 def send_webhook(

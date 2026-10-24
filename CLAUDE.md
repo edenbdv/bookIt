@@ -47,9 +47,10 @@ A model only gets picked up by autogenerate if its module is imported somewhere 
 
 ```bash
 uv run python -m app.core.db.seed
+uv run python -m app.payment.seed
 ```
 
-Idempotent — every seeded row has a fixed id, so re-running finds existing rows instead of duplicating them. Needs `alembic upgrade head` run first.
+Idempotent — every seeded row has a fixed id, so re-running finds existing rows instead of duplicating them. Needs `alembic upgrade head` (Booking) and `python -m app.payment.migrate` (Payment's own database, BOOK-65) run first.
 
 ### Lint / format
 
