@@ -1,6 +1,5 @@
 import pytest
-
-from app.payment.webhook_auth import (
+from payment.webhook_auth import (
     InvalidWebhookSignatureError,
     sign_webhook_payload,
     verify_webhook_signature,

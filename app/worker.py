@@ -18,7 +18,7 @@ from app.reservation import service as reservation_service
 # (microservices-decisions.md §4) -- this worker no longer sends any email.
 #
 # BOOK-65: Payment's two jobs (reconcile_stale_payments, publish_payment_events)
-# moved to Payment's own payment-scheduler (app/payment/scheduler.py, §20).
+# moved to Payment's own payment-scheduler (services/payment/src/payment/scheduler.py, §20).
 
 
 @app.task

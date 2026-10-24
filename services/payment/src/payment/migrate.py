@@ -1,11 +1,11 @@
 """BOOK-65: bring Payment's own database up to date. Run with:
 
-    uv run python -m app.payment.migrate
+    uv run python -m payment.migrate
 
 Same as Notification's migrate.py (BOOK-64), safe to repeat on every start:
 1. create the database named in PAYMENT_DATABASE_URL if it doesn't exist yet --
    Postgres only runs init scripts on a brand-new volume;
-2. run Payment's own migrations (app/payment/alembic.ini) to head.
+2. run Payment's own migrations (services/payment/src/payment/alembic.ini) to head.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 
 from alembic import command
-from app.payment.config import get_payment_settings
+from payment.config import get_payment_settings
 
 logger = logging.getLogger(__name__)
 

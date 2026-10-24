@@ -7,11 +7,11 @@ from unittest.mock import patch
 import httpx
 import pytest
 from httpx import AsyncClient
+from payment import booking_client
+from payment.models import PaymentIdempotencyKey
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.payment import booking_client
-from app.payment.models import PaymentIdempotencyKey
 from tests.integration.helpers import auth_headers, make_pending_reservation, payment_rows
 
 

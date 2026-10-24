@@ -1,7 +1,7 @@
 """BOOK-65: Payment's own HTTP app -- POST /payments and the provider's webhook,
 on its own port, apart from Booking's app. Run with:
 
-    uv run uvicorn app.payment.main:app --port 8001
+    uv run uvicorn payment.main:app --port 8001
 """
 
 from fastapi import FastAPI
@@ -9,9 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.payment.config import get_payment_settings
-from app.payment.db import get_payment_engine
-from app.payment.router import router as payment_router
+from payment.config import get_payment_settings
+from payment.db import get_payment_engine
+from payment.router import router as payment_router
 
 
 async def health() -> JSONResponse:

@@ -20,6 +20,10 @@ from notification.db import (
     get_notification_session_factory,
     notification_database_url,
 )
+from payment import migrate as payment_migrate
+from payment.config import get_payment_settings
+from payment.db import get_payment_engine, get_payment_session_factory
+from payment.main import create_payment_app
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.community.kafka import KafkaContainer
@@ -33,7 +37,6 @@ from testcontainers.core.docker_client import DockerClient
 import app.auth.models
 import app.core.idempotency.models
 import app.core.outbox.models
-import app.payment.models
 import app.property.models
 import app.reservation.models
 import app.review.models  # noqa: F401
@@ -42,10 +45,6 @@ from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
-from app.payment import migrate as payment_migrate
-from app.payment.config import get_payment_settings
-from app.payment.db import get_payment_engine, get_payment_session_factory
-from app.payment.main import create_payment_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -303,7 +302,7 @@ async def api_client(redis_url: str, app_db: None) -> AsyncIterator[AsyncClient]
 # calling itself.
 @pytest.fixture
 def booking_in_process(app_db: None) -> Iterator[None]:
-    from app.payment import booking_client
+    from payment import booking_client
 
     def in_process_client() -> AsyncClient:
         return AsyncClient(

@@ -16,14 +16,14 @@ from unittest.mock import patch
 
 import pytest
 from confluent_kafka import Consumer, Producer
+from payment import relay
+from payment.db import PaymentUnitOfWork
+from payment.provider import PaymentOutcome
+from payment.service import create_payment
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.outbox.relay import make_producer
-from app.payment import relay
-from app.payment.db import PaymentUnitOfWork
-from app.payment.provider import PaymentOutcome
-from app.payment.service import create_payment
 from app.reservation import payment_consumer
 from app.reservation.models import ReservationStatus
 from tests.integration.helpers import make_pending_reservation, reservation_status

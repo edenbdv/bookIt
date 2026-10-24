@@ -1,6 +1,6 @@
 """BOOK-65: Payment's Kafka consumer for booking-events. Run with:
 
-    uv run python -m app.payment.booking_consumer
+    uv run python -m payment.booking_consumer
 
 Same loop as Booking's payment_consumer.py, kept as its own copy: it moves out
 with Payment. Its own group ("payment") gets every booking-events message,
@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 
 from confluent_kafka import Consumer, Producer
 
-from app.payment.booking_events import handle_booking_event
-from app.payment.config import get_payment_settings
-from app.payment.db import PaymentUnitOfWork, get_payment_engine
+from payment.booking_events import handle_booking_event
+from payment.config import get_payment_settings
+from payment.db import PaymentUnitOfWork, get_payment_engine
 
 logger = logging.getLogger(__name__)
 

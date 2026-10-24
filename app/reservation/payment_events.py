@@ -1,7 +1,7 @@
 """BOOK-65: Booking's side of the payment-events topic -- what a reservation
 does when Payment reports a charge's outcome (docs/microservices/epic-11-flow.md).
 
-Event types are plain strings, not imported from app.payment: they arrive
+Event types are plain strings, not imported from payment: they arrive
 over Kafka from what becomes another service, so the payload is the
 contract, not Payment's Python enum.
 """

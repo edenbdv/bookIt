@@ -13,17 +13,17 @@ from unittest.mock import patch
 
 import pytest
 from confluent_kafka import Consumer
+from payment import relay
+from payment.db import PaymentUnitOfWork
+from payment.models import PaymentOutboxEvent
+from payment.provider import PaymentOutcome
+from payment.schemas import PaymentCreate
+from payment.service import pay_reservation
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.outbox.relay import make_producer
-from app.payment import relay
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import PaymentOutboxEvent
-from app.payment.provider import PaymentOutcome
-from app.payment.schemas import PaymentCreate
-from app.payment.service import pay_reservation
 from tests.integration.helpers import make_pending_reservation
 
 # BOOK-66: paying asks Booking over HTTP -- reach it in-process

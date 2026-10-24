@@ -11,7 +11,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.payment.config import get_payment_settings
+from payment.config import get_payment_settings
 
 bearer_scheme = HTTPBearer()
 

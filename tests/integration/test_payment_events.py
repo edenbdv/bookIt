@@ -8,15 +8,15 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from payment.db import PaymentUnitOfWork
+from payment.models import Payment, PaymentEventType, PaymentOutboxEvent, PaymentStatus
+from payment.provider import PaymentOutcome
+from payment.schemas import PaymentCreate
+from payment.service import pay_reservation, resolve_payment
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import Payment, PaymentEventType, PaymentOutboxEvent, PaymentStatus
-from app.payment.provider import PaymentOutcome
-from app.payment.schemas import PaymentCreate
-from app.payment.service import pay_reservation, resolve_payment
 from app.reservation.models import Reservation
 from tests.integration.helpers import make_pending_reservation
 
@@ -96,7 +96,7 @@ async def test_a_charge_left_pending_has_no_event(
     reservation, guest = pending_reservation
 
     with (
-        patch("app.payment.service.charge", side_effect=RuntimeError("simulated crash")),
+        patch("payment.service.charge", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
         async with PaymentUnitOfWork() as uow:

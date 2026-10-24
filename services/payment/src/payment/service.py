@@ -5,10 +5,10 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
-from app.payment import booking_client
-from app.payment.booking_client import BookingReservationStatus
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import (
+from payment import booking_client
+from payment.booking_client import BookingReservationStatus
+from payment.db import PaymentUnitOfWork
+from payment.models import (
     PAYMENT_IDEMPOTENCY_KEY_TTL_HOURS,
     Payment,
     PaymentEventType,
@@ -18,10 +18,10 @@ from app.payment.models import (
     PaymentOutboxEvent,
     PaymentStatus,
 )
-from app.payment.provider import PaymentOutcome, charge
-from app.payment.provider import check_status as provider_check_status
-from app.payment.provider import refund as provider_refund
-from app.payment.schemas import PaymentCreate
+from payment.provider import PaymentOutcome, charge
+from payment.provider import check_status as provider_check_status
+from payment.provider import refund as provider_refund
+from payment.schemas import PaymentCreate
 
 # real card networks/issuing banks take real time to answer -- this mock
 # resolves in zero time otherwise, which reads as fake ("did that actually

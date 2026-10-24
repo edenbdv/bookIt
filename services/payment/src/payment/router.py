@@ -2,13 +2,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
-from app.payment import service
-from app.payment.auth import get_guest_id
-from app.payment.booking_client import BookingUnavailableError
-from app.payment.db import PaymentUnitOfWork, get_payment_uow
-from app.payment.models import Payment
-from app.payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
-from app.payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
+from payment import service
+from payment.auth import get_guest_id
+from payment.booking_client import BookingUnavailableError
+from payment.db import PaymentUnitOfWork, get_payment_uow
+from payment.models import Payment
+from payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
+from payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 

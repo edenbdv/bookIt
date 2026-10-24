@@ -66,7 +66,7 @@ services hold `SERVICE_TOKEN_SECRET` in their environment. Only the code is spli
 
 | What | Who | Where |
 |---|---|---|
-| **Create** the token | **Payment**, the caller | `app/payment/booking_client.py`, next to the call that uses it |
+| **Create** the token | **Payment**, the caller | `services/payment/src/payment/booking_client.py`, next to the call that uses it |
 | **Verify** it (`require_service`) | **Booking**, the receiver | `app/auth/`, next to `get_current_user` |
 
 Nothing is imported across: the services share the *secret*, not code — the same way

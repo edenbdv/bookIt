@@ -5,12 +5,12 @@ creates, in the order it needs it."""
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
+from payment.models import Payment
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.auth.security import create_access_token, new_id
-from app.payment.models import Payment
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus
 

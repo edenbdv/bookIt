@@ -9,12 +9,12 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from payment.booking_events import handle_booking_event
+from payment.db import PaymentUnitOfWork
+from payment.models import Payment, PaymentKind, PaymentStatus, ProcessedBookingEvent
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.payment.booking_events import handle_booking_event
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import Payment, PaymentKind, PaymentStatus, ProcessedBookingEvent
 from app.reservation.models import Reservation
 from tests.integration.helpers import make_pending_reservation
 
@@ -135,7 +135,7 @@ async def test_a_crash_during_the_provider_call_cannot_cause_a_second_refund(
     payload = _rejected(charge)
 
     with (
-        patch("app.payment.service.provider_refund", side_effect=RuntimeError("simulated crash")),
+        patch("payment.service.provider_refund", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
         await _handle(payload)

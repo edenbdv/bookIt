@@ -1,6 +1,6 @@
 """BOOK-65: Payment's scheduled jobs, in its own process. Run with:
 
-    uv run python -m app.payment.scheduler
+    uv run python -m payment.scheduler
 
 A simple loop, not Celery (microservices-decisions.md §20): Payment has two fixed
 periodic jobs and no on-demand tasks. One asyncio.run() for the process's whole
@@ -16,9 +16,9 @@ from datetime import UTC, datetime, timedelta
 
 from confluent_kafka import Producer
 
-from app.payment import relay, service
-from app.payment.config import get_payment_settings
-from app.payment.db import PaymentUnitOfWork, get_payment_engine
+from payment import relay, service
+from payment.config import get_payment_settings
+from payment.db import PaymentUnitOfWork, get_payment_engine
 
 logger = logging.getLogger(__name__)
 

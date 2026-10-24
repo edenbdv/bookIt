@@ -1,7 +1,7 @@
 """BOOK-65: Payment's demo data, in Payment's own database. Run after Booking's seed:
 
-    uv run python -m app.payment.migrate
-    uv run python -m app.payment.seed
+    uv run python -m payment.migrate
+    uv run python -m payment.seed
 
 Idempotent, same as Booking's seed -- fixed ids, so a re-run finds the rows instead of
 duplicating them. A charge per paid demo reservation, plus a charge+refund pair for
@@ -11,8 +11,8 @@ the cancelled one (a realistic lifecycle, not just a missing charge).
 import asyncio
 import uuid
 
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import Payment, PaymentKind, PaymentStatus
+from payment.db import PaymentUnitOfWork
+from payment.models import Payment, PaymentKind, PaymentStatus
 
 # the demo reservations in Booking's seed (app/core/db/seed.py) -- copied, not
 # imported: Payment knows other services' rows by id only

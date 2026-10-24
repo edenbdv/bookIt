@@ -7,7 +7,7 @@ provider, not just anyone who found the URL.
 import hashlib
 import hmac
 
-from app.payment.config import get_payment_settings
+from payment.config import get_payment_settings
 
 
 class InvalidWebhookSignatureError(Exception):

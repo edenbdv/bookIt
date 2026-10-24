@@ -1,16 +1,15 @@
 import uuid
 
 import pytest
-
-from app.payment.models import (
+from payment.models import (
     Payment,
     PaymentEventType,
     PaymentKind,
     PaymentOutboxEvent,
     PaymentStatus,
 )
-from app.payment.provider import PaymentOutcome
-from app.payment.service import PaymentNotFoundError, resolve_payment
+from payment.provider import PaymentOutcome
+from payment.service import PaymentNotFoundError, resolve_payment
 
 
 class FakePaymentRepository:

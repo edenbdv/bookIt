@@ -7,14 +7,14 @@ separately (test_payment_booking_consumer.py).
 
 import pytest
 from httpx import AsyncClient
+from payment.booking_events import handle_booking_event
+from payment.db import PaymentUnitOfWork
+from payment.models import Payment, PaymentKind, PaymentStatus
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.core.outbox.models import OutboxEvent, OutboxEventType
-from app.payment.booking_events import handle_booking_event
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import CancellationPolicy, Property
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import auth_headers, make_pending_reservation, reservation_status

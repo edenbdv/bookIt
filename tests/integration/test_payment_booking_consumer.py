@@ -13,13 +13,13 @@ from unittest.mock import patch
 
 import pytest
 from confluent_kafka import Consumer
+from payment import booking_consumer
+from payment.models import Payment, PaymentKind, PaymentStatus
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox import relay
-from app.payment import booking_consumer
-from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.payment_events import handle_payment_event
 from tests.integration.helpers import make_pending_reservation

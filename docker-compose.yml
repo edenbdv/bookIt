@@ -246,11 +246,11 @@ services:
       - ./services/notification/src:/code/services/notification/src
 
   # BOOK-65: one-shot -- creates Payment's own `payments` database if missing,
-  # then runs Payment's migrations (app/payment/alembic.ini). Exits when done.
+  # then runs Payment's migrations (services/payment/src/payment/alembic.ini). Exits when done.
   # Same image as `app` while Payment is still inside the monolith.
   payment-migrate:
     build: .
-    command: uv run --no-dev python -m app.payment.migrate
+    command: uv run --no-dev python -m payment.migrate
     environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
     depends_on:
@@ -324,7 +324,7 @@ services:
   # is still inside the monolith; moves to its own image when extracted.
   payment-consumer:
     build: .
-    command: uv run --no-dev python -m app.payment.booking_consumer
+    command: uv run --no-dev python -m payment.booking_consumer
     # an unhandled error ends the process -- bring it back, and Kafka
     # redelivers the uncommitted message
     restart: unless-stopped
@@ -350,7 +350,7 @@ services:
   # gateway sits in front of both (BOOK-67).
   payment-api:
     build: .
-    command: uv run --no-dev uvicorn app.payment.main:app --host 0.0.0.0 --port 8001
+    command: uv run --no-dev uvicorn payment.main:app --host 0.0.0.0 --port 8001
     environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # the sync reservation read (BOOK-66) -- Booking by service name
@@ -377,7 +377,7 @@ services:
   # never scale this service (each job would run once per instance).
   payment-scheduler:
     build: .
-    command: uv run --no-dev python -m app.payment.scheduler
+    command: uv run --no-dev python -m payment.scheduler
     # an unhandled error ends the process -- bring it back; every job is safe to rerun
     restart: unless-stopped
     environment:

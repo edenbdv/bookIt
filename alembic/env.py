@@ -21,9 +21,9 @@ import app.core.outbox.models
 # its own NotificationBase and have their own migrations,
 # app/notification/alembic.ini. Booking's migrations never see them.)
 #
-# BOOK-65: same for Payment -- its models register on PaymentBase
-# (app/payment/db.py) with their own migrations (app/payment/alembic.ini); the old
-# copies in this database were dropped by 8b4228f69ed7.
+# BOOK-65: same for Payment -- its own service (services/payment/), its models on
+# PaymentBase with their own migrations; the old copies in this database were
+# dropped by 8b4228f69ed7.
 import app.property.models
 import app.reservation.inbox
 import app.reservation.models

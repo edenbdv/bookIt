@@ -157,7 +157,7 @@ None of these three ever appear in `ReservationCreate`; all three appear in `Res
 
 ## 3.4 Reservation and Payment are two separate creates, in sequence — not one action
 
-`PaymentCreate.reservation_id` ([app/payment/schemas.py](../../app/payment/schemas.py)) is easy to misread as "the reservation being created alongside this payment." It isn't — it references a reservation that already exists.
+`PaymentCreate.reservation_id` ([services/payment/src/payment/schemas.py](../../services/payment/src/payment/schemas.py)) is easy to misread as "the reservation being created alongside this payment." It isn't — it references a reservation that already exists.
 
 The actual flow: `POST /reservations` creates a `Reservation` immediately, in `PENDING` status, with `expires_at` set (section 3.3) — a hold, not yet a booking, but one that already blocks those dates for other guests via the `EXCLUDE` constraint, before any money has moved. Then, as a *separate* action, `POST /reservations/{id}/pay` (or `POST /payments`) sends a `PaymentCreate` referencing that same, already-created reservation's id. On success, the reservation transitions `PENDING` → `CONFIRMED` and `expires_at` clears.
 

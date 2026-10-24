@@ -29,12 +29,12 @@ from uuid import UUID
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
+from payment.models import Payment  # noqa: F401
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from app.auth.models import User
 from app.auth.security import create_access_token, new_id
-from app.payment.models import Payment  # noqa: F401
 from app.property.models import Property
 from app.reservation.models import Reservation  # noqa: F401
 from app.review.models import Review  # noqa: F401

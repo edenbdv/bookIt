@@ -8,7 +8,7 @@ mix up. The details of each live elsewhere: models in `sqlalchemy-basics.md`, Al
 
 ```
   MODEL (Python class)           SESSION (connection)              MIGRATION (a file)
-  app/payment/models.py          PaymentUnitOfWork / UnitOfWork    alembic/versions/xxx.py
+  services/payment/src/payment/models.py          PaymentUnitOfWork / UnitOfWork    alembic/versions/xxx.py
   "a payments row looks like"    "talk to THIS database"           "change the DB's shape"
             │                               │                                 │
             │ registers on a catalog        │ engine → a URL                  │ run by `alembic upgrade`

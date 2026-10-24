@@ -5,15 +5,14 @@ Booking's consumer (additive only), so its fields are checked one by one."""
 import uuid
 
 import pytest
-
-from app.payment.models import (
+from payment.models import (
     Payment,
     PaymentEventType,
     PaymentKind,
     PaymentOutboxEvent,
     PaymentStatus,
 )
-from app.payment.service import emit_payment_event
+from payment.service import emit_payment_event
 
 
 class FakeSession:

@@ -124,7 +124,7 @@ export interface ReservationCancelRead extends Reservation {
   refund_amount_cents: number
 }
 
-// app/payment/models.py's PaymentStatus -- keep in sync by hand
+// services/payment/src/payment/models.py's PaymentStatus -- keep in sync by hand
 export type PaymentStatus = 'pending' | 'succeeded' | 'failed'
 
 export interface Payment {

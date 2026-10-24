@@ -10,10 +10,10 @@ import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from payment.auth import get_guest_id
 
 from app.auth.security import create_access_token, create_refresh_token, new_id
 from app.core.config import get_settings
-from app.payment.auth import get_guest_id
 
 
 def _bearer(token: str) -> HTTPAuthorizationCredentials:

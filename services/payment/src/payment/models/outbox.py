@@ -7,7 +7,7 @@ from sqlalchemy import DateTime, Enum, Index, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.payment.db import PaymentBase
+from payment.db import PaymentBase
 
 
 class PaymentEventType(str, enum.Enum):

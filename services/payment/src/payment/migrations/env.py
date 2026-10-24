@@ -13,16 +13,17 @@ from logging.config import fileConfig
 # imported for its side effect: patches autogenerate to detect Postgres ENUM
 # changes -- Payment has enums too (same plugin as Booking's alembic/env.py)
 import alembic_postgresql_enum  # noqa: F401
+
+# imported for its side effect: the package registers every Payment table on
+# PaymentBase (services/payment/src/payment/models/__init__.py)
+import payment.models  # noqa: F401
+from payment.config import get_payment_settings
+from payment.db import PaymentBase
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# imported for its side effect: the package registers every Payment table on
-# PaymentBase (app/payment/models/__init__.py)
-import app.payment.models  # noqa: F401
 from alembic import context
-from app.payment.config import get_payment_settings
-from app.payment.db import PaymentBase
 
 VERSION_TABLE = "payment_alembic_version"
 

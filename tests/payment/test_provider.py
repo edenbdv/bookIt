@@ -1,6 +1,6 @@
 import uuid
 
-from app.payment.provider import PaymentOutcome, charge, refund
+from payment.provider import PaymentOutcome, charge, refund
 
 CID = uuid.uuid4()
 

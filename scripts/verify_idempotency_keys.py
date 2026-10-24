@@ -18,12 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from payment.models import Payment  # noqa: F401
 from sqlalchemy import text
 
 from app.auth.models import User
 from app.core.db.engine import get_engine
 from app.core.db.unit_of_work import UnitOfWork
-from app.payment.models import Payment  # noqa: F401
 from app.property.models import Property
 from app.reservation.schemas import ReservationCreate
 from app.reservation.service import (

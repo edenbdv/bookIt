@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 from confluent_kafka import Producer
 from sqlalchemy import select
 
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import PaymentOutboxEvent
+from payment.db import PaymentUnitOfWork
+from payment.models import PaymentOutboxEvent
 
 logger = logging.getLogger(__name__)
 

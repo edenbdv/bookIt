@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from app.payment.config import get_payment_settings
+from payment.config import get_payment_settings
 
 
 class PaymentBase(DeclarativeBase):
@@ -46,7 +46,7 @@ class PaymentUnitOfWork:
     async def __aenter__(self) -> Self:
         # imported here, not at module level: repository.py imports the models,
         # which import PaymentBase from this module
-        from app.payment.repository import PaymentRepository
+        from payment.repository import PaymentRepository
 
         self.session = get_payment_session_factory()()
         self.payments = PaymentRepository(self.session)

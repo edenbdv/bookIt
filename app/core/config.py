@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
     # (BOOK-65: Payment's database URL, webhook secret and Booking's address live in
-    # Payment's own settings, app/payment/config.py -- Booking doesn't need them)
+    # Payment's own settings, services/payment/src/payment/config.py -- Booking doesn't need them)
     # (BOOK-64: Notification's database URL lives in its own settings,
     # services/notification -- Booking doesn't need to know it)
     redis_url: str = "redis://localhost:6379/0"

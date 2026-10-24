@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.payment.models import Payment, PaymentKind, PaymentStatus
+from payment.models import Payment, PaymentKind, PaymentStatus
 
 
 class PaymentRepository:

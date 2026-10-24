@@ -4,8 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.payment.models import PaymentKind, PaymentStatus
-from app.payment.provider import PaymentOutcome
+from payment.models import PaymentKind, PaymentStatus
+from payment.provider import PaymentOutcome
 
 
 class PaymentCreate(BaseModel):

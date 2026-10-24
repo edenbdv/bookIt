@@ -3,10 +3,9 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
-
-from app.payment.models import Payment, PaymentKind, PaymentStatus
-from app.payment.provider import PaymentOutcome
-from app.payment.service import reconcile_stale_payments
+from payment.models import Payment, PaymentKind, PaymentStatus
+from payment.provider import PaymentOutcome
+from payment.service import reconcile_stale_payments
 
 
 class FakePaymentRepository:
@@ -61,7 +60,7 @@ async def test_each_stale_charge_is_checked_and_resolved() -> None:
     uow = FakeUnitOfWork([p1, p2])
 
     with patch(
-        "app.payment.service.provider_check_status",
+        "payment.service.provider_check_status",
         side_effect=[PaymentOutcome.SUCCESS, PaymentOutcome.FAILURE],
     ) as check_status:
         count = await reconcile_stale_payments(uow, datetime.now(UTC))
@@ -79,7 +78,7 @@ async def test_a_stale_refund_resolves_without_reacting() -> None:
     refund = _payment(kind=PaymentKind.REFUND)
     uow = FakeUnitOfWork([refund])
 
-    with patch("app.payment.service.provider_check_status", return_value=PaymentOutcome.SUCCESS):
+    with patch("payment.service.provider_check_status", return_value=PaymentOutcome.SUCCESS):
         count = await reconcile_stale_payments(uow, datetime.now(UTC))
 
     assert count == 1

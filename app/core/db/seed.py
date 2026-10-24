@@ -39,7 +39,7 @@ RESERVATION_DAVE_HAIFA = uuid.UUID("00000000-0000-0000-0000-000000000202")
 RESERVATION_CAROL_HAIFA_CANCELLED = uuid.UUID("00000000-0000-0000-0000-000000000203")
 RESERVATION_BOB_TLV = uuid.UUID("00000000-0000-0000-0000-000000000204")
 
-# (BOOK-65: the demo payments, ids 0x30x, are Payment's -- app/payment/seed.py)
+# (BOOK-65: the demo payments, ids 0x30x, are Payment's -- services/payment/src/payment/seed.py)
 
 REVIEW_CAROL_ON_TLV_LOFT = uuid.UUID("00000000-0000-0000-0000-000000000401")
 REVIEW_ALICE_ON_CAROL = uuid.UUID("00000000-0000-0000-0000-000000000402")
@@ -65,7 +65,7 @@ async def seed(uow: UnitOfWork) -> None:
     data), a charge+refund payment pair for the cancelled one (a realistic
     lifecycle, not just a missing charge), and reviews in both directions:
     guest reviewing the property, host reviewing the guest. BOOK-65: the payments
-    are seeded by Payment itself -- app/payment/seed.py.
+    are seeded by Payment itself -- services/payment/src/payment/seed.py.
     """
     session = uow.session
     host_alice = await get_or_create(

@@ -11,7 +11,7 @@ import httpx
 import jwt
 from pydantic import BaseModel, ValidationError
 
-from app.payment.config import get_payment_settings
+from payment.config import get_payment_settings
 
 # a slow Booking must not hang the guest's POST /payments
 _TIMEOUT_SECONDS = 2.0

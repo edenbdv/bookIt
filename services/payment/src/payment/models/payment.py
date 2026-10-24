@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import CheckConstraint, DateTime, Enum, Index, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.payment.db import PaymentBase
+from payment.db import PaymentBase
 
 
 class PaymentKind(str, enum.Enum):

@@ -15,7 +15,7 @@ and **when you'd choose differently**?
 | 3 | Outbox + Inbox | "How do you not lose or duplicate events?" | ✅ |
 | 4 | Saga + compensation | "No distributed transaction — what if step 2 fails?" | ✅ |
 | 5 | Eventual consistency in the UI | "What does the user see in between?" | ✅ |
-| 6 | Database per service | "How do you join across services? Foreign keys?" | ⏳ Payment |
+| 6 | Database per service | "How do you join across services? Foreign keys?" | ✅ |
 | 7 | Failure handling | "Service down, slow, poison message?" | ✅ / ⏳ BOOK-68 |
 | 8 | Service-to-service auth | "How does a service prove who it is?" | ✅ |
 | 9 | API gateway | "How does the frontend reach many services?" | ⏳ BOOK-67 |
@@ -69,7 +69,8 @@ amount on cancel is shown at once because Booking computes it in the request.
 **Answer:** each service owns its tables; nobody reads another's. No foreign keys across
 services — a plain id instead. Data another service needs travels in events (Notification)
 or via an API (Payment's sync call).
-**Status:** Notification has its own DB (BOOK-64 §8); Payment's is the next BOOK-65 step.
+**Status:** both have their own — Notification (BOOK-64 §8) and Payment (BOOK-65 §18:
+new DB, history copied, old tables dropped by a contract migration).
 **Where:** §8, §17.
 
 ## 7. Failure handling

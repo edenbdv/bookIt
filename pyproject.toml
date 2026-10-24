@@ -30,10 +30,11 @@ package = false
 # dependencies), all resolved into this one shared uv.lock. One `uv sync`
 # installs everything. See docs/microservices/microservices-decisions.md.
 [tool.uv.workspace]
-members = ["services/notification"]
+members = ["services/notification", "services/payment"]
 
 [tool.uv.sources]
 notification = { workspace = true }
+payment = { workspace = true }
 
 [tool.pytest.ini_options]
 # app/ isn't an installed package ([tool.uv] package = false above) --
@@ -52,6 +53,8 @@ dev = [
     # BOOK-64: dev-only -- the cross-service tests (tests/integration/) drive
     # Booking and Notification together. Booking's own code never imports it.
     "notification",
+    # BOOK-65: same for Payment -- the cross-service tests drive it in-process
+    "payment",
 ]
 
 [tool.ruff]

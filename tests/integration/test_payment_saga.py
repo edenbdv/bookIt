@@ -11,13 +11,13 @@ refunded via booking_payment_rejected -- tests/integration/test_payment_booking_
 from unittest.mock import patch
 
 import pytest
+from payment.db import PaymentUnitOfWork
+from payment.models import PaymentKind, PaymentStatus
+from payment.schemas import PaymentCreate
+from payment.service import pay_reservation
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import PaymentKind, PaymentStatus
-from app.payment.schemas import PaymentCreate
-from app.payment.service import pay_reservation
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
 
@@ -44,7 +44,7 @@ async def test_crash_during_provider_call_leaves_a_pending_payment(
 
     with (
         patch(
-            "app.payment.service.charge",
+            "payment.service.charge",
             side_effect=RuntimeError("simulated crash mid-call to the provider"),
         ),
         pytest.raises(RuntimeError),

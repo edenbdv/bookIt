@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.payment.db import PaymentBase
+from payment.db import PaymentBase
 
 
 class ProcessedBookingEvent(PaymentBase):

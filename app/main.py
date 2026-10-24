@@ -34,7 +34,7 @@ def create_app() -> FastAPI:
     from app.reservation.router import router as reservation_router
     from app.review.router import router as review_router
 
-    # (BOOK-65: /payments is served by Payment's own app, app/payment/main.py)
+    # (BOOK-65: /payments is served by Payment's own app, services/payment/src/payment/main.py)
     app.include_router(auth_router)
     app.include_router(core_router)
     app.include_router(property_router)

@@ -15,16 +15,16 @@ from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient, Response
+from payment.db import PaymentUnitOfWork
+from payment.models import PaymentKind, PaymentOutboxEvent, PaymentStatus
+from payment.provider import PaymentOutcome
+from payment.schemas import PaymentCreate
+from payment.service import create_refund, pay_reservation
+from payment.webhook_auth import sign_webhook_payload
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import PaymentKind, PaymentOutboxEvent, PaymentStatus
-from app.payment.provider import PaymentOutcome
-from app.payment.schemas import PaymentCreate
-from app.payment.service import create_refund, pay_reservation
-from app.payment.webhook_auth import sign_webhook_payload
 from app.reservation.models import Reservation, ReservationStatus
 from tests.integration.helpers import make_pending_reservation, payment_rows, reservation_status
 
@@ -42,7 +42,7 @@ async def _charge_left_pending(
 ) -> uuid.UUID:
     # crash mid-call to the provider -- the row is already committed PENDING
     with (
-        patch("app.payment.service.charge", side_effect=RuntimeError("simulated crash")),
+        patch("payment.service.charge", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
         async with PaymentUnitOfWork() as uow:
@@ -161,7 +161,7 @@ async def test_webhook_resolves_a_pending_refund(
 ) -> None:
     reservation, _ = pending_reservation
     with (
-        patch("app.payment.service.provider_refund", side_effect=RuntimeError("simulated crash")),
+        patch("payment.service.provider_refund", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
         async with PaymentUnitOfWork() as uow:

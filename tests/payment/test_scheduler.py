@@ -4,8 +4,7 @@ job never stops the others or the loop."""
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from app.payment.scheduler import Job, run_due
+from payment.scheduler import Job, run_due
 
 T0 = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
 

@@ -8,14 +8,14 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.payment import booking_client
-from app.payment.booking_client import (
+from payment import booking_client
+from payment.booking_client import (
     BookingReservationStatus,
     BookingUnavailableError,
     ReservationInfo,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from tests.integration.helpers import make_pending_reservation
 
 

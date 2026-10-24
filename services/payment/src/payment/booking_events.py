@@ -7,9 +7,9 @@ they arrive over Kafka from another service, so the payload is the contract.
 
 import uuid
 
-from app.payment import service
-from app.payment.db import PaymentUnitOfWork
-from app.payment.models import PaymentKind, PaymentStatus, ProcessedBookingEvent
+from payment import service
+from payment.db import PaymentUnitOfWork
+from payment.models import PaymentKind, PaymentStatus, ProcessedBookingEvent
 
 
 def _has_effect(payload: dict) -> bool:

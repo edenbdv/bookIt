@@ -8,7 +8,7 @@ functions themselves.
 
 ## 1. BOOK-52: the mock provider's outcome is weighted-random by default, force-able for callers that need determinism
 
-**Chosen:** `app/payment/provider.py`'s `charge(amount_cents, *, force=None)` returns
+**Chosen:** `services/payment/src/payment/provider.py`'s `charge(amount_cents, *, force=None)` returns
 `SUCCESS`/`FAILURE`/`TIMEOUT`. Unforced, the outcome is random but weighted toward
 success (90/8/2) — not a 50/50 coin flip — so exercising the API by hand mostly behaves
 like a real integration, with the failure/timeout paths still reachable without waiting
@@ -117,7 +117,7 @@ worth undoing — which is exactly why `worker-decisions.md` §9 could accept "d
 are fine" there instead of building any of this.
 
 **Chosen: orchestration, not choreography (`saga-basics.md` §4).** One function
-(`app/payment/saga.py`) explicitly calls the charge step, then explicitly decides
+(`services/payment/src/payment/saga.py`) explicitly calls the charge step, then explicitly decides
 confirm vs. compensate — not each side reacting to a `BookingConfirmed`/`PaymentFailed`
 event over Kafka. Same reasoning `worker-decisions.md` §9 already used for BOOK-45's
 trigger: a single, tight, one-consumer flow doesn't earn the decoupling cost of routing
@@ -163,7 +163,7 @@ would have no memory of it. Worse: since a rolled-back attempt leaves no row at 
 `charge()` again from scratch — a genuine double charge, with nothing recorded to even
 notice.
 
-**Chosen:** `app/payment/saga.py`'s `create_payment_and_react()` commits right after
+**Chosen:** `services/payment/src/payment/saga.py`'s `create_payment_and_react()` commits right after
 `create_payment_idempotent()` returns, *before* calling `react_to_payment_outcome()`.
 Two local transactions, not one — matching `saga-basics.md` §2's own diagram, where
 step 1 commits before the external-call-dependent step ever runs. A failure in

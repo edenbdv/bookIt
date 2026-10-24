@@ -527,13 +527,18 @@ the way.
 Same approach as BOOK-64: small steps, still inside the monolith first, the app works
 after each.
 
-- **Done:** Payment's own outbox + `payment-events` (§12); Booking consumes it (§13);
-  the relay bug and `kafka-init` (§14); a payment for an already-cancelled reservation
-  becomes a refund (§15); the frontend polls (§16).
-- **Next:** Payment's consumer for `booking-events`; remove the saga's direct calls
-  (tie 1); refunds on `BookingCancelled` (tie 2); a sync call + service auth for the
-  reservation read (tie 3, BOOK-66 — done, §17); own database (tie 4 — done, §18); extract to
-  `services/payment/` with its own scheduler (ties 5–6).
+- **Done:**
+  - **Events:** Payment's own outbox + `payment-events` (§12); Booking consumes it (§13);
+    the relay bug and `kafka-init` (§14); a payment for an already-cancelled reservation
+    becomes a refund (§15); the frontend polls (§16); refunds on `booking_cancelled` via
+    Payment's consumer, the saga's direct calls removed (ties 1–2).
+  - **Sync call + service auth** for the reservation read (tie 3, BOOK-66, §17).
+  - **Own database** (tie 4, §18).
+  - **Own process:** its own app on :8001 and its own scheduler (§20); Booking serves no
+    `/payments` and runs no payment jobs (tie 5); the guest's token checked by Payment
+    itself until the gateway (§19). Booking's and Payment's code import nothing of each other.
+- **Next:** package it as `services/payment/` — own `pyproject.toml`, Dockerfile and
+  image, boundary test, CI build (tie 6) — same as Notification's step 5 (§9).
 
 ## 12. Payment's own outbox and `payment-events`
 
@@ -650,7 +655,7 @@ contract. What's specific to Payment, and one thing that's easy to misread:
 
 | | Decides | Payment |
 |---|---|---|
-| The model catalog (`PaymentBase`, `app/payment/db.py`) | Which **migrations** know the tables | Payment's own Alembic |
+| The model catalog (`PaymentBase`, `services/payment/src/payment/db.py`) | Which **migrations** know the tables | Payment's own Alembic |
 | The session (engine → URL) | Which **database** queries go to | Booking's `UnitOfWork` → `bookit` until the switch, then `PaymentUnitOfWork` → `payments` |
 
 So moving `Payment`, `PaymentOutboxEvent` and `ProcessedBookingEvent` onto `PaymentBase`
@@ -687,7 +692,7 @@ the reservation id from the request or the event and stores it on its own rows (
 - **A unit of work, not a bare session** — Payment's code already passes `uow` through
   its layers (`uow.payments`, `uow.session`); `PaymentUnitOfWork` keeps that shape.
 
-### Copying the history (`app/payment/copy_from_booking.py` — deleted at contract, see git history)
+### Copying the history (`services/payment/src/payment/copy_from_booking.py` — deleted at contract, see git history)
 
 **Chosen:** a one-off module, not part of `migrate.py` — `migrate.py` is permanent, the
 copy only exists during the move and is **deleted at the contract step**.
@@ -754,7 +759,7 @@ Booking's `users` table — out of reach once Payment is its own service.
 **Target (BOOK-67):** the gateway verifies the guest's token and passes the user id on;
 Payment trusts the gateway and holds no user-login secret.
 
-**Until then (chosen):** `app/payment/auth.py`'s `get_guest_id` verifies the token
+**Until then (chosen):** `services/payment/src/payment/auth.py`'s `get_guest_id` verifies the token
 **locally** — signature and `exp` with `SECRET_KEY`, `type == "access"` — and returns
 `sub`. No call to Booking: a JWT carries its own proof (`docs/auth/jwt-basics.md` §1).
 Booking *issues* tokens (needs users and passwords); anyone holding the secret can

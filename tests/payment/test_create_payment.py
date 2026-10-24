@@ -3,12 +3,11 @@ from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
-
-from app.payment import booking_client
-from app.payment.booking_client import BookingReservationStatus, ReservationInfo
-from app.payment.models import Payment, PaymentKind, PaymentStatus
-from app.payment.provider import PaymentOutcome
-from app.payment.service import (
+from payment import booking_client
+from payment.booking_client import BookingReservationStatus, ReservationInfo
+from payment.models import Payment, PaymentKind, PaymentStatus
+from payment.provider import PaymentOutcome
+from payment.service import (
     NotReservationGuestError,
     PendingChargeExistsError,
     ReservationNotFoundError,
