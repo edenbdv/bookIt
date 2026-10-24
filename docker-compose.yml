@@ -249,16 +249,19 @@ services:
   # then runs Payment's migrations (services/payment/src/payment/alembic.ini). Exits when done.
   # Same image as `app` while Payment is still inside the monolith.
   payment-migrate:
-    build: .
-    command: uv run --no-dev python -m payment.migrate
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.migrate
     environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
     depends_on:
       db:
         condition: service_healthy
     volumes:
-      - .:/code
-      - /code/.venv
+      - ./services/payment/src:/code/services/payment/src
 
   # BOOK-51. Its own process, deliberately not folded into `worker` or run as
   # a Celery task -- a Kafka consumer group needs a real, continuously
@@ -323,8 +326,12 @@ services:
   # -- refunds a payment Booking rejected. Same image as `app` while Payment
   # is still inside the monolith; moves to its own image when extracted.
   payment-consumer:
-    build: .
-    command: uv run --no-dev python -m payment.booking_consumer
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.booking_consumer
     # an unhandled error ends the process -- bring it back, and Kafka
     # redelivers the uncommitted message
     restart: unless-stopped
@@ -342,15 +349,18 @@ services:
       kafka-init:
         condition: service_completed_successfully
     volumes:
-      - .:/code
-      - /code/.venv
+      - ./services/payment/src:/code/services/payment/src
 
   # BOOK-65: Payment's own HTTP app (POST /payments, the provider's webhook) on its
   # own port -- apart from Booking's `app`. The frontend calls it directly until the
   # gateway sits in front of both (BOOK-67).
   payment-api:
-    build: .
-    command: uv run --no-dev uvicorn payment.main:app --host 0.0.0.0 --port 8001
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: uvicorn payment.main:app --host 0.0.0.0 --port 8001
     environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # the sync reservation read (BOOK-66) -- Booking by service name
@@ -363,8 +373,7 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - .:/code
-      - /code/.venv
+      - ./services/payment/src:/code/services/payment/src
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:8001/health').status == 200 else 1)"]
       interval: 10s
@@ -376,8 +385,12 @@ services:
   # in one simple loop, not Celery (microservices-decisions.md §20). ONE instance:
   # never scale this service (each job would run once per instance).
   payment-scheduler:
-    build: .
-    command: uv run --no-dev python -m payment.scheduler
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.scheduler
     # an unhandled error ends the process -- bring it back; every job is safe to rerun
     restart: unless-stopped
     environment:
@@ -393,8 +406,7 @@ services:
       kafka-init:
         condition: service_completed_successfully
     volumes:
-      - .:/code
-      - /code/.venv
+      - ./services/payment/src:/code/services/payment/src
 
 volumes:
   pgdata:

@@ -1,6 +1,8 @@
 """BOOK-65: get_guest_id -- Payment reads who is paying from the guest's access
-token alone, with no users-table lookup. Tokens are minted the way Booking's login
-does (app.auth.security), since that's the contract Payment has to accept.
+token alone, with no users-table lookup. Tokens are built here from the contract --
+the claims Booking's login puts in an access token (sub, type, exp) -- without
+importing Booking's code. Real login tokens are covered by the cross-service tests in
+tests/integration/, which pay through Payment's app.
 """
 
 import uuid
@@ -11,32 +13,41 @@ import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from payment.auth import get_guest_id
-
-from app.auth.security import create_access_token, create_refresh_token, new_id
-from app.core.config import get_settings
+from payment.config import get_payment_settings
 
 
 def _bearer(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
+def _signed(payload: dict, secret: str | None = None) -> str:
+    settings = get_payment_settings()
+    return jwt.encode(payload, secret or settings.secret_key, algorithm=settings.jwt_algorithm)
+
+
+def _token(user_id: uuid.UUID, type_: str = "access", expires_in_min: int = 15) -> str:
+    # the shape of Booking's login tokens -- the contract Payment accepts
+    return _signed(
+        {
+            "sub": str(user_id),
+            "type": type_,
+            "exp": datetime.now(UTC) + timedelta(minutes=expires_in_min),
+        }
+    )
+
+
 @pytest.mark.anyio
 async def test_a_login_access_token_gives_the_user_id() -> None:
     user_id = uuid.uuid4()
 
-    assert await get_guest_id(_bearer(create_access_token(user_id, new_id()))) == user_id
-
-
-def _signed(payload: dict, secret: str | None = None) -> str:
-    settings = get_settings()
-    return jwt.encode(payload, secret or settings.secret_key, algorithm=settings.jwt_algorithm)
+    assert await get_guest_id(_bearer(_token(user_id))) == user_id
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "token",
     [
-        pytest.param(create_refresh_token(uuid.uuid4(), new_id(), new_id()), id="a refresh token"),
+        pytest.param(_token(uuid.uuid4(), type_="refresh"), id="a refresh token"),
         pytest.param(
             _signed(
                 {
@@ -44,7 +55,7 @@ def _signed(payload: dict, secret: str | None = None) -> str:
                     "type": "service",
                     "exp": datetime.now(UTC) + timedelta(minutes=5),
                 },
-                get_settings().service_token_secret,
+                get_payment_settings().service_token_secret,
             ),
             id="a service token",
         ),

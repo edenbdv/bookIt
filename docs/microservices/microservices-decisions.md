@@ -537,8 +537,12 @@ after each.
   - **Own process:** its own app on :8001 and its own scheduler (§20); Booking serves no
     `/payments` and runs no payment jobs (tie 5); the guest's token checked by Payment
     itself until the gateway (§19). Booking's and Payment's code import nothing of each other.
-- **Next:** package it as `services/payment/` — own `pyproject.toml`, Dockerfile and
-  image, boundary test, CI build (tie 6) — same as Notification's step 5 (§9).
+  - **Packaged** as `services/payment/` (tie 6), same as Notification (§9): own
+    `pyproject.toml` (uv workspace member), Dockerfile and image (self-contained, checked
+    in CI), compose services on it, the boundary test covering it both ways, unit tests in
+    `services/payment/tests/`; cross-service tests stay in the root `tests/integration/`.
+- **Left (small):** cleanup jobs in `payment-scheduler` for expired
+  `payment_idempotency_keys` and published `payment_outbox_events`.
 
 ## 12. Payment's own outbox and `payment-events`
 
