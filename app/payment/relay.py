@@ -14,7 +14,7 @@ from confluent_kafka import Producer
 from sqlalchemy import select
 
 from app.core.db.unit_of_work import UnitOfWork
-from app.payment.outbox import PaymentOutboxEvent
+from app.payment.models import PaymentOutboxEvent
 
 logger = logging.getLogger(__name__)
 

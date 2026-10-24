@@ -1,15 +1,11 @@
 import enum
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Index, func, text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import CheckConstraint, DateTime, Enum, Index, func, text
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.db.models import Base
-
-if TYPE_CHECKING:
-    from app.reservation.models import Reservation
+from app.payment.db import PaymentBase
 
 
 class PaymentKind(str, enum.Enum):
@@ -23,7 +19,7 @@ class PaymentStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class Payment(Base):
+class Payment(PaymentBase):
     __tablename__ = "payments"
     __table_args__ = (
         CheckConstraint("amount_cents >= 0", name="amount_non_negative"),
@@ -39,7 +35,9 @@ class Payment(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    reservation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reservations.id"))
+    # BOOK-65: a plain UUID, no ForeignKey("reservations.id") -- reservations live
+    # in Booking's database (microservices-basics.md §3.2)
+    reservation_id: Mapped[uuid.UUID]
     # values_callable: store the enum's string value, not its member name — see
     # the same note on User.role. The partial index below relies on this: its
     # raw SQL WHERE clause compares against 'charge'/'succeeded' directly.
@@ -52,5 +50,3 @@ class Payment(Base):
         default=PaymentStatus.PENDING,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    reservation: Mapped["Reservation"] = relationship(back_populates="payments")

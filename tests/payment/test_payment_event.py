@@ -6,8 +6,13 @@ import uuid
 
 import pytest
 
-from app.payment.models import Payment, PaymentKind, PaymentStatus
-from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
+from app.payment.models import (
+    Payment,
+    PaymentEventType,
+    PaymentKind,
+    PaymentOutboxEvent,
+    PaymentStatus,
+)
 from app.payment.service import emit_payment_event
 
 

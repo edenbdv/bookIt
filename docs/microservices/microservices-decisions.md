@@ -532,7 +532,7 @@ after each.
   becomes a refund (§15); the frontend polls (§16).
 - **Next:** Payment's consumer for `booking-events`; remove the saga's direct calls
   (tie 1); refunds on `BookingCancelled` (tie 2); a sync call + service auth for the
-  reservation read (tie 3, BOOK-66); own database (tie 4); extract to
+  reservation read (tie 3, BOOK-66 — done, §17); own database (tie 4, §18); extract to
   `services/payment/` with its own scheduler (ties 5–6).
 
 ## 12. Payment's own outbox and `payment-events`
@@ -641,6 +641,52 @@ worth the two problems above.
 **Revisit when:** paying must work while Booking is down, or the call's latency becomes a
 problem — then a local copy plus a short wait/retry for the book-then-pay race.
 
+## 18. Payment's own database: the model catalog is not the database
+
+Same plan as Notification's (§8) — own database, own migrations, expand → switch →
+contract. What's specific to Payment, and one thing that's easy to misread:
+
+**`PaymentBase` doesn't decide which database is used.** Two separate things:
+
+| | Decides | Payment |
+|---|---|---|
+| The model catalog (`PaymentBase`, `app/payment/db.py`) | Which **migrations** know the tables | Payment's own Alembic |
+| The session (engine → URL) | Which **database** queries go to | Booking's `UnitOfWork` → `bookit` until the switch, then `PaymentUnitOfWork` → `payments` |
+
+So moving `Payment`, `PaymentOutboxEvent` and `ProcessedBookingEvent` onto `PaymentBase`
+moved **nothing**: the code still queries the same tables in `bookit`.
+
+**A model doesn't have to describe every DB constraint.** The models already dropped
+`ForeignKey("reservations.id")` and the `Payment.reservation` ↔ `Reservation.payments`
+relationship, while `bookit` still has the FK. That's fine: a query only needs the
+**table and column names**, which are unchanged — the generated SQL is identical.
+Constraints matter to migrations and to the database itself; the DB keeps enforcing
+the FK, and every row the code writes still satisfies it. The model is already in its
+future shape; the database catches up at the contract step.
+
+The relationship was a Python-only shortcut (`reservation.payments` → a `SELECT`), never
+a column, and nothing used it. Across two databases it couldn't work anyway: Payment gets
+the reservation id from the request or the event and stores it on its own rows (§17).
+
+**Two ties it broke loose:**
+
+- `idempotency_keys.payment_id` had a **model-level** FK to `payments` — unresolvable once
+  `payments` left Booking's catalog (`NoReferencedTableError`). Removed from the model;
+  the column and DB constraint stay until payment keys move to their own table.
+- Booking's `alembic --autogenerate` no longer sees the three tables and **proposes
+  dropping them** — delete those lines from any generated revision until the contract
+  step (warning in `alembic/env.py`).
+
+**Specific to Payment, unlike Notification:**
+
+- **History must be copied** — charges are needed for future refunds; Notification's
+  Inbox could start empty.
+- **Idempotency keys split out** of the shared `idempotency_keys` into Payment's own
+  table — which also removes a latent collision: one key column for both reservation and
+  payment keys.
+- **A unit of work, not a bare session** — Payment's code already passes `uow` through
+  its layers (`uow.payments`, `uow.session`); `PaymentUnitOfWork` keeps that shape.
+
 ---
 
 ## Cheat sheet
@@ -680,3 +726,5 @@ problem — then a local copy plus a short wait/retry for the book-then-pay race
 | Payment's Inbox | `processed_booking_events`, committed with the PENDING refund row, only for events with an effect | — |
 | Frontend after paying | Always poll the reservation, first check immediate | Push (SSE/WebSocket) if the wait gets noticeable |
 | Payment reading the reservation before charging | Sync call to Booking (`/internal/...`, BOOK-66 auth), not a local copy from events — it *decides* on current state while the guest waits | Paying must work while Booking is down |
+| Payment's tables | Own `PaymentBase` + own migrations; models drop the FK/relationship first, the DB catches up at contract | — |
+| Payment's DB access | `PaymentUnitOfWork` (same `uow.payments` / `uow.session` shape), not a bare session | — |

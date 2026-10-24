@@ -13,8 +13,13 @@ from app.core.idempotency.models import (
 )
 from app.payment import booking_client
 from app.payment.booking_client import BookingReservationStatus
-from app.payment.models import Payment, PaymentKind, PaymentStatus
-from app.payment.outbox import PaymentEventType, PaymentOutboxEvent
+from app.payment.models import (
+    Payment,
+    PaymentEventType,
+    PaymentKind,
+    PaymentOutboxEvent,
+    PaymentStatus,
+)
 from app.payment.provider import PaymentOutcome, charge
 from app.payment.provider import check_status as provider_check_status
 from app.payment.provider import refund as provider_refund

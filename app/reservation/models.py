@@ -11,7 +11,6 @@ from app.core.db.models import Base
 
 if TYPE_CHECKING:
     from app.auth.models import User
-    from app.payment.models import Payment
     from app.property.models import Property
     from app.review.models import Review
 
@@ -58,5 +57,4 @@ class Reservation(Base):
 
     property: Mapped["Property"] = relationship(back_populates="reservations")
     guest: Mapped["User"] = relationship(back_populates="reservations")
-    payments: Mapped[list["Payment"]] = relationship(back_populates="reservation")
     reviews: Mapped[list["Review"]] = relationship(back_populates="reservation")

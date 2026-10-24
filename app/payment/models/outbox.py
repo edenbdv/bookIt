@@ -7,7 +7,7 @@ from sqlalchemy import DateTime, Enum, Index, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.db.models import Base
+from app.payment.db import PaymentBase
 
 
 class PaymentEventType(str, enum.Enum):
@@ -15,7 +15,7 @@ class PaymentEventType(str, enum.Enum):
     PAYMENT_FAILED = "payment_failed"
 
 
-class PaymentOutboxEvent(Base):
+class PaymentOutboxEvent(PaymentBase):
     """BOOK-65: Payment's own outbox -- same pattern as core/outbox's
     OutboxEvent (docs/jobs/outbox-basics.md), but owned by Payment so it
     moves with Payment's own DB. Written in the same transaction as the
@@ -28,8 +28,7 @@ class PaymentOutboxEvent(Base):
     event_type: Mapped[PaymentEventType] = mapped_column(
         Enum(PaymentEventType, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
     )
-    # plain UUID, no ForeignKey("reservations.id") -- reservations live in
-    # Booking's DB once Payment is split out. Also the Kafka partition key.
+    # plain UUID, no FK -- also the Kafka partition key
     reservation_id: Mapped[uuid.UUID]
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

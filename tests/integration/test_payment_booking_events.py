@@ -14,8 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment.booking_events import handle_booking_event
-from app.payment.inbox import ProcessedBookingEvent
-from app.payment.models import Payment, PaymentKind, PaymentStatus
+from app.payment.models import Payment, PaymentKind, PaymentStatus, ProcessedBookingEvent
 from app.reservation.models import Reservation
 from tests.integration.helpers import make_pending_reservation
 

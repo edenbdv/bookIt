@@ -9,8 +9,7 @@ import uuid
 
 from app.core.db.unit_of_work import UnitOfWork
 from app.payment import service
-from app.payment.inbox import ProcessedBookingEvent
-from app.payment.models import PaymentKind, PaymentStatus
+from app.payment.models import PaymentKind, PaymentStatus, ProcessedBookingEvent
 
 
 def _has_effect(payload: dict) -> bool:

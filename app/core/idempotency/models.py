@@ -32,7 +32,10 @@ class IdempotencyKey(Base):
     )
     # reference to the result, not a stored response body
     reservation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reservations.id"))
-    payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payments.id"))
+    # BOOK-65: no ForeignKey in the model -- `payments` moved to Payment's own model
+    # catalog (PaymentBase). The DB constraint still exists until the contract step
+    # moves payment keys to Payment's own table and drops this column.
+    payment_id: Mapped[uuid.UUID | None]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # ~24h window (docs/db/idempotency-basics.md); swept by core/idempotency/cleanup.py
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

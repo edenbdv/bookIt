@@ -20,8 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork
-from app.payment.models import PaymentKind, PaymentStatus
-from app.payment.outbox import PaymentOutboxEvent
+from app.payment.models import PaymentKind, PaymentOutboxEvent, PaymentStatus
 from app.payment.provider import PaymentOutcome
 from app.payment.schemas import PaymentCreate
 from app.payment.service import create_refund, pay_reservation

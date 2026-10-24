@@ -20,7 +20,7 @@ from app.core.config import get_settings
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox.relay import make_producer
 from app.payment import relay
-from app.payment.outbox import PaymentOutboxEvent
+from app.payment.models import PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
 from app.payment.schemas import PaymentCreate
 from app.payment.service import pay_reservation
