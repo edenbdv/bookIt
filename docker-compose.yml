@@ -329,8 +329,58 @@ services:
     # redelivers the uncommitted message
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
-      # BOOK-65: Payment's own database (container hostname, not localhost)
+      # BOOK-65: Payment's own database only -- it no longer reads Booking's
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/code
+      - /code/.venv
+
+  # BOOK-65: Payment's own HTTP app (POST /payments, the provider's webhook) on its
+  # own port -- apart from Booking's `app`. The frontend calls it directly until the
+  # gateway sits in front of both (BOOK-67).
+  payment-api:
+    build: .
+    command: uv run --no-dev uvicorn app.payment.main:app --host 0.0.0.0 --port 8001
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+      # the sync reservation read (BOOK-66) -- Booking by service name
+      BOOKING_BASE_URL: http://app:8000
+    ports:
+      - "8001:8001"
+    depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:8001/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # BOOK-65: Payment's scheduled jobs -- its outbox relay (5s) and reconcile (60s) --
+  # in one simple loop, not Celery (microservices-decisions.md §20). ONE instance:
+  # never scale this service (each job would run once per instance).
+  payment-scheduler:
+    build: .
+    command: uv run --no-dev python -m app.payment.scheduler
+    # an unhandled error ends the process -- bring it back; every job is safe to rerun
+    restart: unless-stopped
+    environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:

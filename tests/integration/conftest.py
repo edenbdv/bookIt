@@ -45,6 +45,7 @@ from app.main import create_app
 from app.payment import migrate as payment_migrate
 from app.payment.config import get_payment_settings
 from app.payment.db import get_payment_engine, get_payment_session_factory
+from app.payment.main import create_payment_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -313,3 +314,13 @@ def booking_in_process(app_db: None) -> Iterator[None]:
 
     with patch.object(booking_client, "_client", in_process_client):
         yield
+
+
+# BOOK-65: Payment's own HTTP app, in-process -- the counterpart of api_client
+# for POST /payments and the webhook. Payment needs no Redis (no rate limit, §19),
+# so only app_db underneath.
+@pytest.fixture
+async def payment_api_client(app_db: None) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=create_payment_app())
+    async with AsyncClient(transport=transport, base_url="http://payment") as client:
+        yield client

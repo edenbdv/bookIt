@@ -92,7 +92,7 @@ async def _payment_status(
 
 @pytest.mark.anyio
 async def test_webhook_success_resolves_the_charge_and_writes_its_event(
-    api_client: AsyncClient,
+    payment_api_client: AsyncClient,
     db_session: AsyncSession,
     payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -100,7 +100,7 @@ async def test_webhook_success_resolves_the_charge_and_writes_its_event(
     reservation, guest = pending_reservation
     payment_id = await _charge_left_pending(payment_db_session, reservation, guest)
 
-    response = await _send_webhook(api_client, payment_id, PaymentOutcome.SUCCESS)
+    response = await _send_webhook(payment_api_client, payment_id, PaymentOutcome.SUCCESS)
 
     assert response.status_code == 200
     assert await _payment_status(payment_db_session, reservation, PaymentKind.CHARGE) == (
@@ -113,16 +113,16 @@ async def test_webhook_success_resolves_the_charge_and_writes_its_event(
 # must be a no-op, not a second event
 @pytest.mark.anyio
 async def test_redelivered_webhook_is_a_no_op(
-    api_client: AsyncClient,
+    payment_api_client: AsyncClient,
     db_session: AsyncSession,
     payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
 ) -> None:
     reservation, guest = pending_reservation
     payment_id = await _charge_left_pending(payment_db_session, reservation, guest)
-    await _send_webhook(api_client, payment_id, PaymentOutcome.SUCCESS)
+    await _send_webhook(payment_api_client, payment_id, PaymentOutcome.SUCCESS)
 
-    redelivery = await _send_webhook(api_client, payment_id, PaymentOutcome.FAILURE)
+    redelivery = await _send_webhook(payment_api_client, payment_id, PaymentOutcome.FAILURE)
 
     assert redelivery.status_code == 200
     assert await _payment_status(payment_db_session, reservation, PaymentKind.CHARGE) == (
@@ -133,7 +133,7 @@ async def test_redelivered_webhook_is_a_no_op(
 
 @pytest.mark.anyio
 async def test_webhook_failure_resolves_the_charge_and_writes_its_event(
-    api_client: AsyncClient,
+    payment_api_client: AsyncClient,
     db_session: AsyncSession,
     payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -141,7 +141,7 @@ async def test_webhook_failure_resolves_the_charge_and_writes_its_event(
     reservation, guest = pending_reservation
     payment_id = await _charge_left_pending(payment_db_session, reservation, guest)
 
-    response = await _send_webhook(api_client, payment_id, PaymentOutcome.FAILURE)
+    response = await _send_webhook(payment_api_client, payment_id, PaymentOutcome.FAILURE)
 
     assert response.status_code == 200
     assert await _payment_status(payment_db_session, reservation, PaymentKind.CHARGE) == (
@@ -154,7 +154,7 @@ async def test_webhook_failure_resolves_the_charge_and_writes_its_event(
 # way -- with no event, since a refund's outcome drives no reservation
 @pytest.mark.anyio
 async def test_webhook_resolves_a_pending_refund(
-    api_client: AsyncClient,
+    payment_api_client: AsyncClient,
     db_session: AsyncSession,
     payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -172,7 +172,7 @@ async def test_webhook_resolves_a_pending_refund(
         if kind == PaymentKind.REFUND
     ]
 
-    response = await _send_webhook(api_client, refund_id, PaymentOutcome.SUCCESS)
+    response = await _send_webhook(payment_api_client, refund_id, PaymentOutcome.SUCCESS)
 
     assert response.status_code == 200
     assert await _payment_status(payment_db_session, reservation, PaymentKind.REFUND) == (
@@ -185,7 +185,7 @@ async def test_webhook_resolves_a_pending_refund(
 # proving the caller is the provider (webhook-basics.md §8)
 @pytest.mark.anyio
 async def test_webhook_with_a_bad_signature_is_rejected(
-    api_client: AsyncClient,
+    payment_api_client: AsyncClient,
     db_session: AsyncSession,
     payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
@@ -194,7 +194,7 @@ async def test_webhook_with_a_bad_signature_is_rejected(
     payment_id = await _charge_left_pending(payment_db_session, reservation, guest)
 
     response = await _send_webhook(
-        api_client, payment_id, PaymentOutcome.SUCCESS, signature="not-a-real-signature"
+        payment_api_client, payment_id, PaymentOutcome.SUCCESS, signature="not-a-real-signature"
     )
 
     assert response.status_code == 401

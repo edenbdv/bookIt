@@ -24,13 +24,13 @@ def _unreachable() -> httpx.AsyncClient:
 
 @pytest.mark.anyio
 async def test_booking_down_is_a_503_and_charges_nothing(
-    api_client: AsyncClient, db_session: AsyncSession, payment_db_session: AsyncSession
+    payment_api_client: AsyncClient, db_session: AsyncSession, payment_db_session: AsyncSession
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
     headers = auth_headers(guest, idempotency_key="retry-me")
 
     with patch.object(booking_client, "_client", _unreachable):
-        response = await api_client.post(
+        response = await payment_api_client.post(
             "/payments", json={"reservation_id": str(reservation.id)}, headers=headers
         )
 

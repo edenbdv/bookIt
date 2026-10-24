@@ -777,6 +777,42 @@ Booking *issues* tokens (needs users and passwords); anyone holding the secret c
 per-user rate limiting at the gateway; keep `/internal/*` unreachable from outside
 (BOOK-66); then remove `SECRET_KEY` and `get_guest_id`'s own check from Payment.
 
+## 20. Payment's scheduled jobs: a simple loop, not Celery
+
+Payment has two periodic jobs — its outbox relay (every 5 s) and reconcile (every 60 s) —
+which run in Booking's Celery worker only while Payment is inside the monolith.
+
+**Chosen:** its own `payment-scheduler` process — `while True`: run what's due, sleep —
+one `asyncio.run()` for the process's lifetime. Same reasoning as Notification's consumer
+being its own process (`worker-decisions.md` §12).
+
+| | Celery (Booking's) | A loop (`payment-scheduler`) |
+|---|---|---|
+| Processes | worker + beat | one |
+| Dependencies | a broker (RabbitMQ) | none beyond its DB and Kafka |
+| Code | task decorators, `async_task`, engine disposal per task, beat schedule | ~30 lines |
+| Fits | many jobs, **on-demand tasks** (`.delay()`), retries, many workers | a few **fixed periodic** jobs |
+
+**What the loop doesn't give, and why that's fine here:**
+
+- **One instance only** — two would run each job twice. Harmless (the relay is
+  at-least-once and consumers dedup on `event_id`; reconcile skips resolved payments), just
+  wasteful; scaling out would need a lock or leader election.
+- **No built-in retries or monitoring** — a failed run is logged; the next tick retries.
+- **One job at a time** — a slow reconcile delays the next relay run a little.
+
+**Why Booking keeps Celery:** it was chosen (Epic 7) for an **on-demand** task — the
+"reservation received" email via `.delay()`, with retries and a dead-letter queue — and as
+a learning goal. BOOK-64 moved that email to Kafka, so Booking's worker now only runs
+periodic jobs and a loop would do there too; but it's built, it works, it handles ~6
+schedules neatly, and it's ready if an on-demand task comes back. Not worth churning.
+
+**The rule:** the smallest tool that fits *this* service's needs — a loop for a new
+service with two fixed jobs; Celery where it's already earning its place.
+
+**Revisit when:** Payment needs on-demand background tasks (e.g. a receipt PDF), many
+jobs, or more than one scheduler instance.
+
 ---
 
 ## Cheat sheet
@@ -819,3 +855,4 @@ per-user rate limiting at the gateway; keep `/internal/*` unreachable from outsi
 | Payment's tables | Own `PaymentBase` + own migrations; models drop the FK/relationship first, the DB catches up at contract | — |
 | Payment's DB access | `PaymentUnitOfWork` (same `uow.payments` / `uow.session` shape), not a bare session | — |
 | Who is paying | Payment verifies the guest JWT locally (`get_guest_id`, `sub` only); no rate limit, no deleted-user check | BOOK-67: the gateway verifies and forwards the user id |
+| Payment's periodic jobs | Own `payment-scheduler` loop, one instance — not Celery; Booking keeps its Celery | On-demand tasks, many jobs, or several instances |
