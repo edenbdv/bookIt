@@ -12,8 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class PaymentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # "development" allows the local frontend's origin (CORS), like Booking's app
-    environment: str = "development"
     # its own database (§18) -- containers override the host to `db`
     payment_database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/payments"
     # Kafka's host-published listener; containers override to kafka:9092

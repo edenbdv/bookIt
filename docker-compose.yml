@@ -128,24 +128,59 @@ services:
       - "1025:1025"   # SMTP -- what `worker` sends to
       - "8025:8025"   # web UI -- where you look at what was "sent"
 
+  # BOOK-67: the API gateway -- the one public entry point in front of Booking and
+  # Payment (docs/microservices/api-gateway-basics.md). Traefik reads its routes from
+  # labels on each service, via the Docker socket (read-only). Only services that opt
+  # in with `traefik.enable=true` are exposed.
+  gateway:
+    image: traefik:v3.1.2
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      # dev only: the dashboard on :8081, unauthenticated -- never in production
+      - --api.dashboard=true
+      - --api.insecure=true
+    ports:
+      - "8080:80"     # the API, for the browser
+      - "8081:8080"   # Traefik's dashboard (dev)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
   app:
     build: .
+    # BOOK-67: the gateway's catch-all -- every path Payment doesn't claim goes to
+    # Booking. Lowest priority, so more specific routes always win. Except
+    # /internal/*: no route matches it, so the gateway answers 404 and it's never
+    # reachable from outside. Payment calls it directly on the network (app:8000).
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.booking.entrypoints=web
+      - traefik.http.routers.booking.rule=PathPrefix(`/`) && !PathPrefix(`/internal`)
+      - traefik.http.routers.booking.priority=1
+      - traefik.http.services.booking.loadbalancer.server.port=8000
+      - traefik.http.routers.booking.middlewares=cors
+      # CORS for the local frontend, once, at the gateway -- defined here, used by
+      # both routers. The apps no longer add CORS headers themselves.
+      - traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=http://localhost:5173,http://127.0.0.1:5173
+      - traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,POST,PUT,PATCH,DELETE,OPTIONS
+      - traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Authorization,Content-Type,Idempotency-Key
+      - traefik.http.middlewares.cors.headers.accesscontrolmaxage=600
+      - traefik.http.middlewares.cors.headers.addvaryheader=true
     environment:
       APP_NAME: BookIt
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
-      # BOOK-65: Payment's own database (container hostname, not localhost)
-      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
-      # BOOK-66: Payment (still inside this app) reaches Booking's /internal
-      # routes by service name -- today that's this same container
-      BOOKING_BASE_URL: http://app:8000
+      # BOOK-67: behind the gateway every request comes from the gateway's IP -- trust
+      # its X-Forwarded-For so request.client.host is the real client again (per-IP
+      # rate limits, login lockout). Safe only because nothing reaches this app except
+      # through the gateway (no published port, step 5).
+      FORWARDED_ALLOW_IPS: "*"
     ports:
       - "8000:8000"
     depends_on:
-      payment-migrate:
-        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -178,8 +213,6 @@ services:
       # BOOK-46: the first real DB-touching job landed, so this is now needed
       # -- see the comment this replaces, above the `app` service.
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
-      # BOOK-65: Payment's own database (container hostname, not localhost)
-      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # BOOK-45: container networking needs the service name, not `localhost`
       # -- same reason DATABASE_URL above isn't Settings' own default either.
       SMTP_HOST: mailhog
@@ -187,8 +220,6 @@ services:
       # internal PLAINTEXT listener (`kafka:9092`), not the host-published one.
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
-      payment-migrate:
-        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       db:
@@ -361,6 +392,13 @@ services:
       context: .
       dockerfile: services/payment/Dockerfile
     command: uvicorn payment.main:app --host 0.0.0.0 --port 8001
+    # BOOK-67: the gateway sends /payments/* here (POST /payments, the webhook)
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.payment.entrypoints=web
+      - traefik.http.routers.payment.rule=PathPrefix(`/payments`)
+      - traefik.http.services.payment.loadbalancer.server.port=8001
+      - traefik.http.routers.payment.middlewares=cors
     environment:
       PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # the sync reservation read (BOOK-66) -- Booking by service name

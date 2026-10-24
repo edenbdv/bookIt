@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.cache.rate_limit_middleware import RateLimitMiddleware
 from app.core.config import get_settings
@@ -14,18 +13,8 @@ def create_app() -> FastAPI:
     # separately, in its own route (sliding window, per-IP + per-email).
     app.add_middleware(RateLimitMiddleware)
 
-    # dev-only: lets the local React dev server (a different origin/port,
-    # Vite's default 5173) call this API from the browser. Tightened to
-    # explicit origins, not "*", even though it's dev-only -- "*" combined
-    # with allow_credentials would be rejected by browsers anyway, and being
-    # explicit costs nothing here.
-    if settings.environment == "development":
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # (BOOK-67: CORS is the gateway's job now -- docker-compose.yml, the `cors`
+    # middleware. Adding it here too would send the header twice, which browsers reject.)
 
     from app.auth.router import router as auth_router
     from app.core.router import router as core_router

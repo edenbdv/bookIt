@@ -213,7 +213,7 @@ After a split, the frontend would have to know several addresses. A **gateway** 
 public entry point that routes each request to the right service (`/payments/*` →
 Payment, the rest → Booking), and is the natural place for CORS and for hiding
 internal routes. A **BFF** (backend-for-frontend) is a gateway that also reshapes or
-combines responses for one specific frontend.
+combines responses for one specific frontend. In depth: `api-gateway-basics.md`.
 
 ### 3.10 The strangler fig — migrate step by step
 
