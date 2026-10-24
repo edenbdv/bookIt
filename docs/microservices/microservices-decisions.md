@@ -541,8 +541,9 @@ after each.
     `pyproject.toml` (uv workspace member), Dockerfile and image (self-contained, checked
     in CI), compose services on it, the boundary test covering it both ways, unit tests in
     `services/payment/tests/`; cross-service tests stay in the root `tests/integration/`.
-- **Left (small):** cleanup jobs in `payment-scheduler` for expired
-  `payment_idempotency_keys` and published `payment_outbox_events`.
+  - **Housekeeping** in `payment-scheduler`, daily: published `payment_outbox_events`
+    older than 7 days and expired `payment_idempotency_keys` (`payment/cleanup.py`) —
+    the same two jobs Booking runs for its own tables.
 
 ## 12. Payment's own outbox and `payment-events`
 

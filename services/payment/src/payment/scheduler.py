@@ -2,7 +2,7 @@
 
     uv run python -m payment.scheduler
 
-A simple loop, not Celery (microservices-decisions.md §20): Payment has two fixed
+A simple loop, not Celery (microservices-decisions.md §20): Payment has a few fixed
 periodic jobs and no on-demand tasks. One asyncio.run() for the process's whole
 lifetime, so one engine for every run. Run ONE instance -- two would run each job
 twice (harmless, just wasteful).
@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from confluent_kafka import Producer
 
-from payment import relay, service
+from payment import cleanup, relay, service
 from payment.config import get_payment_settings
 from payment.db import PaymentUnitOfWork, get_payment_engine
 
@@ -44,11 +44,25 @@ def make_jobs(producer: Producer) -> list[Job]:
         async with PaymentUnitOfWork() as uow:
             await service.reconcile_stale_payments(uow, datetime.now(UTC) - STALE_PAYMENT_THRESHOLD)
 
+    async def delete_published_events() -> None:
+        async with PaymentUnitOfWork() as uow:
+            deleted = await cleanup.delete_published_events(uow)
+        logger.info("Deleted %d published payment events", deleted)
+
+    async def delete_expired_keys() -> None:
+        async with PaymentUnitOfWork() as uow:
+            deleted = await cleanup.delete_expired_keys(uow)
+        logger.info("Deleted %d expired payment idempotency keys", deleted)
+
     return [
         # same cadences as Booking's beat had: the relay's delay is user-facing
         # (how long until a reservation is confirmed), reconcile isn't
         Job("publish-payment-events", timedelta(seconds=5), publish_events),
         Job("reconcile-stale-payments", timedelta(seconds=60), reconcile),
+        # housekeeping, daily -- Booking's equivalents run at night on a crontab; here
+        # once a day from start is enough, both are safe to run at any time
+        Job("delete-published-payment-events", timedelta(days=1), delete_published_events),
+        Job("delete-expired-payment-keys", timedelta(days=1), delete_expired_keys),
     ]
 
 
