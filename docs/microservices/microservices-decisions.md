@@ -687,6 +687,59 @@ the reservation id from the request or the event and stores it on its own rows (
 - **A unit of work, not a bare session** — Payment's code already passes `uow` through
   its layers (`uow.payments`, `uow.session`); `PaymentUnitOfWork` keeps that shape.
 
+### Copying the history (`app/payment/copy_from_booking.py`)
+
+**Chosen:** a one-off module, not part of `migrate.py` — `migrate.py` is permanent, the
+copy only exists during the move and is **deleted at the contract step**.
+
+| From `bookit` | To `payments` |
+|---|---|
+| `payments` | `payments` — all rows |
+| `idempotency_keys` | `payment_idempotency_keys` — only rows with a `payment_id`; reservation keys stay |
+| `payment_outbox_events` | `payment_outbox_events` — all, **including unpublished** |
+| `processed_booking_events` | `processed_booking_events` — all |
+
+- **Repeatable:** every insert is `ON CONFLICT DO NOTHING`, so a second run copies nothing.
+  Run it now, and once more at the switch.
+- **All or nothing:** one transaction on the target for all four tables.
+- **Order:** `payments` before `payment_idempotency_keys` (its FK).
+- **Plain SQL over asyncpg**, no ORM — two connections, rows in, rows out.
+- **Unpublished outbox rows** go too: after the switch Payment's relay sends them from the
+  new DB. If the old relay already sent one, Kafka gets a duplicate — Booking's Inbox
+  skips it.
+
+**At the switch:** a payment written between the last copy and the code switch would be
+missed. So: stop `app`, `worker` and `payment-consumer`, run the copy a final time, start
+them on the new code. A few seconds of downtime in dev. **Revisit when:** downtime isn't
+acceptable — then dual writes or change-data-capture (CDC) instead of a stop-and-copy.
+
+**Checked on dev:** 30 payments, 4 payment keys, 5 outbox events, 1 Inbox row copied; a
+second run copied 0; a checksum over every `payments` row matches in both databases.
+
+### What production would do instead
+
+Same plan (copy → switch → contract later); the copy and switch must stop payments for
+seconds at most, or only in a planned window.
+
+| Approach | How | Pause | Cost |
+|---|---|---|---|
+| **Maintenance window** (what dev does) | Announce it, stop payment endpoints, copy, verify, start on new code | Minutes, grows with data | Simplest, safest |
+| **Postgres logical replication** | `bookit` *publishes* the tables, `payments` *subscribes* — changes stream continuously; at cutover pause writes, wait to catch up, switch, end the subscription | Seconds | Setup + permissions; Postgres → Postgres only |
+| **Dual writes / CDC** | Code writes to both DBs (or a CDC tool such as Debezium replays the old DB's change log), backfill old rows, switch reads, then stop writing the old one | None | Most work; two writes can drift apart; more infrastructure |
+
+**For BookIt's size:** logical replication — or a short window at night, if minutes of
+downtime are fine.
+
+**Also different in production:**
+
+- **Separate database servers**, not two databases on one Postgres — Payment's gets its
+  own server, backups and access rules (part of why Payment splits at all: PCI-DSS, §0).
+- **Verify before switching** — row counts and a checksum per table, like the md5 above.
+- **A rollback plan** — the old tables stay until there's confidence; that's why
+  *contract* is its own, later step (sometimes weeks later).
+- **A feature flag for the switch** — point the code back at the old database without a
+  redeploy if something goes wrong.
+
 ---
 
 ## Cheat sheet
