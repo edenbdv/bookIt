@@ -74,12 +74,13 @@ until that file is run by `upgrade`.
 | Step | Model / catalog | Session (which DB) | Migrations | Tables in `bookit` |
 |---|---|---|---|---|
 | Before | On Booking's `Base`, with FK + relationship | Booking's `UnitOfWork` → `bookit` | Booking's | Exist, with FK |
-| **2a.1 (done)** | On **`PaymentBase`**, no FK, no relationship | Still Booking's → `bookit` | Booking's no longer sees them | **Unchanged** |
-| 2a.2 / 2b | Same | Still → `bookit` | **Payment's own** create them in `payments` (+ copy rows) | Unchanged |
-| 3 — switch | Same | **`PaymentUnitOfWork` → `payments`** | — | Unchanged, no longer used |
-| 4 — contract | Same | → `payments` | A Booking migration **drops** them | **Dropped** |
+| 2a.1 ✅ | On **`PaymentBase`**, no FK, no relationship | Still Booking's → `bookit` | Booking's no longer sees them | **Unchanged** |
+| 2a.2 / 2b ✅ | Same | Still → `bookit` | **Payment's own** create them in `payments` (+ copy rows) | Unchanged |
+| 3 — switch ✅ | Same | **`PaymentUnitOfWork` → `payments`** | — | Unchanged, no longer used |
+| 4 — contract ✅ | Same | → `payments` | A Booking migration **drops** them | **Dropped** |
 
-Between 2a.1 and step 4, Booking's `alembic --autogenerate` sees tables in `bookit` that
+(All four steps are done — the contract migration is `8b4228f69ed7`.) Between 2a.1 and
+step 4, Booking's `alembic --autogenerate` saw tables in `bookit` that
 no model in its catalog describes — and proposes `drop_table(...)` for them. **Delete
 those lines** from the generated file; the drop happens on purpose, at step 4, after the
 copy.

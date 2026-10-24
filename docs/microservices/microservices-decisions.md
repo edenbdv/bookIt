@@ -532,7 +532,7 @@ after each.
   becomes a refund (§15); the frontend polls (§16).
 - **Next:** Payment's consumer for `booking-events`; remove the saga's direct calls
   (tie 1); refunds on `BookingCancelled` (tie 2); a sync call + service auth for the
-  reservation read (tie 3, BOOK-66 — done, §17); own database (tie 4, §18); extract to
+  reservation read (tie 3, BOOK-66 — done, §17); own database (tie 4 — done, §18); extract to
   `services/payment/` with its own scheduler (ties 5–6).
 
 ## 12. Payment's own outbox and `payment-events`
@@ -687,7 +687,7 @@ the reservation id from the request or the event and stores it on its own rows (
 - **A unit of work, not a bare session** — Payment's code already passes `uow` through
   its layers (`uow.payments`, `uow.session`); `PaymentUnitOfWork` keeps that shape.
 
-### Copying the history (`app/payment/copy_from_booking.py`)
+### Copying the history (`app/payment/copy_from_booking.py` — deleted at contract, see git history)
 
 **Chosen:** a one-off module, not part of `migrate.py` — `migrate.py` is permanent, the
 copy only exists during the move and is **deleted at the contract step**.
@@ -715,6 +715,12 @@ acceptable — then dual writes or change-data-capture (CDC) instead of a stop-a
 
 **Checked on dev:** 30 payments, 4 payment keys, 5 outbox events, 1 Inbox row copied; a
 second run copied 0; a checksum over every `payments` row matches in both databases.
+
+**Done on dev:** stop → final copy (0 new rows, checksums equal) → start on the new
+code; a live payment then landed only in `payments` (31 rows vs. 30 frozen in
+`bookit`). Contract: migration `8b4228f69ed7` dropped the old tables, the
+`idempotency_keys.payment_id` column and the three enums from `bookit`; the copy
+module was deleted. Booking's `alembic check` is clean again.
 
 ### What production would do instead
 

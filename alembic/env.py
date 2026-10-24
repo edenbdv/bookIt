@@ -22,10 +22,8 @@ import app.core.outbox.models
 # app/notification/alembic.ini. Booking's migrations never see them.)
 #
 # BOOK-65: same for Payment -- its models register on PaymentBase
-# (app/payment/db.py) and get their own migrations. Until the contract step drops
-# the old tables, Booking's DB still has payments / payment_outbox_events /
-# processed_booking_events, so `--autogenerate` here proposes DROPPING them:
-# delete those lines from any generated revision until then.
+# (app/payment/db.py) with their own migrations (app/payment/alembic.ini); the old
+# copies in this database were dropped by 8b4228f69ed7.
 import app.property.models
 import app.reservation.inbox
 import app.reservation.models
