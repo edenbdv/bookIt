@@ -19,9 +19,9 @@ from confluent_kafka import Consumer, Producer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox.relay import make_producer
 from app.payment import relay
+from app.payment.db import PaymentUnitOfWork
 from app.payment.provider import PaymentOutcome
 from app.payment.service import create_payment
 from app.reservation import payment_consumer
@@ -92,11 +92,11 @@ async def test_a_succeeded_charge_confirms_the_reservation_through_kafka(
     dead_letter,
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
-    async with UnitOfWork() as uow:  # commits the SUCCEEDED status + its outbox row
+    async with PaymentUnitOfWork() as uow:  # commits the SUCCEEDED status + its outbox row
         await create_payment(uow, reservation.id, guest.id, force=PaymentOutcome.SUCCESS)
     assert await reservation_status(db_session, reservation) == ReservationStatus.PENDING
 
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await relay.publish_pending_payment_events(uow, make_producer())
 
     async def confirmed() -> bool:
