@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
-from app.core.db.unit_of_work import UnitOfWork
+from app.payment.db import PaymentUnitOfWork
 from app.payment.models import Payment, PaymentEventType, PaymentOutboxEvent, PaymentStatus
 from app.payment.provider import PaymentOutcome
 from app.payment.schemas import PaymentCreate
@@ -30,15 +30,17 @@ async def pending_reservation(db_session: AsyncSession) -> tuple[Reservation, Us
 
 
 # column selects -- read fresh from the DB, not the session's identity map
-async def _payment_status(db_session: AsyncSession, reservation: Reservation) -> list[tuple]:
-    result = await db_session.execute(
+async def _payment_status(
+    payment_db_session: AsyncSession, reservation: Reservation
+) -> list[tuple]:
+    result = await payment_db_session.execute(
         select(Payment.id, Payment.status).where(Payment.reservation_id == reservation.id)
     )
     return list(result.all())
 
 
-async def _events(db_session: AsyncSession, reservation: Reservation) -> list[tuple]:
-    result = await db_session.execute(
+async def _events(payment_db_session: AsyncSession, reservation: Reservation) -> list[tuple]:
+    result = await payment_db_session.execute(
         select(PaymentOutboxEvent.event_type, PaymentOutboxEvent.payload).where(
             PaymentOutboxEvent.reservation_id == reservation.id
         )
@@ -57,6 +59,7 @@ async def _events(db_session: AsyncSession, reservation: Reservation) -> list[tu
 async def test_a_resolved_charge_commits_its_event_with_its_status(
     app_db: None,
     db_session: AsyncSession,
+    payment_db_session: AsyncSession,
     pending_reservation: tuple[Reservation, User],
     outcome: PaymentOutcome,
     status: PaymentStatus,
@@ -64,7 +67,7 @@ async def test_a_resolved_charge_commits_its_event_with_its_status(
 ) -> None:
     reservation, guest = pending_reservation
 
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
@@ -73,9 +76,9 @@ async def test_a_resolved_charge_commits_its_event_with_its_status(
             force=outcome,
         )
 
-    [(payment_id, payment_status)] = await _payment_status(db_session, reservation)
+    [(payment_id, payment_status)] = await _payment_status(payment_db_session, reservation)
     assert payment_status == status
-    [(saved_type, payload)] = await _events(db_session, reservation)
+    [(saved_type, payload)] = await _events(payment_db_session, reservation)
     assert saved_type == event_type
     assert payload["payment_id"] == str(payment_id)
 
@@ -85,7 +88,10 @@ async def test_a_resolved_charge_commits_its_event_with_its_status(
 # split), and nothing has been decided yet to tell Booking about.
 @pytest.mark.anyio
 async def test_a_charge_left_pending_has_no_event(
-    app_db: None, db_session: AsyncSession, pending_reservation: tuple[Reservation, User]
+    app_db: None,
+    db_session: AsyncSession,
+    payment_db_session: AsyncSession,
+    pending_reservation: tuple[Reservation, User],
 ) -> None:
     reservation, guest = pending_reservation
 
@@ -93,24 +99,27 @@ async def test_a_charge_left_pending_has_no_event(
         patch("app.payment.service.charge", side_effect=RuntimeError("simulated crash")),
         pytest.raises(RuntimeError),
     ):
-        async with UnitOfWork() as uow:
+        async with PaymentUnitOfWork() as uow:
             await pay_reservation(
                 uow, PaymentCreate(reservation_id=reservation.id), guest.id, str(uuid.uuid4())
             )
 
-    [(_, payment_status)] = await _payment_status(db_session, reservation)
+    [(_, payment_status)] = await _payment_status(payment_db_session, reservation)
     assert payment_status == PaymentStatus.PENDING
-    assert await _events(db_session, reservation) == []
+    assert await _events(payment_db_session, reservation) == []
 
 
 # the webhook/reconcile path: PENDING -> resolved later, and only then does
 # the event appear -- committed by resolve_payment's own commit
 @pytest.mark.anyio
 async def test_resolving_a_pending_charge_later_commits_its_event(
-    app_db: None, db_session: AsyncSession, pending_reservation: tuple[Reservation, User]
+    app_db: None,
+    db_session: AsyncSession,
+    payment_db_session: AsyncSession,
+    pending_reservation: tuple[Reservation, User],
 ) -> None:
     reservation, guest = pending_reservation
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
@@ -118,14 +127,14 @@ async def test_resolving_a_pending_charge_later_commits_its_event(
             str(uuid.uuid4()),
             force=PaymentOutcome.TIMEOUT,
         )
-    [(payment_id, _)] = await _payment_status(db_session, reservation)
-    assert await _events(db_session, reservation) == []  # nothing yet
+    [(payment_id, _)] = await _payment_status(payment_db_session, reservation)
+    assert await _events(payment_db_session, reservation) == []  # nothing yet
 
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await resolve_payment(uow, payment_id, PaymentOutcome.SUCCESS)
 
-    [(_, payment_status)] = await _payment_status(db_session, reservation)
+    [(_, payment_status)] = await _payment_status(payment_db_session, reservation)
     assert payment_status == PaymentStatus.SUCCEEDED
-    [(saved_type, payload)] = await _events(db_session, reservation)
+    [(saved_type, payload)] = await _events(payment_db_session, reservation)
     assert saved_type == PaymentEventType.PAYMENT_SUCCEEDED
     assert payload["payment_id"] == str(payment_id)

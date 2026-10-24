@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from confluent_kafka import Producer
 from sqlalchemy import select
 
-from app.core.db.unit_of_work import UnitOfWork
+from app.payment.db import PaymentUnitOfWork
 from app.payment.models import PaymentOutboxEvent
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 TOPIC = "payment-events"
 
 
-async def publish_pending_payment_events(uow: UnitOfWork, producer: Producer) -> None:
+async def publish_pending_payment_events(uow: PaymentUnitOfWork, producer: Producer) -> None:
     """Publish every unpublished row, oldest first, then mark only the ones
     Kafka actually confirmed -- at-least-once: an unmarked row just gets
     retried next cycle. Keyed by reservation_id, so one reservation's

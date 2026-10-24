@@ -5,17 +5,15 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
-from app.core.db.unit_of_work import UnitOfWork
-from app.core.idempotency.models import (
-    IDEMPOTENCY_KEY_TTL_HOURS,
-    IdempotencyKey,
-    IdempotencyKeyStatus,
-)
 from app.payment import booking_client
 from app.payment.booking_client import BookingReservationStatus
+from app.payment.db import PaymentUnitOfWork
 from app.payment.models import (
+    PAYMENT_IDEMPOTENCY_KEY_TTL_HOURS,
     Payment,
     PaymentEventType,
+    PaymentIdempotencyKey,
+    PaymentIdempotencyKeyStatus,
     PaymentKind,
     PaymentOutboxEvent,
     PaymentStatus,
@@ -98,7 +96,7 @@ _STATUS_TO_EVENT_TYPE: dict[PaymentStatus, PaymentEventType] = {
 }
 
 
-async def emit_payment_event(uow: UnitOfWork, payment: Payment) -> None:
+async def emit_payment_event(uow: PaymentUnitOfWork, payment: Payment) -> None:
     # PENDING has no outcome yet; a refund's result doesn't drive the reservation
     if payment.kind != PaymentKind.CHARGE or payment.status == PaymentStatus.PENDING:
         return
@@ -122,7 +120,7 @@ async def emit_payment_event(uow: UnitOfWork, payment: Payment) -> None:
 
 
 async def create_payment(
-    uow: UnitOfWork,
+    uow: PaymentUnitOfWork,
     reservation_id: uuid.UUID,
     current_user_id: uuid.UUID,
     *,
@@ -172,7 +170,7 @@ async def create_payment(
 
 
 async def create_payment_idempotent(
-    uow: UnitOfWork,
+    uow: PaymentUnitOfWork,
     data: PaymentCreate,
     current_user_id: uuid.UUID,
     idempotency_key: str,
@@ -181,9 +179,10 @@ async def create_payment_idempotent(
 ) -> Payment:
     # try to claim this key -- the PK constraint is what actually closes
     # the concurrent-duplicate-key race
-    key_row = IdempotencyKey(
+    # BOOK-65: Payment's own table -- no longer the shared idempotency_keys
+    key_row = PaymentIdempotencyKey(
         key=idempotency_key,
-        expires_at=datetime.now(UTC) + timedelta(hours=IDEMPOTENCY_KEY_TTL_HOURS),
+        expires_at=datetime.now(UTC) + timedelta(hours=PAYMENT_IDEMPOTENCY_KEY_TTL_HOURS),
     )
     uow.session.add(key_row)
     try:
@@ -191,8 +190,8 @@ async def create_payment_idempotent(
     except IntegrityError:
         # key already exists -- this is a retry, not a first attempt
         await uow.session.rollback()
-        existing = await uow.session.get(IdempotencyKey, idempotency_key)
-        if existing.status == IdempotencyKeyStatus.COMPLETED:
+        existing = await uow.session.get(PaymentIdempotencyKey, idempotency_key)
+        if existing.status == PaymentIdempotencyKeyStatus.COMPLETED:
             existing_payment = await uow.payments.get_by_id(existing.payment_id)
             existing_reservation = await booking_client.get_reservation(
                 existing_payment.reservation_id
@@ -214,12 +213,14 @@ async def create_payment_idempotent(
     # COMPLETED means "this request attempt is done", not "payment succeeded" --
     # true on a TIMEOUT too, so a retry returns the same PENDING payment
     # instead of charging again (BOOK-55's webhook resolves it later)
-    key_row.status = IdempotencyKeyStatus.COMPLETED
+    key_row.status = PaymentIdempotencyKeyStatus.COMPLETED
     key_row.payment_id = payment.id
     return payment
 
 
-async def create_refund(uow: UnitOfWork, reservation_id: uuid.UUID, amount_cents: int) -> Payment:
+async def create_refund(
+    uow: PaymentUnitOfWork, reservation_id: uuid.UUID, amount_cents: int
+) -> Payment:
     """Mirror of create_payment(): commit the refund PENDING, then call the
     provider -- a crash mid-call still leaves a row to resolve (BOOK-55).
     Takes a reservation_id, not a Reservation: Payment won't have Booking's
@@ -245,7 +246,7 @@ async def create_refund(uow: UnitOfWork, reservation_id: uuid.UUID, amount_cents
 # from payment-events (reservation/payment_events.py), and a payment it can't
 # use comes back as booking_payment_rejected (payment/booking_events.py).
 async def pay_reservation(
-    uow: UnitOfWork,
+    uow: PaymentUnitOfWork,
     data: PaymentCreate,
     current_user_id: uuid.UUID,
     idempotency_key: str,
@@ -261,7 +262,7 @@ async def pay_reservation(
 
 
 async def resolve_payment(
-    uow: UnitOfWork, payment_id: uuid.UUID, outcome: PaymentOutcome
+    uow: PaymentUnitOfWork, payment_id: uuid.UUID, outcome: PaymentOutcome
 ) -> Payment:
     """BOOK-55: webhook entrypoint -- resolve a PENDING payment and commit its
     event. No-ops on an already-resolved payment (redelivery-safe)."""
@@ -279,7 +280,7 @@ async def resolve_payment(
 
 # BOOK-101: the pull counterpart to the webhook's push -- reuses
 # resolve_payment so both share the same redelivery-safe guarantee
-async def reconcile_stale_payments(uow: UnitOfWork, older_than: datetime) -> int:
+async def reconcile_stale_payments(uow: PaymentUnitOfWork, older_than: datetime) -> int:
     stale = await uow.payments.list_stale_pending(older_than)  # find stuck rows
     for payment in stale:
         outcome = provider_check_status(correlation_id=payment.id)  # ask the provider

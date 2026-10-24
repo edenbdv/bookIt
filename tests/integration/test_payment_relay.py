@@ -17,9 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.db.unit_of_work import UnitOfWork
 from app.core.outbox.relay import make_producer
 from app.payment import relay
+from app.payment.db import PaymentUnitOfWork
 from app.payment.models import PaymentOutboxEvent
 from app.payment.provider import PaymentOutcome
 from app.payment.schemas import PaymentCreate
@@ -42,7 +42,7 @@ def _isolated_topic() -> Iterator[str]:
 
 
 async def _run_relay() -> None:
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await relay.publish_pending_payment_events(uow, make_producer())
 
 
@@ -73,10 +73,11 @@ async def test_a_succeeded_charge_reaches_payment_events(
     app_db: None,
     kafka_bootstrap_servers: str,
     db_session: AsyncSession,
+    payment_db_session: AsyncSession,
     _isolated_topic: str,
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         payment = await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
@@ -95,7 +96,7 @@ async def test_a_succeeded_charge_reaches_payment_events(
     assert payload["payment_id"] == str(payment_id)
     assert payload["amount_cents"] == reservation.total_cents
     # marked published, so the next run doesn't send it again
-    published_at = await db_session.scalar(select(PaymentOutboxEvent.published_at))
+    published_at = await payment_db_session.scalar(select(PaymentOutboxEvent.published_at))
     assert published_at is not None
 
 
@@ -108,7 +109,7 @@ async def test_running_the_relay_again_publishes_nothing_new(
     _isolated_topic: str,
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
@@ -144,10 +145,10 @@ class _NeverConfirmsProducer:
 # message still waiting at flush's timeout was marked and lost for good
 @pytest.mark.anyio
 async def test_an_unconfirmed_event_stays_unpublished_and_is_retried(
-    app_db: None, db_session: AsyncSession
+    app_db: None, db_session: AsyncSession, payment_db_session: AsyncSession
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await pay_reservation(
             uow,
             PaymentCreate(reservation_id=reservation.id),
@@ -157,9 +158,9 @@ async def test_an_unconfirmed_event_stays_unpublished_and_is_retried(
         )
     producer = _NeverConfirmsProducer()
 
-    async with UnitOfWork() as uow:
+    async with PaymentUnitOfWork() as uow:
         await relay.publish_pending_payment_events(uow, producer)
 
     assert producer.produced == 1
-    published_at = await db_session.scalar(select(PaymentOutboxEvent.published_at))
+    published_at = await payment_db_session.scalar(select(PaymentOutboxEvent.published_at))
     assert published_at is None  # still pending -- the next run sends it again

@@ -44,8 +44,8 @@ def kafka_consumer(_isolated_topic: str) -> Iterator[Consumer]:
     kafka.close()
 
 
-async def _refunds(db_session: AsyncSession, reservation: Reservation) -> list[int]:
-    result = await db_session.scalars(
+async def _refunds(payment_db_session: AsyncSession, reservation: Reservation) -> list[int]:
+    result = await payment_db_session.scalars(
         select(Payment.amount_cents).where(
             Payment.reservation_id == reservation.id, Payment.kind == PaymentKind.REFUND
         )
@@ -58,6 +58,7 @@ async def test_a_payment_for_a_cancelled_reservation_is_refunded_through_kafka(
     app_db: None,
     kafka_bootstrap_servers: str,
     db_session: AsyncSession,
+    payment_db_session: AsyncSession,
     kafka_consumer: Consumer,
 ) -> None:
     # money taken, but the reservation's hold already expired
@@ -68,7 +69,9 @@ async def test_a_payment_for_a_cancelled_reservation_is_refunded_through_kafka(
         amount_cents=reservation.total_cents,
         status=PaymentStatus.SUCCEEDED,
     )
-    db_session.add(charge)
+    # the charge in Payment's database, the reservation in Booking's (BOOK-65)
+    payment_db_session.add(charge)
+    await payment_db_session.commit()
     await db_session.execute(
         update(Reservation)
         .where(Reservation.id == reservation.id)
@@ -95,7 +98,7 @@ async def test_a_payment_for_a_cancelled_reservation_is_refunded_through_kafka(
     dead_letter = booking_consumer.make_dead_letter(relay.make_producer())
     for _ in range(CONSUME_TIMEOUT_POLLS):
         await booking_consumer._process_one(kafka_consumer, dead_letter)
-        if await _refunds(db_session, reservation):
+        if await _refunds(payment_db_session, reservation):
             break
 
-    assert await _refunds(db_session, reservation) == [reservation.total_cents]
+    assert await _refunds(payment_db_session, reservation) == [reservation.total_cents]

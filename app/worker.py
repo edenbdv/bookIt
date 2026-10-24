@@ -15,6 +15,7 @@ from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
 from app.payment import relay as payment_relay
 from app.payment import service as payment_service
+from app.payment.db import PaymentUnitOfWork, get_payment_engine
 from app.reservation import service as reservation_service
 
 # BOOK-101: how long a payment sits PENDING before it's treated as stuck,
@@ -58,10 +59,15 @@ async def complete_past_reservations() -> None:
 async def reconcile_stale_payments() -> None:
     """BOOK-101: resolve PENDING payments the webhook never confirmed.
     Thin wrapper, same shape as expire_pending_reservations above."""
-    async with UnitOfWork() as uow:
-        await payment_service.reconcile_stale_payments(
-            uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
-        )
+    try:
+        async with PaymentUnitOfWork() as uow:
+            await payment_service.reconcile_stale_payments(
+                uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
+            )
+    finally:
+        # BOOK-65: async_task only disposes Booking's engine -- Payment's needs the
+        # same, or the next task's new event loop finds connections bound to this one
+        await get_payment_engine().dispose()
 
 
 @app.task
@@ -82,8 +88,11 @@ async def publish_payment_events() -> None:
     `payment-events`; logic lives in payment/relay.py. Runs here only while
     Payment is still inside the monolith."""
     producer = outbox_relay.make_producer()
-    async with UnitOfWork() as uow:
-        await payment_relay.publish_pending_payment_events(uow, producer)
+    try:
+        async with PaymentUnitOfWork() as uow:
+            await payment_relay.publish_pending_payment_events(uow, producer)
+    finally:
+        await get_payment_engine().dispose()  # same reason as reconcile_stale_payments
 
 
 @app.task

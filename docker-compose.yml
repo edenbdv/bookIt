@@ -134,6 +134,8 @@ services:
       APP_NAME: BookIt
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-65: Payment's own database (container hostname, not localhost)
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
       # BOOK-66: Payment (still inside this app) reaches Booking's /internal
@@ -142,6 +144,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -174,6 +178,8 @@ services:
       # BOOK-46: the first real DB-touching job landed, so this is now needed
       # -- see the comment this replaces, above the `app` service.
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-65: Payment's own database (container hostname, not localhost)
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # BOOK-45: container networking needs the service name, not `localhost`
       # -- same reason DATABASE_URL above isn't Settings' own default either.
       SMTP_HOST: mailhog
@@ -181,6 +187,8 @@ services:
       # internal PLAINTEXT listener (`kafka:9092`), not the host-published one.
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       db:
@@ -236,6 +244,21 @@ services:
         condition: service_healthy
     volumes:
       - ./services/notification/src:/code/services/notification/src
+
+  # BOOK-65: one-shot -- creates Payment's own `payments` database if missing,
+  # then runs Payment's migrations (app/payment/alembic.ini). Exits when done.
+  # Same image as `app` while Payment is still inside the monolith.
+  payment-migrate:
+    build: .
+    command: uv run --no-dev python -m app.payment.migrate
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/code
+      - /code/.venv
 
   # BOOK-51. Its own process, deliberately not folded into `worker` or run as
   # a Celery task -- a Kafka consumer group needs a real, continuously
@@ -307,8 +330,12 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-65: Payment's own database (container hostname, not localhost)
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       kafka:

@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
-from app.core.db.unit_of_work import UnitOfWork, get_uow
 from app.payment import service
 from app.payment.booking_client import BookingUnavailableError
+from app.payment.db import PaymentUnitOfWork, get_payment_uow
 from app.payment.models import Payment
 from app.payment.schemas import PaymentCreate, PaymentRead, PaymentWebhookPayload
 from app.payment.webhook_auth import InvalidWebhookSignatureError, verify_webhook_signature
@@ -18,7 +18,7 @@ async def create_payment(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     _rl: None = Depends(enforce_user_rate_limit),
-    uow: UnitOfWork = Depends(get_uow),
+    uow: PaymentUnitOfWork = Depends(get_payment_uow),
 ) -> Payment:
     try:
         return await service.pay_reservation(uow, data, current_user.id, idempotency_key)
@@ -65,7 +65,7 @@ async def create_payment(
 async def payment_webhook(
     request: Request,
     x_webhook_signature: str = Header(..., alias="X-Webhook-Signature"),
-    uow: UnitOfWork = Depends(get_uow),
+    uow: PaymentUnitOfWork = Depends(get_payment_uow),
 ) -> dict[str, str]:
     body = (
         await request.body()

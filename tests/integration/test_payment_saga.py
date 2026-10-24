@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.models import User
-from app.core.db.unit_of_work import UnitOfWork
+from app.payment.db import PaymentUnitOfWork
 from app.payment.models import PaymentKind, PaymentStatus
 from app.payment.schemas import PaymentCreate
 from app.payment.service import pay_reservation
@@ -35,7 +35,10 @@ async def pending_reservation(db_session: AsyncSession) -> tuple[Reservation, Us
 # correlation id) for the webhook/reconciliation to resolve later
 @pytest.mark.anyio
 async def test_crash_during_provider_call_leaves_a_pending_payment(
-    app_db: None, db_session: AsyncSession, pending_reservation: tuple[Reservation, User]
+    app_db: None,
+    db_session: AsyncSession,
+    payment_db_session: AsyncSession,
+    pending_reservation: tuple[Reservation, User],
 ) -> None:
     reservation, guest = pending_reservation
 
@@ -46,12 +49,14 @@ async def test_crash_during_provider_call_leaves_a_pending_payment(
         ),
         pytest.raises(RuntimeError),
     ):
-        async with UnitOfWork() as uow:
+        async with PaymentUnitOfWork() as uow:
             await pay_reservation(
                 uow, PaymentCreate(reservation_id=reservation.id), guest.id, "mid-call-crash"
             )
 
-    payments = [(kind, status) for _, kind, status in await payment_rows(db_session, reservation)]
+    payments = [
+        (kind, status) for _, kind, status in await payment_rows(payment_db_session, reservation)
+    ]
     assert payments == [(PaymentKind.CHARGE, PaymentStatus.PENDING)]
     # nothing reacted to an outcome nobody knows yet
     assert await reservation_status(db_session, reservation) == ReservationStatus.PENDING

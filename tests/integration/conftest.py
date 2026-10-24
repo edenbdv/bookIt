@@ -42,6 +42,8 @@ from app.core.cache.redis_client import get_redis_client
 from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
+from app.payment import migrate as payment_migrate
+from app.payment.db import get_payment_engine, get_payment_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,6 +98,9 @@ def _clear_cached_clients() -> None:
     get_notification_settings.cache_clear()
     get_notification_engine.cache_clear()
     get_notification_session_factory.cache_clear()
+    # BOOK-65: Payment's own engine, same reason
+    get_payment_engine.cache_clear()
+    get_payment_session_factory.cache_clear()
 
 
 # scope="session": starting a container + running every migration takes
@@ -122,6 +127,12 @@ def postgres_url() -> Iterator[str]:
             mp.setenv("NOTIFICATION_DATABASE_URL", url.rsplit("/", 1)[0] + "/notifications")
             _clear_cached_clients()
             notification_migrate.main()
+
+            # BOOK-65: Payment's own `payments` database, same way -- created and
+            # migrated by the script compose's payment-migrate runs
+            mp.setenv("PAYMENT_DATABASE_URL", url.rsplit("/", 1)[0] + "/payments")
+            _clear_cached_clients()
+            payment_migrate.main()
 
             yield url
 
@@ -180,6 +191,15 @@ async def notification_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine
     await engine.dispose()
 
 
+# BOOK-65: the test's own connection to Payment's database -- for setting up and
+# reading back payments, the way notification_db_engine does for Notification
+@pytest.fixture
+async def payment_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(get_settings().payment_database_url)
+    yield engine
+    await engine.dispose()
+
+
 async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
     async with engine.begin() as conn:
         tables = (
@@ -201,14 +221,17 @@ async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
 # (e.g. BOOK-55's commit split), which would end a wrapping transaction
 # early (testing-basics.md §3.4). Table list read from the catalog rather
 # than hardcoded, so a table added by a future migration is covered too.
-# BOOK-64: both databases -- Booking's and Notification's.
+# BOOK-64/65: every database -- Booking's, Notification's and Payment's.
 @pytest.fixture(autouse=True)
 async def _truncate_tables(
-    db_engine: AsyncEngine, notification_db_engine: AsyncEngine
+    db_engine: AsyncEngine,
+    notification_db_engine: AsyncEngine,
+    payment_db_engine: AsyncEngine,
 ) -> AsyncIterator[None]:
     yield
     await _truncate_all(db_engine, "alembic_version")
     await _truncate_all(notification_db_engine, "notification_alembic_version")
+    await _truncate_all(payment_db_engine, "payment_alembic_version")
 
 
 @pytest.fixture
@@ -216,6 +239,12 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     # expire_on_commit=False -- same as the app's own session factory
     # (core/db/engine.py), so objects stay readable after a commit
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+async def payment_db_session(payment_db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    async with AsyncSession(payment_db_engine, expire_on_commit=False) as session:
         yield session
 
 
@@ -241,6 +270,7 @@ async def app_db(postgres_url: str) -> AsyncIterator[None]:
     yield
     await get_engine().dispose()
     await get_notification_engine().dispose()
+    await get_payment_engine().dispose()
     _clear_cached_clients()
 
 

@@ -10,8 +10,8 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.idempotency.models import IdempotencyKey
 from app.payment import booking_client
+from app.payment.models import PaymentIdempotencyKey
 from tests.integration.helpers import auth_headers, make_pending_reservation, payment_rows
 
 
@@ -24,7 +24,7 @@ def _unreachable() -> httpx.AsyncClient:
 
 @pytest.mark.anyio
 async def test_booking_down_is_a_503_and_charges_nothing(
-    api_client: AsyncClient, db_session: AsyncSession
+    api_client: AsyncClient, db_session: AsyncSession, payment_db_session: AsyncSession
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
     headers = auth_headers(guest, idempotency_key="retry-me")
@@ -35,6 +35,9 @@ async def test_booking_down_is_a_503_and_charges_nothing(
         )
 
     assert response.status_code == 503
-    assert await payment_rows(db_session, reservation) == []  # no charge attempt at all
+    assert await payment_rows(payment_db_session, reservation) == []  # no charge attempt at all
     # the key rolled back with everything else -- a retry with it starts fresh
-    assert await db_session.scalar(select(func.count()).select_from(IdempotencyKey)) == 0
+    assert (
+        await payment_db_session.scalar(select(func.count()).select_from(PaymentIdempotencyKey))
+        == 0
+    )

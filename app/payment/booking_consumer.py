@@ -16,9 +16,8 @@ from datetime import UTC, datetime
 from confluent_kafka import Consumer, Producer
 
 from app.core.config import get_settings
-from app.core.db.engine import get_engine
-from app.core.db.unit_of_work import UnitOfWork
 from app.payment.booking_events import handle_booking_event
+from app.payment.db import PaymentUnitOfWork, get_payment_engine
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +79,8 @@ async def _process_one(consumer: Consumer, dead_letter: DeadLetter) -> None:
         logger.error("Kafka consumer error: %s", msg.error())
         return
     try:
-        # one UnitOfWork per message -- the Inbox row commits with the PENDING refund
-        async with UnitOfWork() as uow:
+        # one PaymentUnitOfWork per message -- the Inbox row commits with the PENDING refund
+        async with PaymentUnitOfWork() as uow:
             await handle_booking_event(uow, json.loads(msg.value()))
     except Exception as exc:
         # set aside and keep the queue moving; a failed DLQ publish raises
@@ -98,7 +97,7 @@ async def _run(consumer: Consumer, dead_letter: DeadLetter) -> None:
             await _process_one(consumer, dead_letter)
     finally:
         consumer.close()
-        await get_engine().dispose()
+        await get_payment_engine().dispose()
 
 
 def main() -> None:
