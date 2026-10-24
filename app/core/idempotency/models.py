@@ -30,9 +30,9 @@ class IdempotencyKey(Base):
         Enum(IdempotencyKeyStatus, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
         default=IdempotencyKeyStatus.PROCESSING,
     )
-    # reference to the result, not a stored response body
+    # reference to the result, not a stored response body. BOOK-65: reservation
+    # keys only -- payment keys moved to Payment's payment_idempotency_keys
     reservation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("reservations.id"))
-    payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payments.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # ~24h window (docs/db/idempotency-basics.md); swept by core/idempotency/cleanup.py
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

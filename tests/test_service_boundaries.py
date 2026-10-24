@@ -1,4 +1,5 @@
-"""BOOK-64 step 5b-3: the boundary between Booking and Notification, enforced.
+"""BOOK-64 step 5b-3, BOOK-65: the boundaries between Booking, Notification and
+Payment, enforced.
 
 Separate services don't import each other's code -- they talk through events
 (and share only the event contract). This test reads every Python file of
@@ -19,8 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # service -> (where its code lives, top-level packages it must never import)
 BOUNDARIES = {
-    "Booking": (REPO_ROOT / "app", {"notification"}),
-    "Notification": (REPO_ROOT / "services" / "notification" / "src", {"app"}),
+    "Booking": (REPO_ROOT / "app", {"notification", "payment"}),
+    "Notification": (REPO_ROOT / "services" / "notification" / "src", {"app", "payment"}),
+    # BOOK-65: Payment talks to Booking over HTTP and Kafka only
+    "Payment": (REPO_ROOT / "services" / "payment" / "src", {"app", "notification"}),
 }
 
 

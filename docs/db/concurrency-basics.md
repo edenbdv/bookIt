@@ -179,7 +179,7 @@ Unlike an in-process Python lock, this **is** enforced by Postgres itself, so it
 **What this would actually look like in this codebase**, had `Payment`'s "at most one succeeded charge per reservation" rule been enforced this way instead of with the partial unique index — illustrative only, this is *not* what the codebase does:
 
 ```python
-# app/payment/service.py -- the manual-lock alternative we did NOT choose
+# services/payment/src/payment/service.py -- the manual-lock alternative we did NOT choose
 
 from sqlalchemy import select
 
@@ -225,7 +225,7 @@ async def charge_reservation(session, reservation_id, amount_cents: int) -> Paym
 - **The lock is held from step 1 all the way through `commit()` in step 3** — spanning the entire `payment_provider.charge()` network call. That's the "holding it across an external call" cost stated plainly: any other request trying to touch this reservation (even just to look at it with its own `FOR UPDATE`) queues up and waits for however long the payment provider takes to respond.
 - **Every single place that ever creates a `Payment`** — a retry job, a refund endpoint, a webhook handler for asynchronous provider callbacks, some future admin tool — has to reimplement this exact lock-then-check-then-insert sequence, in this order, correctly. Forget `.with_for_update()` in just one of them, and that one path has silently reintroduced the original race, indistinguishable from the paths that got it right.
 
-Compare that to what the codebase actually has: [`app/payment/models.py`](../../app/payment/models.py)'s `Index(..., unique=True, postgresql_where=...)`. Zero code in `service.py` to get right or forget — the rule is enforced the instant *any* row is written, including by code that doesn't know this rule exists.
+Compare that to what the codebase actually has: [`services/payment/src/payment/models.py`](../../services/payment/src/payment/models.py)'s `Index(..., unique=True, postgresql_where=...)`. Zero code in `service.py` to get right or forget — the rule is enforced the instant *any* row is written, including by code that doesn't know this rule exists.
 
 **So why isn't `FOR UPDATE` the default answer, if it genuinely works across processes?** Two real costs, illustrated above:
 

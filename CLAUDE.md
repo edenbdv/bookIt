@@ -47,9 +47,10 @@ A model only gets picked up by autogenerate if its module is imported somewhere 
 
 ```bash
 uv run python -m app.core.db.seed
+uv run python -m payment.seed
 ```
 
-Idempotent — every seeded row has a fixed id, so re-running finds existing rows instead of duplicating them. Needs `alembic upgrade head` run first.
+Idempotent — every seeded row has a fixed id, so re-running finds existing rows instead of duplicating them. Needs `alembic upgrade head` (Booking) and `python -m payment.migrate` (Payment's own database, BOOK-65) run first.
 
 ### Lint / format
 
@@ -74,7 +75,7 @@ uv run python scripts/verify_no_overlapping_reservations.py
 
 ### Package by feature, not by layer
 
-Each domain module (`app/auth/`, `app/property/`, `app/reservation/`, `app/payment/`, `app/review/`) is a self-contained vertical slice with the identical internal shape:
+Each domain module (`app/auth/`, `app/property/`, `app/reservation/`, `services/payment/src/payment/`, `app/review/`) is a self-contained vertical slice with the identical internal shape:
 
 - `models.py` — SQLAlchemy ORM (the DB table)
 - `repository.py` — data access only; inherits `BaseRepository` (`core/db/repository.py`) for generic CRUD (`get_by_id`, `list`, `add`, `delete`), adds only module-specific queries

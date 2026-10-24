@@ -81,6 +81,18 @@ class ReservationCancelRead(ReservationRead):
     refund_amount_cents: int
 
 
+class ReservationInternalRead(BaseModel):
+    """BOOK-66: what Payment needs before charging (GET /internal/reservations/{id})
+    -- nothing else leaves Booking. Narrow on purpose: it's a cross-service contract."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    guest_id: uuid.UUID
+    status: ReservationStatus
+    total_cents: int
+
+
 class ReservationUpdate(BaseModel):
     # only guest_count is a plain field edit. Changing check_in/check_out
     # would need to re-run the overlap check the EXCLUDE constraint

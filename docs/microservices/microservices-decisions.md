@@ -506,6 +506,325 @@ workspace membership, Dockerfile pattern and boundary test (add it to `BOUNDARIE
 
 ---
 
+# BOOK-65 — Payment as its own service
+
+Flow and open points: `epic-11-flow.md`. This section records what was decided along
+the way.
+
+## 10. The starting point: Payment's ties to Booking
+
+| # | Coupling | Where |
+|---|---|---|
+| 1 | The saga confirms/cancels by calling Booking's functions | `payment/saga.py` — `confirm_reservation()`, `cancel_reservation_system()` |
+| 2 | Refunds on cancel are a direct call from Booking's cancel endpoints | `payment/cancellation.py` |
+| 3 | Payment reads the reservation from Booking's table | `payment/service.py` — `uow.reservations` |
+| 4 | A foreign key into Booking's table | `payments.reservation_id` |
+| 5 | Its jobs (reconcile) run in Booking's Celery worker | `app/worker.py` |
+| 6 | Same image, same database | `docker-compose.yml` |
+
+## 11. The plan, and where it stands
+
+Same approach as BOOK-64: small steps, still inside the monolith first, the app works
+after each.
+
+- **Done:**
+  - **Events:** Payment's own outbox + `payment-events` (§12); Booking consumes it (§13);
+    the relay bug and `kafka-init` (§14); a payment for an already-cancelled reservation
+    becomes a refund (§15); the frontend polls (§16); refunds on `booking_cancelled` via
+    Payment's consumer, the saga's direct calls removed (ties 1–2).
+  - **Sync call + service auth** for the reservation read (tie 3, BOOK-66, §17).
+  - **Own database** (tie 4, §18).
+  - **Own process:** its own app on :8001 and its own scheduler (§20); Booking serves no
+    `/payments` and runs no payment jobs (tie 5); the guest's token checked by Payment
+    itself until the gateway (§19). Booking's and Payment's code import nothing of each other.
+  - **Packaged** as `services/payment/` (tie 6), same as Notification (§9): own
+    `pyproject.toml` (uv workspace member), Dockerfile and image (self-contained, checked
+    in CI), compose services on it, the boundary test covering it both ways, unit tests in
+    `services/payment/tests/`; cross-service tests stay in the root `tests/integration/`.
+  - **Housekeeping** in `payment-scheduler`, daily: published `payment_outbox_events`
+    older than 7 days and expired `payment_idempotency_keys` (`payment/cleanup.py`) —
+    the same two jobs Booking runs for its own tables.
+
+## 12. Payment's own outbox and `payment-events`
+
+**Chosen:** its own `payment_outbox_events` table and its own relay
+(`payment/relay.py`), not Booking's `outbox_events` with a topic column. A resolved
+**charge** writes `payment_succeeded` / `payment_failed` in the same transaction as its
+status — right after charging, and on webhook/reconcile. PENDING (a timeout) and
+refunds write nothing: there's no outcome yet, and a refund changes no reservation.
+
+- Own table: it moves with Payment's own database later; no FK to `reservations`.
+- Own relay copy: Payment can't import Booking's once extracted.
+- Key = `reservation_id`: one reservation's events stay in order. 3 partitions.
+
+## 13. Booking consumes `payment-events`
+
+**Chosen:** a `booking-consumer` process (group `booking`), its own Inbox
+(`processed_payment_events`), DLQ `payment-events.dlq`. The Inbox row and the
+confirm/cancel are **one transaction** — stronger than Notification's (§7), whose side
+effect (an email) can't share one. No retry loop: no flaky external call here.
+
+It only acts on a `pending` reservation. While the saga's direct call still runs, the
+event usually arrives after it already confirmed — a no-op, so both paths can run side
+by side until the switch-over.
+
+## 14. A bug found: "not failed yet" is not "published"
+
+Both relays marked every row that hadn't *failed* by `flush(timeout=30)`. A message
+still waiting then — topic missing, broker slow or down — has had no delivery callback
+at all, so it was marked and **lost**. Found when `payment-events` didn't exist.
+
+**Fix:** mark only rows Kafka *confirmed* (`err is None` in the callback); anything
+unconfirmed is retried next run. A retry may duplicate a message — fine, every
+consumer dedups on `event_id`. Tests use a producer that never confirms; testcontainers'
+Kafka auto-creates topics, which is why the bug never showed there.
+
+**`kafka-init`:** auto-create is off on purpose (BOOK-48), but topics were created by
+hand once per machine — `payment-events` and both `.dlq` topics never were. A one-shot
+compose service now creates every topic with `--if-not-exists`; consumers and the
+worker wait for it.
+
+## 15. A payment for an already-cancelled reservation
+
+A charge can resolve *after* its reservation's hold expired (a timeout, reconcile
+minutes later). Checking "pending" before charging can't prevent it — across services
+it can only be made rare, so it needs compensation.
+
+**Chosen:** Booking's handler writes `booking_payment_rejected` (`payment_id`,
+`amount_cents`) to its outbox, in the same transaction as its Inbox row. Payment's
+handler (`payment/booking_events.py`) refunds it in full:
+
+- **Amount from Payment's own charge row**, not the event — Payment is the source of
+  truth for what it charged.
+- **Inbox row added before `create_refund()`**, so it commits together with the PENDING
+  refund row, before the provider call. A crash mid-call can't cause a second refund on
+  redelivery; reconcile finishes the PENDING one.
+- **Inbox rows only for events with an effect** — the other `booking-events` types are
+  skipped without one.
+
+`create_refund()` now takes a `reservation_id`, not a `Reservation`.
+
+## 16. The frontend polls the reservation
+
+`BookingForm` and `MyBookings` used to derive the reservation's status from the
+payment's response. Once Booking confirms from an event, "payment succeeded" no longer
+means "reservation confirmed", so both always poll `GET /reservations/{id}` after
+paying. The first check is immediate, so nothing feels slower before the switch-over.
+
+## 17. Reading the reservation before charging: a sync call, not a local copy
+
+Before charging, `POST /payments` needs three things that Booking owns: **who the guest
+is** (only they may pay), the **status** (only `pending` is payable) and
+**`total_cents`** (how much to charge). Today Payment reads them straight from Booking's
+table (`uow.reservations`); with its own database it can't.
+
+**Chosen:** a **sync call** to Booking (`GET /internal/reservations/{id}`, service-auth
+per BOOK-66) — not a local copy of reservations kept up to date from `booking-events`.
+
+**Why a local copy works for Notification but not here** — it's not about being a
+consumer (Payment consumes `booking-events` too, for refunds); it's about what the data
+is *for*:
+
+| | Notification (and Payment's refunds) | Payment, before charging |
+|---|---|---|
+| What it does | **Reports** something that already happened | **Decides** something now — may this person pay, and how much |
+| Data it needs | A snapshot **as of the event** — exactly what the event carries | The **current** state — a few seconds old can be wrong |
+| Who's waiting | Nobody; 5 s late is fine | The guest, on the HTTP response |
+| When it arrives | After the event, by definition | Often *before* any event could — book, then pay at once |
+
+With a local copy instead:
+
+- **Book-then-pay race:** the guest pays half a second after booking, but `booking_created`
+  takes up to ~5 s (relay) to reach Payment → "reservation not found".
+- **Stale status:** the hold expired a second ago, Booking cancelled it, the event hasn't
+  arrived → Payment's copy still says `pending` and charges a cancelled reservation — then
+  refunds it via `booking_payment_rejected` (§15). Money out and back for nothing.
+
+**Rule of thumb:** *react* to something that happened → the event carries the data;
+*decide* something now while someone waits → ask the owner synchronously. Same service,
+two needs: Payment's refund path uses events, its charge path uses the sync call.
+
+**Accepted trade-off:** if Booking is down, nobody can pay. Acceptable — nobody can book
+either. A local copy would let Payment keep charging while Booking is down, which isn't
+worth the two problems above.
+
+**Revisit when:** paying must work while Booking is down, or the call's latency becomes a
+problem — then a local copy plus a short wait/retry for the book-then-pay race.
+
+## 18. Payment's own database: the model catalog is not the database
+
+Same plan as Notification's (§8) — own database, own migrations, expand → switch →
+contract. What's specific to Payment, and one thing that's easy to misread:
+
+**`PaymentBase` doesn't decide which database is used.** Two separate things:
+
+| | Decides | Payment |
+|---|---|---|
+| The model catalog (`PaymentBase`, `services/payment/src/payment/db.py`) | Which **migrations** know the tables | Payment's own Alembic |
+| The session (engine → URL) | Which **database** queries go to | Booking's `UnitOfWork` → `bookit` until the switch, then `PaymentUnitOfWork` → `payments` |
+
+So moving `Payment`, `PaymentOutboxEvent` and `ProcessedBookingEvent` onto `PaymentBase`
+moved **nothing**: the code still queries the same tables in `bookit`.
+
+**A model doesn't have to describe every DB constraint.** The models already dropped
+`ForeignKey("reservations.id")` and the `Payment.reservation` ↔ `Reservation.payments`
+relationship, while `bookit` still has the FK. That's fine: a query only needs the
+**table and column names**, which are unchanged — the generated SQL is identical.
+Constraints matter to migrations and to the database itself; the DB keeps enforcing
+the FK, and every row the code writes still satisfies it. The model is already in its
+future shape; the database catches up at the contract step.
+
+The relationship was a Python-only shortcut (`reservation.payments` → a `SELECT`), never
+a column, and nothing used it. Across two databases it couldn't work anyway: Payment gets
+the reservation id from the request or the event and stores it on its own rows (§17).
+
+**Two ties it broke loose:**
+
+- `idempotency_keys.payment_id` had a **model-level** FK to `payments` — unresolvable once
+  `payments` left Booking's catalog (`NoReferencedTableError`). Removed from the model;
+  the column and DB constraint stay until payment keys move to their own table.
+- Booking's `alembic --autogenerate` no longer sees the three tables and **proposes
+  dropping them** — delete those lines from any generated revision until the contract
+  step (warning in `alembic/env.py`).
+
+**Specific to Payment, unlike Notification:**
+
+- **History must be copied** — charges are needed for future refunds; Notification's
+  Inbox could start empty.
+- **Idempotency keys split out** of the shared `idempotency_keys` into Payment's own
+  table — which also removes a latent collision: one key column for both reservation and
+  payment keys.
+- **A unit of work, not a bare session** — Payment's code already passes `uow` through
+  its layers (`uow.payments`, `uow.session`); `PaymentUnitOfWork` keeps that shape.
+
+### Copying the history (`services/payment/src/payment/copy_from_booking.py` — deleted at contract, see git history)
+
+**Chosen:** a one-off module, not part of `migrate.py` — `migrate.py` is permanent, the
+copy only exists during the move and is **deleted at the contract step**.
+
+| From `bookit` | To `payments` |
+|---|---|
+| `payments` | `payments` — all rows |
+| `idempotency_keys` | `payment_idempotency_keys` — only rows with a `payment_id`; reservation keys stay |
+| `payment_outbox_events` | `payment_outbox_events` — all, **including unpublished** |
+| `processed_booking_events` | `processed_booking_events` — all |
+
+- **Repeatable:** every insert is `ON CONFLICT DO NOTHING`, so a second run copies nothing.
+  Run it now, and once more at the switch.
+- **All or nothing:** one transaction on the target for all four tables.
+- **Order:** `payments` before `payment_idempotency_keys` (its FK).
+- **Plain SQL over asyncpg**, no ORM — two connections, rows in, rows out.
+- **Unpublished outbox rows** go too: after the switch Payment's relay sends them from the
+  new DB. If the old relay already sent one, Kafka gets a duplicate — Booking's Inbox
+  skips it.
+
+**At the switch:** a payment written between the last copy and the code switch would be
+missed. So: stop `app`, `worker` and `payment-consumer`, run the copy a final time, start
+them on the new code. A few seconds of downtime in dev. **Revisit when:** downtime isn't
+acceptable — then dual writes or change-data-capture (CDC) instead of a stop-and-copy.
+
+**Checked on dev:** 30 payments, 4 payment keys, 5 outbox events, 1 Inbox row copied; a
+second run copied 0; a checksum over every `payments` row matches in both databases.
+
+**Done on dev:** stop → final copy (0 new rows, checksums equal) → start on the new
+code; a live payment then landed only in `payments` (31 rows vs. 30 frozen in
+`bookit`). Contract: migration `8b4228f69ed7` dropped the old tables, the
+`idempotency_keys.payment_id` column and the three enums from `bookit`; the copy
+module was deleted. Booking's `alembic check` is clean again.
+
+### What production would do instead
+
+Same plan (copy → switch → contract later); the copy and switch must stop payments for
+seconds at most, or only in a planned window.
+
+| Approach | How | Pause | Cost |
+|---|---|---|---|
+| **Maintenance window** (what dev does) | Announce it, stop payment endpoints, copy, verify, start on new code | Minutes, grows with data | Simplest, safest |
+| **Postgres logical replication** | `bookit` *publishes* the tables, `payments` *subscribes* — changes stream continuously; at cutover pause writes, wait to catch up, switch, end the subscription | Seconds | Setup + permissions; Postgres → Postgres only |
+| **Dual writes / CDC** | Code writes to both DBs (or a CDC tool such as Debezium replays the old DB's change log), backfill old rows, switch reads, then stop writing the old one | None | Most work; two writes can drift apart; more infrastructure |
+
+**For BookIt's size:** logical replication — or a short window at night, if minutes of
+downtime are fine.
+
+**Also different in production:**
+
+- **Separate database servers**, not two databases on one Postgres — Payment's gets its
+  own server, backups and access rules (part of why Payment splits at all: PCI-DSS, §0).
+- **Verify before switching** — row counts and a checksum per table, like the md5 above.
+- **A rollback plan** — the old tables stay until there's confidence; that's why
+  *contract* is its own, later step (sometimes weeks later).
+- **A feature flag for the switch** — point the code back at the old database without a
+  redeploy if something goes wrong.
+
+## 19. Who is paying: Payment checks the guest's token itself — until the gateway
+
+`POST /payments` used Booking's `get_current_user`, which loads the user row from
+Booking's `users` table — out of reach once Payment is its own service.
+
+**Target (BOOK-67):** the gateway verifies the guest's token and passes the user id on;
+Payment trusts the gateway and holds no user-login secret.
+
+**Until then (chosen):** `services/payment/src/payment/auth.py`'s `get_guest_id` verifies the token
+**locally** — signature and `exp` with `SECRET_KEY`, `type == "access"` — and returns
+`sub`. No call to Booking: a JWT carries its own proof (`docs/auth/jwt-basics.md` §1).
+Booking *issues* tokens (needs users and passwords); anyone holding the secret can
+*verify* them.
+
+**Accepted trade-offs, all removed by the gateway:**
+
+- **Payment holds `SECRET_KEY`** — so it could also *mint* user tokens
+  (`docs/auth/service-token-basics.md` §8). RS256 would let it verify without being able
+  to forge.
+- **No deleted-user check** — `get_current_user` rejects a deleted user's still-valid
+  token by looking them up; Payment can't, so for up to 15 min (the access-token
+  lifetime) a deleted user could still pay. The sync call still checks the reservation is
+  theirs.
+- **No per-user rate limit on `POST /payments`** — `enforce_user_rate_limit` needs the
+  `User` row and lived in Booking's auth. Dropped until the gateway, the usual place for
+  it; Payment's idempotency key still absorbs double clicks and retries.
+
+**Handed to BOOK-67:** verify the guest JWT at the gateway and forward the user id;
+per-user rate limiting at the gateway; keep `/internal/*` unreachable from outside
+(BOOK-66); then remove `SECRET_KEY` and `get_guest_id`'s own check from Payment.
+
+## 20. Payment's scheduled jobs: a simple loop, not Celery
+
+Payment has two periodic jobs — its outbox relay (every 5 s) and reconcile (every 60 s) —
+which run in Booking's Celery worker only while Payment is inside the monolith.
+
+**Chosen:** its own `payment-scheduler` process — `while True`: run what's due, sleep —
+one `asyncio.run()` for the process's lifetime. Same reasoning as Notification's consumer
+being its own process (`worker-decisions.md` §12).
+
+| | Celery (Booking's) | A loop (`payment-scheduler`) |
+|---|---|---|
+| Processes | worker + beat | one |
+| Dependencies | a broker (RabbitMQ) | none beyond its DB and Kafka |
+| Code | task decorators, `async_task`, engine disposal per task, beat schedule | ~30 lines |
+| Fits | many jobs, **on-demand tasks** (`.delay()`), retries, many workers | a few **fixed periodic** jobs |
+
+**What the loop doesn't give, and why that's fine here:**
+
+- **One instance only** — two would run each job twice. Harmless (the relay is
+  at-least-once and consumers dedup on `event_id`; reconcile skips resolved payments), just
+  wasteful; scaling out would need a lock or leader election.
+- **No built-in retries or monitoring** — a failed run is logged; the next tick retries.
+- **One job at a time** — a slow reconcile delays the next relay run a little.
+
+**Why Booking keeps Celery:** it was chosen (Epic 7) for an **on-demand** task — the
+"reservation received" email via `.delay()`, with retries and a dead-letter queue — and as
+a learning goal. BOOK-64 moved that email to Kafka, so Booking's worker now only runs
+periodic jobs and a loop would do there too; but it's built, it works, it handles ~6
+schedules neatly, and it's ready if an on-demand task comes back. Not worth churning.
+
+**The rule:** the smallest tool that fits *this* service's needs — a loop for a new
+service with two fixed jobs; Celery where it's already earning its place.
+
+**Revisit when:** Payment needs on-demand background tasks (e.g. a receipt PDF), many
+jobs, or more than one scheduler instance.
+
+---
+
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
@@ -533,3 +852,17 @@ workspace membership, Dockerfile pattern and boundary test (add it to `BOUNDARIE
 | Notification's image | `services/notification/Dockerfile`, built from the repo root, installs only `--package notification` | — |
 | Service boundary | `tests/test_service_boundaries.py` (AST scan both ways) + CI image check | Payment joins: add it to `BOUNDARIES` |
 | Cross-service tests | Stay at the root `tests/integration/` — they test the contract between the services | — |
+| BOOK-65 Payment's outbox | Own `payment_outbox_events` + own relay → `payment-events` (3 partitions, key `reservation_id`) | — |
+| Which payments emit an event | Only a resolved charge (`payment_succeeded` / `payment_failed`); not PENDING, not refunds | Something needs refund outcomes |
+| Booking's `payment-events` consumer | Group `booking`, Inbox + confirm/cancel in one transaction, DLQ `payment-events.dlq`, no retry loop | — |
+| Saga's direct calls | Still run beside the event path until the switch-over | Removed once "can't use this payment" refunds work end to end |
+| Relay marking | Only Kafka-*confirmed* rows are marked published (both relays) | — |
+| Kafka topics | Created by the one-shot `kafka-init` service, `--if-not-exists`; auto-create stays off | — |
+| Payment for a cancelled reservation | Booking emits `booking_payment_rejected` → Payment refunds in full, amount from its own charge row | Prevention (don't expire mid-payment) is worth adding too |
+| Payment's Inbox | `processed_booking_events`, committed with the PENDING refund row, only for events with an effect | — |
+| Frontend after paying | Always poll the reservation, first check immediate | Push (SSE/WebSocket) if the wait gets noticeable |
+| Payment reading the reservation before charging | Sync call to Booking (`/internal/...`, BOOK-66 auth), not a local copy from events — it *decides* on current state while the guest waits | Paying must work while Booking is down |
+| Payment's tables | Own `PaymentBase` + own migrations; models drop the FK/relationship first, the DB catches up at contract | — |
+| Payment's DB access | `PaymentUnitOfWork` (same `uow.payments` / `uow.session` shape), not a bare session | — |
+| Who is paying | Payment verifies the guest JWT locally (`get_guest_id`, `sub` only); no rate limit, no deleted-user check | BOOK-67: the gateway verifies and forwards the user id |
+| Payment's periodic jobs | Own `payment-scheduler` loop, one instance — not Celery; Booking keeps its Celery | On-demand tasks, many jobs, or several instances |

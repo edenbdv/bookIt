@@ -68,13 +68,9 @@ def _send_to_dead_letter(
 # running; it doesn't dedupe itself (worker-decisions.md §2) -- don't scale
 # the `beat` service the way `worker` can be scaled.
 app.conf.beat_schedule = {
+    # (BOOK-65: Payment's reconcile + relay run in its own payment-scheduler, §20)
     "expire-pending-reservations": {
         "task": "app.worker.expire_pending_reservations",
-        "schedule": 60.0,
-    },
-    # BOOK-101. Only acts on payments past _STALE_PAYMENT_THRESHOLD (5 min).
-    "reconcile-stale-payments": {
-        "task": "app.worker.reconcile_stale_payments",
         "schedule": 60.0,
     },
     # Unblocks BOOK-86. Hourly, not the expiry job's 60s -- unlike an

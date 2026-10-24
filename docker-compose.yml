@@ -97,6 +97,25 @@ services:
       kafka:
         condition: service_healthy
 
+  # BOOK-65: auto-create is off on purpose (BOOK-48) -- so every topic is
+  # created here, explicitly, with its partition count, instead of by hand
+  # once per machine (payment-events and both .dlq topics were simply never
+  # created). --if-not-exists makes it safe on every `up`. Exits when done.
+  # $$ = a literal $ for the shell -- compose would otherwise interpolate it.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for t in booking-events:3 booking-events.dlq:1 booking-events.payment.dlq:1 payment-events:3 payment-events.dlq:1; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$${t%%:*}" --partitions "$${t##*:}" --replication-factor 1
+        done
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   # BOOK-45: local SMTP test double, not a real mail server -- see
   # docs/jobs/email-basics.md section 3 and docs/jobs/worker-decisions.md
   # section 8. Catches every message `worker` sends and shows it at
@@ -115,11 +134,18 @@ services:
       APP_NAME: BookIt
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-65: Payment's own database (container hostname, not localhost)
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      # BOOK-66: Payment (still inside this app) reaches Booking's /internal
+      # routes by service name -- today that's this same container
+      BOOKING_BASE_URL: http://app:8000
     ports:
       - "8000:8000"
     depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       redis:
@@ -152,6 +178,8 @@ services:
       # BOOK-46: the first real DB-touching job landed, so this is now needed
       # -- see the comment this replaces, above the `app` service.
       DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      # BOOK-65: Payment's own database (container hostname, not localhost)
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
       # BOOK-45: container networking needs the service name, not `localhost`
       # -- same reason DATABASE_URL above isn't Settings' own default either.
       SMTP_HOST: mailhog
@@ -159,6 +187,8 @@ services:
       # internal PLAINTEXT listener (`kafka:9092`), not the host-published one.
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       db:
@@ -167,6 +197,9 @@ services:
         condition: service_started
       kafka:
         condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - .:/code
       - /code/.venv
@@ -212,6 +245,24 @@ services:
     volumes:
       - ./services/notification/src:/code/services/notification/src
 
+  # BOOK-65: one-shot -- creates Payment's own `payments` database if missing,
+  # then runs Payment's migrations (services/payment/src/payment/alembic.ini). Exits when done.
+  # Same image as `app` while Payment is still inside the monolith.
+  payment-migrate:
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.migrate
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./services/payment/src:/code/services/payment/src
+
   # BOOK-51. Its own process, deliberately not folded into `worker` or run as
   # a Celery task -- a Kafka consumer group needs a real, continuously
   # running client, which Celery's task-pull model has no equivalent of
@@ -238,10 +289,124 @@ services:
         condition: service_completed_successfully
       kafka:
         condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
       mailhog:
         condition: service_started
     volumes:
       - ./services/notification/src:/code/services/notification/src
+
+  # BOOK-65: Booking's consumer for payment-events (consumer group "booking")
+  # -- confirms/cancels a reservation when Payment reports a charge's
+  # outcome. Same image as `app`/`worker` (it's Booking's code, on Booking's
+  # DB), different command. Own process, not Celery (worker-decisions.md §12).
+  booking-consumer:
+    build: .
+    command: uv run --no-dev python -m app.reservation.payment_consumer
+    # an unhandled error ends the process -- bring it back, and Kafka
+    # redelivers the uncommitted message
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/bookit
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      # BOOK-65: its topics must exist first (auto-create is off)
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/code
+      - /code/.venv
+
+  # BOOK-65: Payment's consumer for booking-events (consumer group "payment")
+  # -- refunds a payment Booking rejected. Same image as `app` while Payment
+  # is still inside the monolith; moves to its own image when extracted.
+  payment-consumer:
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.booking_consumer
+    # an unhandled error ends the process -- bring it back, and Kafka
+    # redelivers the uncommitted message
+    restart: unless-stopped
+    environment:
+      # BOOK-65: Payment's own database only -- it no longer reads Booking's
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./services/payment/src:/code/services/payment/src
+
+  # BOOK-65: Payment's own HTTP app (POST /payments, the provider's webhook) on its
+  # own port -- apart from Booking's `app`. The frontend calls it directly until the
+  # gateway sits in front of both (BOOK-67).
+  payment-api:
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: uvicorn payment.main:app --host 0.0.0.0 --port 8001
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+      # the sync reservation read (BOOK-66) -- Booking by service name
+      BOOKING_BASE_URL: http://app:8000
+    ports:
+      - "8001:8001"
+    depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    volumes:
+      - ./services/payment/src:/code/services/payment/src
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:8001/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # BOOK-65: Payment's scheduled jobs -- its outbox relay (5s) and reconcile (60s) --
+  # in one simple loop, not Celery (microservices-decisions.md §20). ONE instance:
+  # never scale this service (each job would run once per instance).
+  payment-scheduler:
+    # BOOK-65: Payment's own image -- only its code and dependencies, built from the
+    # repo root (the workspace uv.lock is there)
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    command: python -m payment.scheduler
+    # an unhandled error ends the process -- bring it back; every job is safe to rerun
+    restart: unless-stopped
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://bookit:bookit@db:5432/payments
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      payment-migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./services/payment/src:/code/services/payment/src
 
 volumes:
   pgdata:

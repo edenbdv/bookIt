@@ -120,12 +120,8 @@ export function BookingForm({ property }: Props) {
     }
   }
 
-  // BOOK-97. payReservation() triggers BOOK-54's saga -- a 201 response with
-  // status 'succeeded'/'failed' is a hard guarantee confirm/cancel already
-  // happened server-side (see client.ts's payReservation comment), so it's
-  // safe to derive the reservation's new status here rather than re-fetch it.
-  // BOOK-98: shared by both paths that land on "a payment is already
-  // resolving for this reservation" -- a fresh 'pending' response, and a
+  // BOOK-98: shared by every path that lands on "a payment is resolving for
+  // this reservation" -- since BOOK-65 that's every payment response, plus a
   // 409 from retrying while an earlier attempt is still stuck (below)
   async function pollAndSettle(reservation: Reservation) {
     setState({ kind: 'reservation', reservation, action: 'polling' })
@@ -156,26 +152,13 @@ export function BookingForm({ property }: Props) {
     try {
       // fresh per attempt, same convention as submit()'s createReservation call
       const idempotencyKey = crypto.randomUUID()
-      const payment = await payReservation(reservation.id, idempotencyKey)
-      if (payment.status === 'pending') {
-        // a persistent processing state, not a one-off error that resets to
-        // idle -- poll until BOOK-55's webhook (or BOOK-101's reconciliation
-        // worker) resolves it, or give up after ~50s
-        await pollAndSettle(reservation)
-        return
-      }
-      const succeeded = payment.status === 'succeeded'
-      const updated: Reservation = { ...reservation, status: succeeded ? 'confirmed' : 'cancelled' }
-      setState({
-        kind: 'reservation',
-        reservation: updated,
-        action: 'idle',
-        // BOOK-52's mock declines ~8% of charges -- without this, a decline
-        // just silently flips to "cancelled" with no explanation of why
-        actionError: succeeded
-          ? undefined
-          : 'Payment was declined -- this reservation has been released.',
-      })
+      // BOOK-65: the payment's status no longer tells us the reservation's --
+      // Booking confirms/cancels it a few seconds later, from the
+      // payment-events topic. So always ask the server instead of deriving it
+      // here, whatever the payment came back as (a 'pending' one -- BOOK-52's
+      // timeout -- just takes longer). pollAndSettle shows the declined message.
+      await payReservation(reservation.id, idempotencyKey)
+      await pollAndSettle(reservation)
     } catch (err) {
       // BOOK-100's guard: an earlier attempt already timed out and is still
       // resolving -- go poll it instead of dead-ending on the raw 409

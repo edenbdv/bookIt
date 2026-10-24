@@ -16,6 +16,9 @@ import type {
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+// BOOK-65: Payment is its own service, on its own port -- until the gateway
+// (BOOK-67) puts one address in front of both
+const PAYMENT_API_BASE_URL = import.meta.env.VITE_PAYMENT_API_BASE_URL
 
 export class ApiError extends Error {
   status: number
@@ -47,12 +50,14 @@ export function configureAuth(hooks: AuthHooks | null): void {
 interface RequestOptions {
   /** Skip auth entirely. Set on /auth/* so a 401 there can't recurse into refresh. */
   anonymous?: boolean
+  /** Which service to call -- Booking unless set (BOOK-65: Payment has its own). */
+  baseUrl?: string
 }
 
 async function request<T>(
   path: string,
   init?: RequestInit,
-  { anonymous = false }: RequestOptions = {},
+  { anonymous = false, baseUrl = API_BASE_URL }: RequestOptions = {},
 ): Promise<T> {
   const send = (token: string | null) => {
     const headers: Record<string, string> = {
@@ -62,7 +67,7 @@ async function request<T>(
     // only when a session exists -- public endpoints must keep working
     // logged out, and an empty Bearer header is worse than none
     if (token) headers.Authorization = `Bearer ${token}`
-    return fetch(`${API_BASE_URL}${path}`, { ...init, headers })
+    return fetch(`${baseUrl}${path}`, { ...init, headers })
   }
 
   const token = anonymous ? null : (authHooks?.getAccessToken() ?? null)
@@ -236,18 +241,24 @@ export function createReservation(
 }
 
 // BOOK-97. Replaces the old confirmReservationStub -- POST /payments (BOOK-53)
-// triggers the real saga (BOOK-54): a succeeded charge confirms the
-// reservation, a failed one cancels it, both inside the same request. There's
-// no GET /reservations/:id yet (BOOK-85) to re-fetch the result, so callers
-// derive the new status from the returned Payment themselves -- see
-// BookingForm.tsx's confirm(). idempotencyKey follows createReservation's
-// same convention: a fresh UUID per attempt.
+// charges the reservation. BOOK-65: the returned Payment's status says
+// nothing about the reservation's -- Booking confirms/cancels it a few
+// seconds later, from the payment-events topic -- so callers poll
+// getReservation() for the result (pollReservation.ts), never derive it from
+// the Payment. idempotencyKey follows createReservation's same convention: a
+// fresh UUID per attempt.
 export function payReservation(reservationId: string, idempotencyKey: string): Promise<Payment> {
-  return request<Payment>('/payments', {
-    method: 'POST',
-    body: JSON.stringify({ reservation_id: reservationId }),
-    headers: { 'Idempotency-Key': idempotencyKey },
-  })
+  return request<Payment>(
+    '/payments',
+    {
+      method: 'POST',
+      body: JSON.stringify({ reservation_id: reservationId }),
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
+    // Payment's own service (BOOK-65). A 401 still renews through Booking's
+    // /auth/refresh, then replays the payment here.
+    { baseUrl: PAYMENT_API_BASE_URL },
+  )
 }
 
 // BOOK-76: response now also carries refund_amount_cents -- always a

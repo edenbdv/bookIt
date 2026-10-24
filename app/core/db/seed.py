@@ -16,7 +16,6 @@ from app.auth.models import User, UserRole
 from app.auth.security import hash_password
 from app.core.db.models import Base
 from app.core.db.unit_of_work import UnitOfWork
-from app.payment.models import Payment, PaymentKind, PaymentStatus
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus
 from app.review.models import Review
@@ -40,10 +39,7 @@ RESERVATION_DAVE_HAIFA = uuid.UUID("00000000-0000-0000-0000-000000000202")
 RESERVATION_CAROL_HAIFA_CANCELLED = uuid.UUID("00000000-0000-0000-0000-000000000203")
 RESERVATION_BOB_TLV = uuid.UUID("00000000-0000-0000-0000-000000000204")
 
-PAYMENT_CAROL_TLV_CHARGE = uuid.UUID("00000000-0000-0000-0000-000000000301")
-PAYMENT_DAVE_HAIFA_CHARGE = uuid.UUID("00000000-0000-0000-0000-000000000302")
-PAYMENT_CAROL_HAIFA_CHARGE = uuid.UUID("00000000-0000-0000-0000-000000000303")
-PAYMENT_CAROL_HAIFA_REFUND = uuid.UUID("00000000-0000-0000-0000-000000000304")
+# (BOOK-65: the demo payments, ids 0x30x, are Payment's -- services/payment/src/payment/seed.py)
 
 REVIEW_CAROL_ON_TLV_LOFT = uuid.UUID("00000000-0000-0000-0000-000000000401")
 REVIEW_ALICE_ON_CAROL = uuid.UUID("00000000-0000-0000-0000-000000000402")
@@ -68,7 +64,8 @@ async def seed(uow: UnitOfWork) -> None:
     cancelled -- makes EXCLUDE's WHERE status <> 'cancelled' visible in real
     data), a charge+refund payment pair for the cancelled one (a realistic
     lifecycle, not just a missing charge), and reviews in both directions:
-    guest reviewing the property, host reviewing the guest.
+    guest reviewing the property, host reviewing the guest. BOOK-65: the payments
+    are seeded by Payment itself -- services/payment/src/payment/seed.py.
     """
     session = uow.session
     host_alice = await get_or_create(
@@ -160,7 +157,7 @@ async def seed(uow: UnitOfWork) -> None:
     # cancelled on purpose: makes the EXCLUDE constraint's
     # WHERE status <> 'cancelled' behaviour visible in real data --
     # this reservation's dates are free for anyone else to book.
-    res_carol_haifa_cancelled = await get_or_create(
+    await get_or_create(
         session,
         Reservation,
         RESERVATION_CAROL_HAIFA_CANCELLED,
@@ -190,45 +187,6 @@ async def seed(uow: UnitOfWork) -> None:
         guest_count=2,
         total_cents=180000,
         status=ReservationStatus.COMPLETED,
-    )
-
-    await get_or_create(
-        session,
-        Payment,
-        PAYMENT_CAROL_TLV_CHARGE,
-        reservation_id=res_carol_tlv.id,
-        kind=PaymentKind.CHARGE,
-        amount_cents=180000,
-        status=PaymentStatus.SUCCEEDED,
-    )
-    await get_or_create(
-        session,
-        Payment,
-        PAYMENT_DAVE_HAIFA_CHARGE,
-        reservation_id=res_dave_haifa.id,
-        kind=PaymentKind.CHARGE,
-        amount_cents=96000,
-        status=PaymentStatus.SUCCEEDED,
-    )
-    # the cancelled reservation still shows a full charge+refund history,
-    # not just a missing charge -- matches PaymentKind.REFUND's real use.
-    await get_or_create(
-        session,
-        Payment,
-        PAYMENT_CAROL_HAIFA_CHARGE,
-        reservation_id=res_carol_haifa_cancelled.id,
-        kind=PaymentKind.CHARGE,
-        amount_cents=64000,
-        status=PaymentStatus.SUCCEEDED,
-    )
-    await get_or_create(
-        session,
-        Payment,
-        PAYMENT_CAROL_HAIFA_REFUND,
-        reservation_id=res_carol_haifa_cancelled.id,
-        kind=PaymentKind.REFUND,
-        amount_cents=64000,
-        status=PaymentStatus.SUCCEEDED,
     )
 
     # both review directions: guest reviewing the property, host reviewing the guest

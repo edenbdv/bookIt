@@ -20,8 +20,12 @@ import app.core.outbox.models
 # (BOOK-64: no app.notification.models -- Notification's tables register on
 # its own NotificationBase and have their own migrations,
 # app/notification/alembic.ini. Booking's migrations never see them.)
-import app.payment.models
+#
+# BOOK-65: same for Payment -- its own service (services/payment/), its models on
+# PaymentBase with their own migrations; the old copies in this database were
+# dropped by 8b4228f69ed7.
 import app.property.models
+import app.reservation.inbox
 import app.reservation.models
 import app.review.models  # noqa: F401
 from alembic import context

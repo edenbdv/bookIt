@@ -81,3 +81,15 @@ jobs:
           leaked = [m for m in ('app', 'fastapi', 'celery') if u.find_spec(m)];
           assert not leaked, f'Booking code/deps in Notification image: {leaked}';
           print('ok: notification image is self-contained')"
+      # BOOK-65: Payment's own image, built from the repo root like Notification's
+      - name: Payment image
+        run: docker build -f services/payment/Dockerfile -t bookit-payment:ci .
+      # its app, scheduler and consumer all import, and it really is separate:
+      # none of Booking's or Notification's code, no Booking-only dependencies
+      - name: Payment image is self-contained
+        run: >
+          docker run --rm --entrypoint python bookit-payment:ci -c
+          "import importlib.util as u, payment.main, payment.scheduler, payment.booking_consumer;
+          leaked = [m for m in ('app', 'notification', 'celery', 'redis', 'bcrypt') if u.find_spec(m)];
+          assert not leaked, f'Booking/Notification code or deps in Payment image: {leaked}';
+          print('ok: payment image is self-contained')"

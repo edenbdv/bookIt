@@ -5,24 +5,20 @@
 Celery discovers tasks by importing this module. See docs/jobs/celery-basics.md §2.
 """
 
-from datetime import UTC, datetime, timedelta
-
 from app.core.db.engine import async_task
 from app.core.db.unit_of_work import UnitOfWork
 from app.core.idempotency import cleanup as idempotency_cleanup
 from app.core.jobs.celery_app import app
 from app.core.outbox import cleanup as outbox_cleanup
 from app.core.outbox import relay as outbox_relay
-from app.payment import saga as payment_saga
 from app.reservation import service as reservation_service
-
-# BOOK-101: how long a payment sits PENDING before it's treated as stuck,
-# not just still in flight
-_STALE_PAYMENT_THRESHOLD = timedelta(minutes=5)
 
 # BOOK-64: the "reservation received" email task (BOOK-45/47) used to live
 # here. It moved to Notification's Kafka consumer as a BookingCreated event
 # (microservices-decisions.md §4) -- this worker no longer sends any email.
+#
+# BOOK-65: Payment's two jobs (reconcile_stale_payments, publish_payment_events)
+# moved to Payment's own payment-scheduler (services/payment/src/payment/scheduler.py, §20).
 
 
 @app.task
@@ -50,17 +46,6 @@ async def complete_past_reservations() -> None:
     Thin wrapper, same shape as expire_pending_reservations above."""
     async with UnitOfWork() as uow:
         await reservation_service.complete_past_reservations(uow)
-
-
-@app.task
-@async_task
-async def reconcile_stale_payments() -> None:
-    """BOOK-101: resolve PENDING payments the webhook never confirmed.
-    Thin wrapper, same shape as expire_pending_reservations above."""
-    async with UnitOfWork() as uow:
-        await payment_saga.reconcile_stale_payments(
-            uow, datetime.now(UTC) - _STALE_PAYMENT_THRESHOLD
-        )
 
 
 @app.task

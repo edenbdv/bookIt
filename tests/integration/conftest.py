@@ -8,6 +8,7 @@ here: docs/testing/testing-basics.md (§ refs below).
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from alembic.config import Config
@@ -19,6 +20,10 @@ from notification.db import (
     get_notification_session_factory,
     notification_database_url,
 )
+from payment import migrate as payment_migrate
+from payment.config import get_payment_settings
+from payment.db import get_payment_engine, get_payment_session_factory
+from payment.main import create_payment_app
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.community.kafka import KafkaContainer
@@ -32,7 +37,6 @@ from testcontainers.core.docker_client import DockerClient
 import app.auth.models
 import app.core.idempotency.models
 import app.core.outbox.models
-import app.payment.models
 import app.property.models
 import app.reservation.models
 import app.review.models  # noqa: F401
@@ -95,6 +99,10 @@ def _clear_cached_clients() -> None:
     get_notification_settings.cache_clear()
     get_notification_engine.cache_clear()
     get_notification_session_factory.cache_clear()
+    # BOOK-65: Payment's own settings and engine, same reason
+    get_payment_settings.cache_clear()
+    get_payment_engine.cache_clear()
+    get_payment_session_factory.cache_clear()
 
 
 # scope="session": starting a container + running every migration takes
@@ -121,6 +129,12 @@ def postgres_url() -> Iterator[str]:
             mp.setenv("NOTIFICATION_DATABASE_URL", url.rsplit("/", 1)[0] + "/notifications")
             _clear_cached_clients()
             notification_migrate.main()
+
+            # BOOK-65: Payment's own `payments` database, same way -- created and
+            # migrated by the script compose's payment-migrate runs
+            mp.setenv("PAYMENT_DATABASE_URL", url.rsplit("/", 1)[0] + "/payments")
+            _clear_cached_clients()
+            payment_migrate.main()
 
             yield url
 
@@ -179,6 +193,15 @@ async def notification_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine
     await engine.dispose()
 
 
+# BOOK-65: the test's own connection to Payment's database -- for setting up and
+# reading back payments, the way notification_db_engine does for Notification
+@pytest.fixture
+async def payment_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(get_payment_settings().payment_database_url)
+    yield engine
+    await engine.dispose()
+
+
 async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
     async with engine.begin() as conn:
         tables = (
@@ -200,14 +223,17 @@ async def _truncate_all(engine: AsyncEngine, version_table: str) -> None:
 # (e.g. BOOK-55's commit split), which would end a wrapping transaction
 # early (testing-basics.md §3.4). Table list read from the catalog rather
 # than hardcoded, so a table added by a future migration is covered too.
-# BOOK-64: both databases -- Booking's and Notification's.
+# BOOK-64/65: every database -- Booking's, Notification's and Payment's.
 @pytest.fixture(autouse=True)
 async def _truncate_tables(
-    db_engine: AsyncEngine, notification_db_engine: AsyncEngine
+    db_engine: AsyncEngine,
+    notification_db_engine: AsyncEngine,
+    payment_db_engine: AsyncEngine,
 ) -> AsyncIterator[None]:
     yield
     await _truncate_all(db_engine, "alembic_version")
     await _truncate_all(notification_db_engine, "notification_alembic_version")
+    await _truncate_all(payment_db_engine, "payment_alembic_version")
 
 
 @pytest.fixture
@@ -215,6 +241,12 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     # expire_on_commit=False -- same as the app's own session factory
     # (core/db/engine.py), so objects stay readable after a commit
     async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+async def payment_db_session(payment_db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    async with AsyncSession(payment_db_engine, expire_on_commit=False) as session:
         yield session
 
 
@@ -240,6 +272,7 @@ async def app_db(postgres_url: str) -> AsyncIterator[None]:
     yield
     await get_engine().dispose()
     await get_notification_engine().dispose()
+    await get_payment_engine().dispose()
     _clear_cached_clients()
 
 
@@ -261,3 +294,32 @@ async def api_client(redis_url: str, app_db: None) -> AsyncIterator[AsyncClient]
     await redis.aclose()
     # only the Redis client -- the engine is still app_db's to dispose
     get_redis_client.cache_clear()
+
+
+# BOOK-66: Payment's booking_client, pointed at the app in-process instead of a
+# real host:port -- the real /internal endpoint, service-token auth included,
+# with no server running. While both still live in one app, Payment is in effect
+# calling itself.
+@pytest.fixture
+def booking_in_process(app_db: None) -> Iterator[None]:
+    from payment import booking_client
+
+    def in_process_client() -> AsyncClient:
+        return AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://booking",
+            timeout=booking_client._TIMEOUT_SECONDS,
+        )
+
+    with patch.object(booking_client, "_client", in_process_client):
+        yield
+
+
+# BOOK-65: Payment's own HTTP app, in-process -- the counterpart of api_client
+# for POST /payments and the webhook. Payment needs no Redis (no rate limit, §19),
+# so only app_db underneath.
+@pytest.fixture
+async def payment_api_client(app_db: None) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=create_payment_app())
+    async with AsyncClient(transport=transport, base_url="http://payment") as client:
+        yield client

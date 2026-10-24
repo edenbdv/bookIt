@@ -92,6 +92,28 @@ async def test_cancelled_email() -> None:
         assert line in email["body"]
     # neutral wording -- fires for an explicit cancel *and* a silent expiry
     assert "you cancelled" not in email["body"].lower()
+    # PAYLOAD has no refund_cents (a pre-BOOK-65 event) -- no refund line
+    assert "refunded" not in email["body"]
+
+
+# BOOK-65: booking_cancelled carries Booking's refund decision
+@pytest.mark.anyio
+async def test_cancelled_email_mentions_the_refund() -> None:
+    email = await _sent_email(
+        service.send_reservation_cancelled_email, {**PAYLOAD, "refund_cents": 60000}
+    )
+
+    assert "You'll be refunded $600.00." in email["body"]
+
+
+# 0 -- unpaid, or a policy that gives nothing back: no "$0.00 refund" line
+@pytest.mark.anyio
+async def test_cancelled_email_without_a_refund_has_no_refund_line() -> None:
+    email = await _sent_email(
+        service.send_reservation_cancelled_email, {**PAYLOAD, "refund_cents": 0}
+    )
+
+    assert "refunded" not in email["body"]
 
 
 # a guest with no display_name still gets a sensible greeting

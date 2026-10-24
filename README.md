@@ -63,9 +63,13 @@ Same infrastructure, same containers — just two different vantage points for r
 Infra, `worker`, `beat`, and `notification-consumer` in Docker; `app` on your machine with `uv`, for fast auto-reload on code changes without rebuilding a container each time.
 
 ```bash
-docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat notification-consumer
+docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat notification-consumer booking-consumer payment-api payment-scheduler payment-consumer
 uv run uvicorn app.main:app --reload
 ```
+
+BOOK-65: Payment is its own service — its API runs on **:8001** (`payment-api`; the frontend
+reads it from `VITE_PAYMENT_API_BASE_URL`), its jobs in `payment-scheduler`, its data in the
+`payments` database. Booking's app on :8000 no longer serves `/payments`.
 
 The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
 
@@ -110,7 +114,7 @@ docker compose up -d notification-consumer      # docker-compose.yml itself chan
 Run everything, including the app, in containers. Useful for testing the actual `Dockerfile`, or verifying the app works the way it will in CI/production.
 
 ```bash
-docker compose up --build   # starts every service: app, worker, beat, notification-consumer, and all infra
+docker compose up --build   # starts every service: app, worker, beat, the consumers, payment-api/-scheduler, and all infra
 ```
 
 Here the `app` container does **not** use your local `.env` — [docker-compose.yml](docker-compose.yml) overrides `DATABASE_URL`/`REDIS_URL` with container hostnames (`db`, `redis`) instead of `localhost`, since containers reach each other by service name, not `localhost`.
@@ -181,7 +185,7 @@ Visit [http://localhost:5173](http://localhost:5173). See [frontend/README.md](f
 `scripts/simulate_provider_webhook.py` plays the part of a real payment provider calling
 back later with a charge's result -- see `docs/payment/webhook-basics.md` and
 `docs/payment/payment-decisions.md` §8. It's a real HTTP call against your actual running
-app, signed the same way the real endpoint expects (`app/payment/webhook_auth.py`).
+app, signed the same way the real endpoint expects (`services/payment/src/payment/webhook_auth.py`).
 
 To try it: find (or create) a `Payment` row that's `PENDING` -- e.g. one whose charge was
 forced to `TIMEOUT`, or crashed mid-call -- then:

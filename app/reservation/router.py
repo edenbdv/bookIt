@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from app.auth.dependencies import enforce_user_rate_limit, get_current_user
 from app.auth.models import User
 from app.core.db.unit_of_work import UnitOfWork, get_uow
-from app.payment import cancellation as payment_cancellation
 from app.reservation import service
 from app.reservation.models import Reservation
 from app.reservation.schemas import ReservationCancelRead, ReservationCreate, ReservationRead
@@ -143,9 +142,7 @@ async def cancel_reservation(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
-        return await payment_cancellation.cancel_reservation_and_refund(
-            uow, reservation_id, current_user.id
-        )
+        return await service.cancel_reservation(uow, reservation_id, current_user.id)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"
@@ -169,9 +166,7 @@ async def host_cancel_reservation(
     uow: UnitOfWork = Depends(get_uow),
 ) -> Reservation:
     try:
-        return await payment_cancellation.host_cancel_reservation_and_refund(
-            uow, reservation_id, current_user.id
-        )
+        return await service.host_cancel_reservation(uow, reservation_id, current_user.id)
     except service.ReservationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reservation not found"

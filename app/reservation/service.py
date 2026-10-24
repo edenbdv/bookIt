@@ -11,6 +11,7 @@ from app.core.idempotency.models import (
     IdempotencyKeyStatus,
 )
 from app.core.outbox.models import OutboxEvent, OutboxEventType
+from app.reservation.cancellation_policy import calculate_refund_cents
 from app.reservation.models import Reservation, ReservationStatus
 from app.reservation.schemas import ReservationCreate
 
@@ -104,7 +105,10 @@ def transition_to(reservation: Reservation, new_status: ReservationStatus) -> No
 # the id a consumer reads back out of Kafka is the same one the row itself
 # ends up with, not whatever the ORM happens to assign at flush time.
 async def _emit_outbox_event(
-    uow: UnitOfWork, reservation: Reservation, event_type: OutboxEventType
+    uow: UnitOfWork,
+    reservation: Reservation,
+    event_type: OutboxEventType,
+    extra: dict | None = None,
 ) -> None:
     event_id = uuid.uuid4()
     uow.session.add(
@@ -118,6 +122,7 @@ async def _emit_outbox_event(
                 "reservation_id": str(reservation.id),
                 "occurred_at": datetime.now(UTC).isoformat(),
                 **(await _email_snapshot(uow, reservation)),
+                **(extra or {}),
             },
         )
     )
@@ -151,9 +156,51 @@ async def _email_snapshot(uow: UnitOfWork, reservation: Reservation) -> dict:
 # aren't an HTTP request from the reservation's own guest: the expiry job
 # below, and BOOK-54's saga compensation. cancel_reservation() is the
 # guest-authorized HTTP path; this is what it and system callers share.
-async def cancel_reservation_system(uow: UnitOfWork, reservation: Reservation) -> None:
+#
+# BOOK-65: booking_cancelled carries who cancelled and how much to refund, so
+# Payment can refund without knowing the cancellation policy (it lives here).
+# A system cancel never refunds: it only hits unpaid (PENDING) reservations.
+async def cancel_reservation_system(
+    uow: UnitOfWork,
+    reservation: Reservation,
+    *,
+    cancelled_by: str = "system",
+    refund_cents: int = 0,
+) -> None:
     transition_to(reservation, ReservationStatus.CANCELLED)
-    await _emit_outbox_event(uow, reservation, OutboxEventType.BOOKING_CANCELLED)
+    await _emit_outbox_event(
+        uow,
+        reservation,
+        OutboxEventType.BOOKING_CANCELLED,
+        {"cancelled_by": cancelled_by, "refund_cents": refund_cents},
+    )
+
+
+# BOOK-65: a payment succeeded for a reservation that can no longer use it
+# (already cancelled -- e.g. its hold expired while the charge was still
+# PENDING). Booking can't undo a charge itself; this tells Payment to refund
+# it in full. No status change, no email -- so no _email_snapshot, just what
+# Payment's refund needs. Same event_id-in-both-places rule as above.
+async def reject_payment(
+    uow: UnitOfWork, reservation: Reservation, payment_id: str, amount_cents: int
+) -> None:
+    event_id = uuid.uuid4()
+    event_type = OutboxEventType.BOOKING_PAYMENT_REJECTED
+    uow.session.add(
+        OutboxEvent(
+            id=event_id,
+            event_type=event_type,
+            reservation_id=reservation.id,
+            payload={
+                "event_id": str(event_id),
+                "event_type": event_type.value,
+                "reservation_id": str(reservation.id),
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "payment_id": payment_id,
+                "amount_cents": amount_cents,
+            },
+        )
+    )
 
 
 # stand-in for Epic 8's (BOOK-10) real trigger: a payment webhook calling
@@ -180,7 +227,23 @@ async def cancel_reservation(
     # same order as property/service.py's update_property
     if reservation.guest_id != current_user_id:
         raise NotReservationGuestError
-    await cancel_reservation_system(uow, reservation)
+    # BOOK-65: only a CONFIRMED reservation was paid -- checked before the
+    # transition. Policy-based amount (BOOK-76), on the snapshot price.
+    refund_cents = 0
+    if reservation.status == ReservationStatus.CONFIRMED:
+        property_ = await uow.properties.get_by_id(reservation.property_id)
+        refund_cents = calculate_refund_cents(
+            property_.cancellation_policy,
+            reservation.check_in,
+            datetime.now(UTC),
+            reservation.total_cents,
+        )
+    await cancel_reservation_system(
+        uow, reservation, cancelled_by="guest", refund_cents=refund_cents
+    )
+    # non-persisted -- for ReservationCancelRead's from_attributes read. The
+    # refund itself happens a few seconds later, in Payment's consumer.
+    reservation.refund_amount_cents = refund_cents
     return reservation
 
 
@@ -195,7 +258,14 @@ async def host_cancel_reservation(
     property_ = await uow.properties.get_by_id(reservation.property_id)
     if property_.host_id != current_user_id:
         raise NotPropertyHostError
-    await cancel_reservation_system(uow, reservation)
+    # BOOK-65: a host cancel refunds a paid reservation in full (BOOK-80)
+    refund_cents = (
+        reservation.total_cents if reservation.status == ReservationStatus.CONFIRMED else 0
+    )
+    await cancel_reservation_system(
+        uow, reservation, cancelled_by="host", refund_cents=refund_cents
+    )
+    reservation.refund_amount_cents = refund_cents  # same as cancel_reservation
     return reservation
 
 

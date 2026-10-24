@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from payment.models import Payment  # noqa: F401
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -41,7 +42,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 # strings, which only resolve if those modules were actually imported
 # somewhere, same reasoning as scripts/verify_no_overlapping_reservations.py
 from app.auth.models import User  # noqa: F401
-from app.payment.models import Payment  # noqa: F401
 from app.property.repository import PropertyRepository
 from app.review.models import Review  # noqa: F401
 

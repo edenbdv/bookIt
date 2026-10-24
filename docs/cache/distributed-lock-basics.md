@@ -52,7 +52,7 @@ Those two calls were *sequential*. The lock was acquired, released, and re-acqui
 
 The principle, which is the real reason the lock fails: **you cannot get exactly-once by locking the sender. You get it by making the operation idempotent at the receiver.** A lock buys "at most one at a time", which is a strictly weaker and different thing.
 
-Both halves of this already exist locally — the partial unique index at `app/payment/models.py:32-38` (at most one succeeded charge per reservation) and `create_reservation_idempotent` (`app/reservation/service.py:159`). Epic 8's remaining piece is carrying that key outward to the provider. A lock never enters the picture.
+Both halves of this already exist locally — the partial unique index at `services/payment/src/payment/models.py:32-38` (at most one succeeded charge per reservation) and `create_reservation_idempotent` (`app/reservation/service.py:159`). Epic 8's remaining piece is carrying that key outward to the provider. A lock never enters the picture.
 
 ## When a Redis lock *is* the right tool
 

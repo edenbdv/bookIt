@@ -17,12 +17,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from payment.models import Payment  # noqa: F401
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.auth.models import User
-from app.payment.models import Payment  # noqa: F401
 from app.property.models import Property
 from app.reservation.models import Reservation, ReservationStatus
 from app.review.models import Review  # noqa: F401

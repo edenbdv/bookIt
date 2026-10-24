@@ -91,8 +91,8 @@ export function MyBookings() {
     )
   }
 
-  // BOOK-98: shared by both paths that land on "a payment is already
-  // resolving for this reservation" -- a fresh 'pending' response, and a
+  // BOOK-98: shared by every path that lands on "a payment is resolving for
+  // this reservation" -- since BOOK-65 that's every payment response, plus a
   // 409 from retrying while an earlier attempt is still stuck (below)
   async function pollAndSettle(reservation: Reservation) {
     setRowActions((prev) => ({ ...prev, [reservation.id]: 'polling' }))
@@ -114,26 +114,16 @@ export function MyBookings() {
     }
   }
 
-  // mirrors BookingForm's own confirm() -- a 201 with status 'succeeded'/
-  // 'failed' is a hard guarantee confirm/cancel already happened server-side
+  // mirrors BookingForm's own confirm(). BOOK-65: the payment's status no
+  // longer tells us the reservation's -- Booking confirms/cancels it a few
+  // seconds later, from the payment-events topic -- so always ask the server
   async function handlePay(reservation: Reservation) {
     setRowActions((prev) => ({ ...prev, [reservation.id]: 'paying' }))
     setRowErrors((prev) => ({ ...prev, [reservation.id]: '' }))
     try {
       const idempotencyKey = crypto.randomUUID()
-      const payment = await payReservation(reservation.id, idempotencyKey)
-      if (payment.status === 'pending') {
-        await pollAndSettle(reservation)
-        return
-      }
-      const succeeded = payment.status === 'succeeded'
-      updateStatus(reservation.id, succeeded ? 'confirmed' : 'cancelled')
-      if (!succeeded) {
-        setRowErrors((prev) => ({
-          ...prev,
-          [reservation.id]: 'Payment was declined -- this reservation has been released.',
-        }))
-      }
+      await payReservation(reservation.id, idempotencyKey)
+      await pollAndSettle(reservation)
     } catch (err) {
       // BOOK-100's guard: an earlier attempt already timed out and is still
       // resolving -- go poll it instead of dead-ending on the raw 409
