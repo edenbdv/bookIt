@@ -11,7 +11,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 
 bearer_scheme = HTTPBearer()
 
@@ -25,7 +25,7 @@ async def get_guest_id(
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    settings = get_settings()
+    settings = get_payment_settings()
     try:
         payload = jwt.decode(
             credentials.credentials, settings.secret_key, algorithms=[settings.jwt_algorithm]

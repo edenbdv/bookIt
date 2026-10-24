@@ -11,7 +11,7 @@ import httpx
 import jwt
 from pydantic import BaseModel, ValidationError
 
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 
 # a slow Booking must not hang the guest's POST /payments
 _TIMEOUT_SECONDS = 2.0
@@ -42,7 +42,7 @@ class ReservationInfo(BaseModel):
 
 def _service_token() -> str:
     # fresh per call: signing takes microseconds, so no cache to get wrong
-    settings = get_settings()
+    settings = get_payment_settings()
     return jwt.encode(
         {"sub": "payment", "type": "service", "exp": datetime.now(UTC) + _TOKEN_TTL},
         settings.service_token_secret,
@@ -52,7 +52,9 @@ def _service_token() -> str:
 
 def _client() -> httpx.AsyncClient:
     # its own function so tests can point it at the app in-process (ASGITransport)
-    return httpx.AsyncClient(base_url=get_settings().booking_base_url, timeout=_TIMEOUT_SECONDS)
+    return httpx.AsyncClient(
+        base_url=get_payment_settings().booking_base_url, timeout=_TIMEOUT_SECONDS
+    )
 
 
 async def get_reservation(reservation_id: uuid.UUID) -> ReservationInfo | None:

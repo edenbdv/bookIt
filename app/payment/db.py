@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 
 
 class PaymentBase(DeclarativeBase):
@@ -30,7 +30,7 @@ class PaymentBase(DeclarativeBase):
 # same lru_cache singleton shape as core/db/engine.py's get_engine()
 @lru_cache
 def get_payment_engine() -> AsyncEngine:
-    return create_async_engine(get_settings().payment_database_url)
+    return create_async_engine(get_payment_settings().payment_database_url)
 
 
 @lru_cache

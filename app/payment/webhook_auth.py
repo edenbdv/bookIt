@@ -7,7 +7,7 @@ provider, not just anyone who found the URL.
 import hashlib
 import hmac
 
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 
 
 class InvalidWebhookSignatureError(Exception):
@@ -16,7 +16,7 @@ class InvalidWebhookSignatureError(Exception):
 
 def sign_webhook_payload(raw_body: bytes) -> str:
     # same function signs (caller side) and verifies (receiver side) below
-    secret = get_settings().payment_webhook_secret.encode()
+    secret = get_payment_settings().payment_webhook_secret.encode()
     return hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
 
 

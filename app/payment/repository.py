@@ -2,13 +2,24 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.db.repository import BaseRepository
 from app.payment.models import Payment, PaymentKind, PaymentStatus
 
 
-class PaymentRepository(BaseRepository[Payment]):
-    model = Payment
+class PaymentRepository:
+    """Data access for payments only -- never commits, that's PaymentUnitOfWork's job.
+    BOOK-65: standalone, not core's generic BaseRepository -- Payment uses just
+    get_by_id/add, and can't import Booking's code once it's its own service."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_by_id(self, id: uuid.UUID) -> Payment | None:
+        return await self.session.get(Payment, id)
+
+    def add(self, payment: Payment) -> None:
+        self.session.add(payment)
 
     # BOOK-76: at most one row can ever match -- the partial unique index
     # on (reservation_id) WHERE kind='charge' AND status='succeeded'

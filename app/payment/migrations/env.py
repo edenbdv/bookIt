@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # PaymentBase (app/payment/models/__init__.py)
 import app.payment.models  # noqa: F401
 from alembic import context
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 from app.payment.db import PaymentBase
 
 VERSION_TABLE = "payment_alembic_version"
@@ -37,7 +37,7 @@ target_metadata = PaymentBase.metadata
 
 
 def _url() -> str:
-    return get_settings().payment_database_url
+    return get_payment_settings().payment_database_url
 
 
 def run_migrations_offline() -> None:

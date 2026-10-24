@@ -43,6 +43,7 @@ from app.core.config import get_settings
 from app.core.db.engine import get_engine, get_session_factory
 from app.main import create_app
 from app.payment import migrate as payment_migrate
+from app.payment.config import get_payment_settings
 from app.payment.db import get_payment_engine, get_payment_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,7 +99,8 @@ def _clear_cached_clients() -> None:
     get_notification_settings.cache_clear()
     get_notification_engine.cache_clear()
     get_notification_session_factory.cache_clear()
-    # BOOK-65: Payment's own engine, same reason
+    # BOOK-65: Payment's own settings and engine, same reason
+    get_payment_settings.cache_clear()
     get_payment_engine.cache_clear()
     get_payment_session_factory.cache_clear()
 
@@ -195,7 +197,7 @@ async def notification_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine
 # reading back payments, the way notification_db_engine does for Notification
 @pytest.fixture
 async def payment_db_engine(postgres_url: str) -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(get_settings().payment_database_url)
+    engine = create_async_engine(get_payment_settings().payment_database_url)
     yield engine
     await engine.dispose()
 

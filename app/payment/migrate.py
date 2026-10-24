@@ -17,7 +17,7 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 
 from alembic import command
-from app.core.config import get_settings
+from app.payment.config import get_payment_settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ async def _create_database_if_missing(url: str) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(_create_database_if_missing(get_settings().payment_database_url))
+    asyncio.run(_create_database_if_missing(get_payment_settings().payment_database_url))
     command.upgrade(Config(str(_ALEMBIC_INI)), "head")
 
 

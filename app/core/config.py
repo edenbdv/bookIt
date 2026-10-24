@@ -11,9 +11,8 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
-    # BOOK-65: Payment's own database, same server -- moves to Payment's own
-    # settings once it's extracted, the way Notification's did (BOOK-64)
-    payment_database_url: str = "postgresql+asyncpg://bookit:bookit@localhost:5432/payments"
+    # (BOOK-65: Payment's database URL, webhook secret and Booking's address live in
+    # Payment's own settings, app/payment/config.py -- Booking doesn't need them)
     # (BOOK-64: Notification's database URL lives in its own settings,
     # services/notification -- Booking doesn't need to know it)
     redis_url: str = "redis://localhost:6379/0"
@@ -42,17 +41,10 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
-    # BOOK-55: HMAC secret for verifying inbound payment webhook calls --
-    # docs/payment/webhook-basics.md §8. dev-only default, same as secret_key.
-    payment_webhook_secret: str = "dev-webhook-secret-change-me"
-
     # BOOK-66: signs/verifies service tokens (Payment -> Booking's /internal
     # routes) -- its own secret, never secret_key (docs/auth/service-token-basics.md §4).
     # dev-only default, same as secret_key.
     service_token_secret: str = "dev-service-secret-change-me"
-    # BOOK-66: where Payment reaches Booking's /internal routes. The host default;
-    # containers override it to http://app:8000 (docker-compose.yml).
-    booking_base_url: str = "http://localhost:8000"
 
     # BOOK-78: how long a just-spent refresh token is still accepted, answering
     # with the token that replaced it instead of counting as reuse. This is the

@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 
 from confluent_kafka import Consumer, Producer
 
-from app.core.config import get_settings
 from app.payment.booking_events import handle_booking_event
+from app.payment.config import get_payment_settings
 from app.payment.db import PaymentUnitOfWork, get_payment_engine
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def dead_letter_topic() -> str:
 def make_consumer() -> Consumer:
     return Consumer(
         {
-            "bootstrap.servers": get_settings().kafka_bootstrap_servers,
+            "bootstrap.servers": get_payment_settings().kafka_bootstrap_servers,
             "group.id": GROUP_ID,
             # manual commit, after handling -- see _process_one
             "enable.auto.commit": False,
@@ -102,7 +102,7 @@ async def _run(consumer: Consumer, dead_letter: DeadLetter) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    producer = Producer({"bootstrap.servers": get_settings().kafka_bootstrap_servers})
+    producer = Producer({"bootstrap.servers": get_payment_settings().kafka_bootstrap_servers})
     # one asyncio.run() for the process's whole lifetime, not one per message
     asyncio.run(_run(make_consumer(), make_dead_letter(producer)))
 
