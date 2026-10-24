@@ -746,6 +746,37 @@ downtime are fine.
 - **A feature flag for the switch** — point the code back at the old database without a
   redeploy if something goes wrong.
 
+## 19. Who is paying: Payment checks the guest's token itself — until the gateway
+
+`POST /payments` used Booking's `get_current_user`, which loads the user row from
+Booking's `users` table — out of reach once Payment is its own service.
+
+**Target (BOOK-67):** the gateway verifies the guest's token and passes the user id on;
+Payment trusts the gateway and holds no user-login secret.
+
+**Until then (chosen):** `app/payment/auth.py`'s `get_guest_id` verifies the token
+**locally** — signature and `exp` with `SECRET_KEY`, `type == "access"` — and returns
+`sub`. No call to Booking: a JWT carries its own proof (`docs/auth/jwt-basics.md` §1).
+Booking *issues* tokens (needs users and passwords); anyone holding the secret can
+*verify* them.
+
+**Accepted trade-offs, all removed by the gateway:**
+
+- **Payment holds `SECRET_KEY`** — so it could also *mint* user tokens
+  (`docs/auth/service-token-basics.md` §8). RS256 would let it verify without being able
+  to forge.
+- **No deleted-user check** — `get_current_user` rejects a deleted user's still-valid
+  token by looking them up; Payment can't, so for up to 15 min (the access-token
+  lifetime) a deleted user could still pay. The sync call still checks the reservation is
+  theirs.
+- **No per-user rate limit on `POST /payments`** — `enforce_user_rate_limit` needs the
+  `User` row and lived in Booking's auth. Dropped until the gateway, the usual place for
+  it; Payment's idempotency key still absorbs double clicks and retries.
+
+**Handed to BOOK-67:** verify the guest JWT at the gateway and forward the user id;
+per-user rate limiting at the gateway; keep `/internal/*` unreachable from outside
+(BOOK-66); then remove `SECRET_KEY` and `get_guest_id`'s own check from Payment.
+
 ---
 
 ## Cheat sheet
@@ -787,3 +818,4 @@ downtime are fine.
 | Payment reading the reservation before charging | Sync call to Booking (`/internal/...`, BOOK-66 auth), not a local copy from events — it *decides* on current state while the guest waits | Paying must work while Booking is down |
 | Payment's tables | Own `PaymentBase` + own migrations; models drop the FK/relationship first, the DB catches up at contract | — |
 | Payment's DB access | `PaymentUnitOfWork` (same `uow.payments` / `uow.session` shape), not a bare session | — |
+| Who is paying | Payment verifies the guest JWT locally (`get_guest_id`, `sub` only); no rate limit, no deleted-user check | BOOK-67: the gateway verifies and forwards the user id |

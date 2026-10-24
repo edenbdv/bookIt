@@ -1,8 +1,9 @@
+import uuid
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
-from app.auth.dependencies import enforce_user_rate_limit, get_current_user
-from app.auth.models import User
 from app.payment import service
+from app.payment.auth import get_guest_id
 from app.payment.booking_client import BookingUnavailableError
 from app.payment.db import PaymentUnitOfWork, get_payment_uow
 from app.payment.models import Payment
@@ -16,12 +17,13 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 async def create_payment(
     data: PaymentCreate,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    current_user: User = Depends(get_current_user),
-    _rl: None = Depends(enforce_user_rate_limit),
+    # BOOK-65: the guest's id from their token, verified here -- no users-table
+    # lookup. No per-user rate limit until the gateway (BOOK-67, §19).
+    guest_id: uuid.UUID = Depends(get_guest_id),
     uow: PaymentUnitOfWork = Depends(get_payment_uow),
 ) -> Payment:
     try:
-        return await service.pay_reservation(uow, data, current_user.id, idempotency_key)
+        return await service.pay_reservation(uow, data, guest_id, idempotency_key)
     # BOOK-66: Booking couldn't be asked -- nothing was charged, try again
     except BookingUnavailableError as exc:
         raise HTTPException(
