@@ -848,6 +848,27 @@ charged, or cancelled and not charged (or refunded).
 | CANCELLED (hold expired, guest cancelled) | a late `payment_succeeded` | `reject_payment` → Payment refunds |
 | any | the same event twice | Inbox → once |
 | PENDING | `payment_succeeded`, **confirm raises** | **was: DLQ, money stuck** |
+| CANCELLED | a late `payment_failed` | ignored (nothing to undo) |
+
+Booking never trusts the event's view of the reservation: Payment checked it was PENDING
+*before* charging, but by the time the event arrives it may be cancelled. So the handler
+reads the **current** status from its own DB and decides from that.
+
+**Payment's side** (`booking-events`):
+
+| Event | What happens |
+|---|---|
+| `booking_cancelled`, `refund_cents > 0` | refund Booking's amount, capped at the charge |
+| `booking_cancelled`, `refund_cents = 0` (unpaid) | skipped |
+| `booking_cancelled`, no succeeded charge | refunds nothing |
+| `booking_payment_rejected` | full refund, amount from Payment's own charge row |
+| the same event twice / a crash mid-refund | Inbox → once; reconcile finishes a PENDING refund |
+
+**Across the two topics** — the guest cancels while the charge is still pending, then it
+succeeds: Booking cancels with `refund_cents = 0` (only a CONFIRMED reservation counts as
+paid), so `booking_cancelled` refunds nothing; the late success hits a CANCELLED
+reservation → `reject_payment` → **one** full refund. Never two: "paid or not" comes from
+the reservation's status, and only one path can produce a refund.
 
 **The gap:** a confirm only fails on a DB error — transient. The exception skipped the
 whole handler (no confirm, no reject), the message went to the DLQ, the hold later
