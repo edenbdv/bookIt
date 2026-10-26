@@ -1,6 +1,6 @@
 # BookIt
 
-BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental booking platform: guests search, book, and pay for stays while hosts manage their own listings and reservations. A React frontend is included, but the focus here is backend architecture: payment orchestration, event-driven messaging, and concurrency control.
+BookIt's backend is a set of Python/FastAPI **microservices** behind an API gateway, powering a vacation-rental booking platform: guests search, book and pay for stays, while hosts manage their listings and reservations. A React frontend is included, but the focus is backend architecture: a saga over Kafka, event-driven messaging, and concurrency control.
 
 | Feed | Property detail | My Bookings |
 |---|---|---|
@@ -8,14 +8,26 @@ BookIt's backend is a Python/FastAPI modular monolith powering a vacation-rental
 
 ## Highlights
 
-- **Saga-based payment orchestration:** reservation confirmation is coordinated against an external payment call using idempotency keys, webhook-based async confirmation, and a scheduled Celery/RabbitMQ reconciliation worker as a fallback when webhook delivery fails.
-- **Event-driven notifications:** the outbox pattern plus Kafka decouple reservation state changes from email delivery, so a slow or failing notification path can never block a booking.
-- **Concurrency-safe booking:** a database-level exclusion constraint plus Redis distributed locks prevent double-booking under concurrent requests (load-tested).
-- **JWT auth with refresh-token rotation**, async SQLAlchemy, and 80+ unit tests.
+- **Three services, one gateway:** Booking, Payment and Notification each have their own database and talk only through Kafka events, plus one authenticated sync call. Traefik is the only way in: it routes, checks the guest's JWT (forward auth), rate-limits payments per user and hides `/internal`.
+- **A saga over the network:** a payment's outcome goes Payment → Kafka → Booking (confirm or cancel). A charge that arrives too late is rejected and refunded. Outbox and inbox on every hop; retries before the DLQ, with a replay script.
+- **Reliable payments:** idempotency keys, webhook confirmation, and a reconcile job in Payment's own scheduler for webhooks that never arrive.
+- **Concurrency-safe booking:** a database exclusion constraint plus Redis locks prevent double-booking (load-tested).
+- **JWT auth with refresh-token rotation, service tokens** between services, async SQLAlchemy, **220 tests** (unit and integration against real Postgres, Redis and Kafka).
 
-**Tech stack:** FastAPI · PostgreSQL · async SQLAlchemy · Redis · Kafka · Celery/RabbitMQ · React
+**Tech stack:** FastAPI · PostgreSQL · async SQLAlchemy · Redis · Kafka · Celery/RabbitMQ · Traefik · React
 
-See [app/README.md](app/README.md) for the code layout, or [docs/domain-layer/reservation-lifecycle.md](docs/domain-layer/reservation-lifecycle.md) for how a reservation actually moves end to end -- creation, background jobs, events, and where payment (Epic 8) will eventually plug in.
+See [app/README.md](app/README.md) for the code layout, [docs/domain-layer/reservation-lifecycle.md](docs/domain-layer/reservation-lifecycle.md) for how a reservation moves end to end, and [docs/microservices/epic-11-flow.md](docs/microservices/epic-11-flow.md) for the payment flow across services.
+
+## Architecture
+
+| Service | Owns | Talks via |
+|---|---|---|
+| **Gateway** (Traefik) | the one public port `:8080` | routes `/payments/*` → Payment, the rest → Booking |
+| **Booking** (`app`, `worker`, `beat`, `booking-consumer`) | users, properties, reservations, reviews; `bookit` DB | publishes `booking-events`, consumes `payment-events`, serves `/internal` |
+| **Payment** (`payment-api`, `payment-scheduler`, `payment-consumer`) | charges and refunds; `payments` DB | publishes `payment-events`, consumes `booking-events`, calls Booking's `/internal` |
+| **Notification** (`notification-consumer`) | emails; `notifications` DB | consumes `booking-events` |
+
+How they fit together: [docs/microservices/epic-11-flow.md](docs/microservices/epic-11-flow.md); the gateway: [docs/microservices/api-gateway-basics.md](docs/microservices/api-gateway-basics.md).
 
 ---
 
@@ -51,7 +63,7 @@ Safe to run again at any time — every seeded row has a fixed, hardcoded id, so
 
 **The infrastructure (Postgres, Redis, RabbitMQ, Kafka, MailHog) always runs in Docker, in both workflows below — that never changes.** No native install of any of them, ever.
 
-**What changes between the two workflows is where the app's own processes (`app`, `worker`, `beat`, `notification-consumer`) run** — directly on your machine, or also inside Docker as their own containers. In practice only `app` benefits from staying on the host (auto-reload); the other three are recommended in Docker either way, since none of them has a `--reload` to gain from the host. That choice is what determines how each process addresses the infrastructure:
+**Every service process runs in Docker** (see [Architecture](#architecture)) — since BOOK-67 the gateway only reaches containers. What still runs on your machine are one-off commands: migrations, the seed, `scripts/`, tests. Where something runs is what determines how it addresses the infrastructure:
 
 - Running **inside Docker**, alongside the infra containers → reaches them by container/service name (`db`, `redis`) — Docker's internal network resolves those names, but only for containers on that same network
 - Running **on your machine**, outside Docker → can't use those internal names at all. It has to go through the port each container *published* to your host machine — `localhost:5432`, `localhost:6379`, etc.
@@ -88,6 +100,8 @@ uv run python -m notification.migrate
 uv run python scripts/replay_dlq.py payment-events.dlq --list
 uv run python scripts/replay_dlq.py payment-events.dlq --replay
 ```
+
+**A stuck consumer restarts itself** (BOOK-105): if a consumer stops polling, or stays out of its Kafka group for 2 minutes, it logs `Consumer stuck` and exits, and Docker restarts it. See `docs/microservices/microservices-decisions.md` §22.
 
 **First time only — `kafka-data` volume permissions.** `rabbitmq`'s and `kafka`'s data now persist across restarts via named volumes (`rabbitmq-data`, `kafka-data`) instead of being wiped every `docker compose down`. RabbitMQ's image handles this itself, but Kafka's doesn't: a brand-new `kafka-data` volume is created owned by `root`, while the container runs as `appuser` (uid 1000) — Kafka fails to start (`Error while writing meta.properties file`) until that's fixed once:
 

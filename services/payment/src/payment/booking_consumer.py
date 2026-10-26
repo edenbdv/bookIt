@@ -19,6 +19,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from payment.booking_events import handle_booking_event
 from payment.config import get_payment_settings
 from payment.db import PaymentUnitOfWork, get_payment_engine
+from payment.liveness import Liveness
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +95,13 @@ def make_dead_letter(producer: Producer) -> DeadLetter:
     return dead_letter
 
 
-async def _process_one(consumer: Consumer, dead_letter: DeadLetter) -> None:
+async def _process_one(
+    consumer: Consumer, dead_letter: DeadLetter, liveness: Liveness | None = None
+) -> None:
     # poll() is blocking -- to_thread() so it doesn't stall the only event loop
     msg = await asyncio.to_thread(consumer.poll, 1.0)
+    if liveness is not None:
+        liveness.polled(consumer)  # BOOK-105: the watchdog's view of the loop
     if msg is None:
         return
     if msg.error():
@@ -122,9 +127,11 @@ async def _process_one(consumer: Consumer, dead_letter: DeadLetter) -> None:
 
 async def _run(consumer: Consumer, dead_letter: DeadLetter) -> None:
     consumer.subscribe([TOPIC])
+    liveness = Liveness()
+    liveness.start_watchdog()
     try:
         while True:
-            await _process_one(consumer, dead_letter)
+            await _process_one(consumer, dead_letter, liveness)
     finally:
         consumer.close()
         await get_payment_engine().dispose()

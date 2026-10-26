@@ -19,6 +19,7 @@ from confluent_kafka import Consumer, Producer
 
 from notification.config import get_notification_settings
 from notification.db import get_notification_engine, notification_session
+from notification.liveness import Liveness
 from notification.models import ProcessedNotificationEvent
 
 logger = logging.getLogger(__name__)
@@ -173,9 +174,12 @@ async def _process_one(
     consumer: Consumer,
     handle: Callable[[dict], Awaitable[None]],
     dead_letter: DeadLetter | None = None,
+    liveness: Liveness | None = None,
 ) -> None:
     # poll() is blocking -- to_thread() so it doesn't stall the only event loop
     msg = await asyncio.to_thread(consumer.poll, 1.0)
+    if liveness is not None:
+        liveness.polled(consumer)  # BOOK-105: the watchdog's view of the loop
     if msg is None:
         return
     if msg.error():
@@ -201,9 +205,11 @@ async def _run(
     consumer: Consumer, handle: Callable[[dict], Awaitable[None]], dead_letter: DeadLetter
 ) -> None:
     consumer.subscribe([TOPIC])
+    liveness = Liveness()
+    liveness.start_watchdog()
     try:
         while True:
-            await _process_one(consumer, handle, dead_letter)
+            await _process_one(consumer, handle, dead_letter, liveness)
     finally:
         consumer.close()
         await get_notification_engine().dispose()
