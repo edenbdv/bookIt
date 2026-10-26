@@ -15,10 +15,8 @@ import type {
   User,
 } from '../types'
 
+// BOOK-67: the gateway -- one address for every service (Booking, Payment)
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
-// BOOK-65: Payment is its own service, on its own port -- until the gateway
-// (BOOK-67) puts one address in front of both
-const PAYMENT_API_BASE_URL = import.meta.env.VITE_PAYMENT_API_BASE_URL
 
 export class ApiError extends Error {
   status: number
@@ -50,14 +48,12 @@ export function configureAuth(hooks: AuthHooks | null): void {
 interface RequestOptions {
   /** Skip auth entirely. Set on /auth/* so a 401 there can't recurse into refresh. */
   anonymous?: boolean
-  /** Which service to call -- Booking unless set (BOOK-65: Payment has its own). */
-  baseUrl?: string
 }
 
 async function request<T>(
   path: string,
   init?: RequestInit,
-  { anonymous = false, baseUrl = API_BASE_URL }: RequestOptions = {},
+  { anonymous = false }: RequestOptions = {},
 ): Promise<T> {
   const send = (token: string | null) => {
     const headers: Record<string, string> = {
@@ -67,7 +63,7 @@ async function request<T>(
     // only when a session exists -- public endpoints must keep working
     // logged out, and an empty Bearer header is worse than none
     if (token) headers.Authorization = `Bearer ${token}`
-    return fetch(`${baseUrl}${path}`, { ...init, headers })
+    return fetch(`${API_BASE_URL}${path}`, { ...init, headers })
   }
 
   const token = anonymous ? null : (authHooks?.getAccessToken() ?? null)
@@ -255,9 +251,7 @@ export function payReservation(reservationId: string, idempotencyKey: string): P
       body: JSON.stringify({ reservation_id: reservationId }),
       headers: { 'Idempotency-Key': idempotencyKey },
     },
-    // Payment's own service (BOOK-65). A 401 still renews through Booking's
-    // /auth/refresh, then replays the payment here.
-    { baseUrl: PAYMENT_API_BASE_URL },
+    // the gateway routes /payments to Payment's own service (BOOK-65/67)
   )
 }
 

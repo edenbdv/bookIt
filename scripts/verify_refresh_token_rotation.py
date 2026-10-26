@@ -18,7 +18,7 @@ refreshes landing inside the same Redis round trip can both rotate. That needs
 a Lua compare-and-set; the realistic tab-to-tab gap is milliseconds, which
 case 2 covers.
 
-Requires: `docker compose up -d db redis` and the app running on :8000.
+Requires: `docker compose up -d app gateway` (the API is reached through the gateway, :8080).
 Run with: uv run python scripts/verify_refresh_token_rotation.py
 """
 
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:8080"  # BOOK-67: the gateway
 PASSWORD = "verify-password-123"
 
 _failures: list[str] = []

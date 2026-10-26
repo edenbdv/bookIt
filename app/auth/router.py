@@ -1,6 +1,6 @@
 from collections.abc import Awaitable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from redis.exceptions import RedisError
 
 from app.auth import service
@@ -156,3 +156,11 @@ async def logout_all(current_user: User = Depends(get_current_user)) -> None:
 @router.get("/me", response_model=UserRead)
 async def get_me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
+
+
+@router.get("/verify", status_code=status.HTTP_204_NO_CONTENT)
+async def verify(response: Response, current_user: User = Depends(get_current_user)) -> None:
+    """BOOK-67b: the gateway's forward auth asks this before guest /payments requests.
+    Valid access token -> 204 + X-User-Id (copied onto the forwarded request);
+    anything else -> get_current_user's 401."""
+    response.headers["X-User-Id"] = str(current_user.id)

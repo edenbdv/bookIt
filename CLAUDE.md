@@ -20,11 +20,10 @@ cp .env.example .env
 ### Day-to-day development
 
 ```bash
-docker compose up -d db redis rabbitmq mailhog worker beat   # infra + worker/beat (no --reload to gain from the host)
-uv run uvicorn app.main:app --reload                         # app on the host, auto-reload
+docker compose up -d app gateway worker beat notification-consumer booking-consumer payment-api payment-scheduler payment-consumer kafka-ui mailhog
 ```
 
-The app reads `.env`, which points at `localhost` (infra ports are published by docker-compose). To instead run the whole stack — app included — in Docker (matches production, uses the `Dockerfile`, no auto-reload-on-save from host edits):
+Code is bind-mounted and `app` runs with `--reload`, so edits reload it. The API is only reachable through the gateway at `localhost:8080` (BOOK-67). `app`/`payment-api` publish no ports, so don't run `uvicorn` on the host. Host-side commands (alembic, seed, scripts, tests) read `.env`, which points at `localhost` (infra ports are published). To rebuild the images (to test the `Dockerfile` as in CI):
 
 ```bash
 docker compose up --build

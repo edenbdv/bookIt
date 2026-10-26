@@ -60,18 +60,17 @@ Same infrastructure, same containers — just two different vantage points for r
 
 ### Workflow A — active development (recommended day-to-day)
 
-Infra, `worker`, `beat`, and `notification-consumer` in Docker; `app` on your machine with `uv`, for fast auto-reload on code changes without rebuilding a container each time.
+Everything in Docker, with the code bind-mounted. The `app` container runs `uvicorn --reload`, so saving a file reloads it, just as running the app on the host did.
 
 ```bash
-docker compose up -d db redis rabbitmq kafka kafka-ui mailhog worker beat notification-consumer booking-consumer payment-api payment-scheduler payment-consumer
-uv run uvicorn app.main:app --reload
+docker compose up -d app gateway worker beat notification-consumer booking-consumer payment-api payment-scheduler payment-consumer kafka-ui mailhog
 ```
 
-BOOK-65: Payment is its own service — its API runs on **:8001** (`payment-api`; the frontend
-reads it from `VITE_PAYMENT_API_BASE_URL`), its jobs in `payment-scheduler`, its data in the
-`payments` database. Booking's app on :8000 no longer serves `/payments`.
+**BOOK-67: the API is only reachable through the gateway**, at [http://localhost:8080](http://localhost:8080). It routes `/payments/*` to Payment (`payment-api`) and everything else to Booking (`app`), and it blocks `/internal/*`. Neither service publishes its own port anymore, so `localhost:8000`/`:8001` are refused. The frontend has one base URL (`VITE_API_BASE_URL=http://localhost:8080`). The Traefik dashboard is at [http://localhost:8081](http://localhost:8081). See `docs/microservices/api-gateway-basics.md`.
 
-The app reads `.env` (see `.env.example`), which points at `localhost` — this works because docker-compose publishes each service's port to your host machine (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
+(Running `uvicorn` on the host no longer works with the gateway, which can't reach a process outside Docker, and Payment calls Booking as `http://app:8000`.)
+
+Commands you run on your machine (`alembic`, the seed, `scripts/`, tests) still read `.env`, which points at `localhost`. Docker-compose publishes the infra ports for that (`5432`, `6379`, `5672`, `9094` for Kafka, `1025`/`8025` for MailHog).
 
 **Two databases on the one Postgres server (BOOK-64):** `bookit` for Booking, and `notifications` for the Notification service. Starting `notification-consumer` first runs the one-shot `notification-migrate` service, which creates `notifications` if it's missing and brings it up to date. To run Notification's migrations by hand from your machine instead:
 
@@ -125,7 +124,7 @@ Here the `app` container does **not** use your local `.env` — [docker-compose.
 - App running **on your machine** → talks to infra via `localhost:<published-port>`
 - App running **inside Docker** → talks to infra via the service name (`db`, `redis`), which Docker's internal network resolves for you
 
-That's why there are two different sets of connection strings — `.env` for Workflow A, and the `environment:` block in `docker-compose.yml` for Workflow B — rather than one shared config.
+That's why there are two different sets of connection strings — `.env` for what you run on your machine (migrations, seed, scripts, tests), and the `environment:` block in `docker-compose.yml` for Workflow B — rather than one shared config.
 
 ## Running the tests
 
