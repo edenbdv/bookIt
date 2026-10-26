@@ -40,7 +40,7 @@ from app.reservation.models import Reservation  # noqa: F401
 from app.review.models import Review  # noqa: F401
 
 DATABASE_URL = "postgresql+asyncpg://bookit:bookit@localhost:5432/bookit"
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:8080"  # BOOK-67: the gateway
 DEMO_EMAIL_SUFFIX = "_concurrent_verify@example.com"
 CONCURRENT_REQUESTS = 20
 

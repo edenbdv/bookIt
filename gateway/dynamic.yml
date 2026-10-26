@@ -1,0 +1,64 @@
+# BOOK-67: the gateway's routes, in one place (Traefik's file provider).
+# See docs/microservices/api-gateway-basics.md.
+http:
+  routers:
+    # the catch-all: everything Payment doesn't claim goes to Booking. Except
+    # /internal/*: no route matches it, so the gateway answers 404 -- Payment
+    # calls it directly on the network (app:8000), never through here.
+    booking:
+      entryPoints: [web]
+      rule: PathPrefix(`/`) && !PathPrefix(`/internal`)
+      priority: 1
+      service: booking
+      middlewares: [cors, strip-user-id]
+    # guest routes (POST /payments): a valid JWT, checked by Booking (forward auth)
+    payment:
+      entryPoints: [web]
+      rule: PathPrefix(`/payments`)
+      service: payment
+      middlewares: [cors, strip-user-id, auth, payment-rate-limit]
+    # the provider's webhook: HMAC-signed, no JWT
+    payment-webhook:
+      entryPoints: [web]
+      rule: Path(`/payments/webhook`)
+      priority: 100
+      service: payment
+      middlewares: [strip-user-id]
+
+  middlewares:
+    # CORS for the local frontend, once -- the apps don't add it themselves.
+    # First in the chain: a preflight carries no token, so it must not reach `auth`.
+    cors:
+      headers:
+        accessControlAllowOriginList: [http://localhost:5173, http://127.0.0.1:5173]
+        accessControlAllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        accessControlAllowHeaders: [Authorization, Content-Type, Idempotency-Key]
+        accessControlMaxAge: 600
+        addVaryHeader: true
+    # a client can't send its own X-User-Id (an empty value removes the header)
+    strip-user-id:
+      headers:
+        customRequestHeaders:
+          X-User-Id: ""
+    # ask Booking; on 2xx, copy its X-User-Id onto the forwarded request
+    auth:
+      forwardAuth:
+        address: http://app:8000/auth/verify
+        authResponseHeaders: [X-User-Id]
+    # per guest, after `auth` has set X-User-Id: a burst of 5, then 10/min (429 past it).
+    # In memory -- one gateway is fine; several would need a shared store (Redis).
+    payment-rate-limit:
+      rateLimit:
+        average: 10
+        period: 1m
+        burst: 5
+        sourceCriterion:
+          requestHeaderName: X-User-Id
+
+  services:
+    booking:
+      loadBalancer:
+        servers: [{ url: http://app:8000 }]
+    payment:
+      loadBalancer:
+        servers: [{ url: http://payment-api:8001 }]

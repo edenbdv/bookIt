@@ -535,8 +535,8 @@ after each.
   - **Sync call + service auth** for the reservation read (tie 3, BOOK-66, §17).
   - **Own database** (tie 4, §18).
   - **Own process:** its own app on :8001 and its own scheduler (§20); Booking serves no
-    `/payments` and runs no payment jobs (tie 5); the guest's token checked by Payment
-    itself until the gateway (§19). Booking's and Payment's code import nothing of each other.
+    `/payments` and runs no payment jobs (tie 5); the guest's token checked at the
+    gateway, Payment reads `X-User-Id` (§19). Booking's and Payment's code import nothing of each other.
   - **Packaged** as `services/payment/` (tie 6), same as Notification (§9): own
     `pyproject.toml` (uv workspace member), Dockerfile and image (self-contained, checked
     in CI), compose services on it, the boundary test covering it both ways, unit tests in
@@ -756,7 +756,7 @@ downtime are fine.
 - **A feature flag for the switch** — point the code back at the old database without a
   redeploy if something goes wrong.
 
-## 19. Who is paying: Payment checks the guest's token itself — until the gateway
+## 19. Who is paying: Payment checked the guest's token itself — now the gateway does (BOOK-67)
 
 `POST /payments` used Booking's `get_current_user`, which loads the user row from
 Booking's `users` table — out of reach once Payment is its own service.
@@ -783,9 +783,20 @@ Booking *issues* tokens (needs users and passwords); anyone holding the secret c
   `User` row and lived in Booking's auth. Dropped until the gateway, the usual place for
   it; Payment's idempotency key still absorbs double clicks and retries.
 
-**Handed to BOOK-67:** verify the guest JWT at the gateway and forward the user id;
-per-user rate limiting at the gateway; keep `/internal/*` unreachable from outside
-(BOOK-66); then remove `SECRET_KEY` and `get_guest_id`'s own check from Payment.
+**Done (BOOK-67b):** the gateway checks the guest's JWT through forward auth to Booking's
+`/auth/verify`, then sets `X-User-Id`, stripping any the client sent. `get_guest_id` just
+reads that header; Payment no longer holds `SECRET_KEY`. Why option A (Booking verifies),
+not a JWT plugin or a separate auth service: `api-gateway-basics.md` §9.
+
+Each trade-off above, resolved:
+
+- **Payment holds `SECRET_KEY`** → removed.
+- **No deleted-user check** → `/auth/verify` uses `get_current_user`, so a deleted user's
+  token is rejected right away.
+- **No per-user rate limit** → `payment-rate-limit` at the gateway: a burst of 5, then
+  10/min per user (`api-gateway-basics.md` §5).
+- **`/internal/*` unreachable from outside** → no gateway route matches it, and the
+  services' ports aren't published.
 
 ## 20. Payment's scheduled jobs: a simple loop, not Celery
 

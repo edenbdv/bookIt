@@ -12,7 +12,7 @@ from payment.models import PaymentIdempotencyKey
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.integration.helpers import auth_headers, make_pending_reservation, payment_rows
+from tests.integration.helpers import make_pending_reservation, payment_rows
 
 
 def _unreachable() -> httpx.AsyncClient:
@@ -27,7 +27,8 @@ async def test_booking_down_is_a_503_and_charges_nothing(
     payment_api_client: AsyncClient, db_session: AsyncSession, payment_db_session: AsyncSession
 ) -> None:
     reservation, guest = await make_pending_reservation(db_session)
-    headers = auth_headers(guest, idempotency_key="retry-me")
+    # what the gateway sets after checking the JWT (BOOK-67b)
+    headers = {"X-User-Id": str(guest.id), "Idempotency-Key": "retry-me"}
 
     with patch.object(booking_client, "_client", _unreachable):
         response = await payment_api_client.post(

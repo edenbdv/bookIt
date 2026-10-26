@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx
 from payment.webhook_auth import sign_webhook_payload
 
-BASE_URL = "http://localhost:8001"  # BOOK-65: the webhook is Payment's own service now
+BASE_URL = (
+    "http://localhost:8080"  # BOOK-67: through the gateway, which routes /payments to Payment
+)
 
 
 def send_webhook(

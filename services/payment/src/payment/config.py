@@ -20,8 +20,7 @@ class PaymentSettings(BaseSettings):
     booking_base_url: str = "http://localhost:8000"
     # signs Payment's service tokens to Booking (docs/auth/service-token-basics.md)
     service_token_secret: str = "dev-service-secret-change-me"
-    # verifies guest JWTs -- only until the gateway takes that over (BOOK-67, §19)
-    secret_key: str = "dev-secret-change-me"
+    # signs the service token (no secret_key: the gateway checks guest JWTs, BOOK-67b)
     jwt_algorithm: str = "HS256"
     # verifies the provider's webhook signature (BOOK-55)
     payment_webhook_secret: str = "dev-webhook-secret-change-me"
