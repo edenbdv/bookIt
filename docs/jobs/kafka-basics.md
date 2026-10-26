@@ -276,6 +276,9 @@ application code: catch the error, and explicitly publish to a separate topic yo
 design for the purpose (a `*.dlq` topic) — there's no broker feature waiting to be
 turned on.
 
+Getting a message back out is application code too: `scripts/replay_dlq.py` lists a DLQ
+and sends its messages back to the main topic (BOOK-68, `microservices-decisions.md` §21).
+
 ## 9. KRaft — not central to using Kafka, worth knowing it exists
 
 Kafka historically depended on ZooKeeper for cluster metadata and leader election.

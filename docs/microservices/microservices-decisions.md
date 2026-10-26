@@ -834,12 +834,78 @@ service with two fixed jobs; Celery where it's already earning its place.
 **Revisit when:** Payment needs on-demand background tasks (e.g. a receipt PDF), many
 jobs, or more than one scheduler instance.
 
+## 21. Money consumers: retry, then the DLQ, then replay (BOOK-68)
+
+The saga over the network — every money path has to end consistent: confirmed and
+charged, or cancelled and not charged (or refunded).
+
+**Every case, checked against the code:**
+
+| Reservation | Event | What happens |
+|---|---|---|
+| PENDING | `payment_succeeded` / `payment_failed` | confirm / cancel |
+| CONFIRMED | a late `failed` / `succeeded` | ignored |
+| CANCELLED (hold expired, guest cancelled) | a late `payment_succeeded` | `reject_payment` → Payment refunds |
+| any | the same event twice | Inbox → once |
+| PENDING | `payment_succeeded`, **confirm raises** | **was: DLQ, money stuck** |
+| CANCELLED | a late `payment_failed` | ignored (nothing to undo) |
+
+Booking never trusts the event's view of the reservation: Payment checked it was PENDING
+*before* charging, but by the time the event arrives it may be cancelled. So the handler
+reads the **current** status from its own DB and decides from that.
+
+**Payment's side** (`booking-events`):
+
+| Event | What happens |
+|---|---|
+| `booking_cancelled`, `refund_cents > 0` | refund Booking's amount, capped at the charge |
+| `booking_cancelled`, `refund_cents = 0` (unpaid) | skipped |
+| `booking_cancelled`, no succeeded charge | refunds nothing |
+| `booking_payment_rejected` | full refund, amount from Payment's own charge row |
+| the same event twice / a crash mid-refund | Inbox → once; reconcile finishes a PENDING refund |
+
+**Across the two topics** — the guest cancels while the charge is still pending, then it
+succeeds: Booking cancels with `refund_cents = 0` (only a CONFIRMED reservation counts as
+paid), so `booking_cancelled` refunds nothing; the late success hits a CANCELLED
+reservation → `reject_payment` → **one** full refund. Never two: "paid or not" comes from
+the reservation's status, and only one path can produce a refund.
+
+**The gap:** a confirm only fails on a DB error — transient. The exception skipped the
+whole handler (no confirm, no reject), the message went to the DLQ, the hold later
+expired, and nothing refunded the charge. Payment's consumer had the same gap for
+refunds.
+
+**Chosen: retry before the DLQ** — not "reject on failure", which would refund a guest
+who should just have been confirmed after a passing DB blip.
+
+- Both money consumers (Booking's `payment_consumer`, Payment's `booking_consumer`):
+  **3 tries, 1 s then 2 s**, a fresh unit of work each. Same shape as Notification's
+  `_with_retry`, copied per service (the boundary test).
+- Only **transient** errors (`OperationalError`, `InterfaceError`, `OSError`,
+  `TimeoutError`). A bad message, a bug, an `IntegrityError` fail the same way every
+  time — straight to the DLQ.
+
+**What still reaches the DLQ is replayed by hand:** `scripts/replay_dlq.py <dlq> --list`
+shows each message with its error; once the cause is fixed, `--replay` (or `--offset N`)
+sends it back.
+
+- **The key is restored** — the DLQ drops it; the script re-keys by `reservation_id`.
+- **Each message once** — `--replay` commits in its own `dlq-replay` group, after Kafka
+  confirms.
+- **Safe to replay** — every consumer's Inbox skips what's done; a message that fails
+  again lands back in the DLQ. Replaying to `booking-events` reaches *every* group
+  (Payment and Notification) for the same reason.
+
+**Not covered:** no alert on the DLQ — someone has to look. A consumer that stops
+consuming altogether is BOOK-105.
+
 ---
 
 ## Cheat sheet
 
 | Decision | Choice | Revisit when |
 |---|---|---|
+| Money consumer failures (BOOK-68) | Retry transient errors 3×, then the DLQ, replayed by `scripts/replay_dlq.py` | DLQ alerts are needed |
 | What gets split out | Only Notification and Payment; users / properties / reservations / reviews stay together in Booking | Part of Booking develops its own reason to split |
 | BOOK-64 repo structure | `services/notification/` in the same repo (monorepo) | Separate owners want separate release cycles |
 | "Reservation received" trigger | Kafka `BookingCreated` via the outbox — revisits `worker-decisions.md` §9 | Never back to Celery while Notification is separate |

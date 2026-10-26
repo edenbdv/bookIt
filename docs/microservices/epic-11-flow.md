@@ -85,9 +85,10 @@ outcome event go out.
 - **Don't refund what was never charged.** `BookingCancelled` also fires for
   `PaymentFailed` and for expired unpaid reservations. Payment's consumer must check
   for a succeeded charge first, the same check `cancellation.py` does today.
-- **Charge succeeded, confirm failed.** Today `_refund_and_release()` handles this
-  in-process. In Epic 11, Booking publishes something like `BookingConfirmationFailed`
-  and Payment refunds on it: the saga over the network (BOOK-68).
+- **Charge succeeded, confirm failed.** ✅ Resolved in BOOK-68, without a new event: a
+  reservation already cancelled → `reject_payment` → refund; a confirm that fails on a DB
+  error → retried; anything else → the DLQ, replayed once fixed
+  (`microservices-decisions.md` §21).
 - **Every new consumer needs an Inbox.** Both relays are at-least-once, so the
   `booking` and `payment` consumer groups need the same `event_id` dedup the
   `notifications` group already has (`worker-decisions.md` §13). A duplicate refund is

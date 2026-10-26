@@ -82,6 +82,13 @@ uv run python -m notification.migrate
 
 **Kafka** (BOOK-48) doesn't ship a web UI itself, unlike RabbitMQ — `kafka-ui` is a separate container added for exactly that, browsing topics/partitions/messages at [http://localhost:8090](http://localhost:8090). See `docs/jobs/kafka-basics.md`. The full publish → broker → consume pipeline for `booking-events` is traced end to end in `docs/jobs/booking-events-flow.md`.
 
+**Dead letters** (BOOK-68): a message a consumer couldn't handle, even after retrying, lands in a `.dlq` topic — `payment-events.dlq` (Booking's consumer), `booking-events.payment.dlq` (Payment's), `booking-events.dlq` (Notification's). Look, then send back once the cause is fixed:
+
+```bash
+uv run python scripts/replay_dlq.py payment-events.dlq --list
+uv run python scripts/replay_dlq.py payment-events.dlq --replay
+```
+
 **First time only — `kafka-data` volume permissions.** `rabbitmq`'s and `kafka`'s data now persist across restarts via named volumes (`rabbitmq-data`, `kafka-data`) instead of being wiped every `docker compose down`. RabbitMQ's image handles this itself, but Kafka's doesn't: a brand-new `kafka-data` volume is created owned by `root`, while the container runs as `appuser` (uid 1000) — Kafka fails to start (`Error while writing meta.properties file`) until that's fixed once:
 
 ```bash
