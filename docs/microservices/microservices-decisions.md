@@ -897,7 +897,38 @@ sends it back.
   (Payment and Notification) for the same reason.
 
 **Not covered:** no alert on the DLQ — someone has to look. A consumer that stops
-consuming altogether is BOOK-105.
+consuming altogether is BOOK-105 (§22).
+
+## 22. A stuck consumer restarts itself (BOOK-105)
+
+**The problem (seen 2026-10-24):** Kafka was starved for a moment and dropped its
+consumer groups; `booking-consumer` never rejoined. The process stayed up, so
+`restart: unless-stopped` never fired — a declined payment's reservation sat PENDING for
+2+ hours until a manual restart.
+
+**Chosen: a watchdog thread in each consumer** (`liveness.py` — Booking's in
+`app/core/`, a copy each in Payment and Notification, per the boundary test). Every 10 s
+it checks:
+
+| Check | Limit | Catches |
+|---|---|---|
+| The loop polled recently | 30 s (Notification: 60 s — an email's retries wait ~15 s) | a hung handler or thread |
+| The consumer holds partitions | not empty for more than 120 s | out of its group — the 2026-10-24 stall |
+
+Either fails → log `CRITICAL`, `os._exit(1)` → Docker restarts it → the new process
+rejoins and continues from the last committed offset. Nothing is lost: offsets are
+committed only after handling.
+
+**Why exit, not a healthcheck:** compose never restarts an *unhealthy* container on its
+own; that would need an extra "autoheal" container with the Docker socket. Exiting reuses
+the restart policy that's already there.
+
+**Known effects:** a killed process doesn't leave its group cleanly, so for ~45 s (the
+session timeout) Kafka shows a ghost member while it rebalances. During a long Kafka
+outage a consumer restarts every ~2 min until Kafka is back — harmless.
+
+**Checked live:** Kafka paused for 3.5 min → all three consumers exited and came back,
+each group ending with one member on all 3 partitions.
 
 ---
 
@@ -905,6 +936,7 @@ consuming altogether is BOOK-105.
 
 | Decision | Choice | Revisit when |
 |---|---|---|
+| A stuck consumer (BOOK-105) | A watchdog exits the process (no poll for 30 s, or out of its group for 120 s); Docker restarts it | Running on Kubernetes — a liveness probe replaces it |
 | Money consumer failures (BOOK-68) | Retry transient errors 3×, then the DLQ, replayed by `scripts/replay_dlq.py` | DLQ alerts are needed |
 | What gets split out | Only Notification and Payment; users / properties / reservations / reviews stay together in Booking | Part of Booking develops its own reason to split |
 | BOOK-64 repo structure | `services/notification/` in the same repo (monorepo) | Separate owners want separate release cycles |
